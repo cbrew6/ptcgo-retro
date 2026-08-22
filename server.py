@@ -40,6 +40,7 @@ import os
 import socket
 import sqlite3
 import ssl
+import random
 import struct
 import threading
 import time
@@ -516,6 +517,43 @@ def store_decks():
         os.replace(tmp, DECKS_PATH)
     except Exception as exc:
         log.error("could not save decks: %s", exc)
+
+
+# --------------------------------------------------------------------------
+# products
+# --------------------------------------------------------------------------
+
+ATTR_SET, ATTR_CARD_NAME, ATTR_CARD_NUM = 200580, 200630, 200780
+PACK_SIZE = 10                     # a real booster; bundles get the same
+
+_by_guid = None
+
+
+def archetype_by_guid(guid):
+    """Archetype lookup by the GUID string the client sends."""
+    global _by_guid
+    if _by_guid is None:
+        _by_guid = {uuid_to_guid_str(a["lo"], a["hi"]): a for a in load_cards()}
+    return _by_guid.get(guid)
+
+
+def pack_contents(set_key):
+    """Cards a product from this set opens into.
+
+    Only archetypes carrying a collector number count, which keeps products
+    themselves - packs, bundles, deck boxes, all of which live in the same set
+    files - out of the contents. Without that filter a pack could contain
+    another pack.
+    """
+    if not set_key:
+        return []
+    load_cards()                      # populates _cards_by_set
+    pool = [a for a in (_cards_by_set or {}).get(set_key, [])
+            if {x["n"]: (x.get("v") or {}) for x in a["attrs"]}
+            .get(ATTR_CARD_NUM, {}).get("i") is not None]
+    if not pool:
+        return []
+    return random.sample(pool, min(PACK_SIZE, len(pool)))
 
 
 _family_names = None
@@ -1009,6 +1047,65 @@ class GameSession:
             "deckID": deck_id,
             "deck": deck,
             "validationResults": deck_validation(deck_id),
+        }), request_id)
+
+    def _item(self, archetype_guid, name=None):
+        """dwd.core.collection.Item."""
+        return {
+            "itemID": str(uuid.uuid4()),
+            "ownerID": self.account["accountID"] if self.account else ZERO_GUID,
+            "archetypeID": archetype_guid,
+            "lockID": None,
+            "created": int(time.time() * 1000),
+            "isTradable": True,
+            "name": name or "",
+            "invoiceID": None,
+            "attributes": [],
+        }
+
+    def on_OpenProductsByArchetypeID(self, value, request_id):
+        # Opening a pack. The client shows the pack-opening sequence when
+        # Products[0] has one, and otherwise a plain "you received" dialog
+        # listing Items - so both arrays have to be populated or nothing
+        # happens.
+        #
+        # Contents are drawn from the product's own set (attribute 200580):
+        # a TK7 bundle opens TK7A cards, an XY6 booster opens XY6 cards. Only
+        # archetypes with a collector number are eligible, so a pack can never
+        # contain another pack.
+        products = (value or {}).get("products") or []
+        if not products:
+            self.send("ProductsOpenedFailure",
+                      {"error": {"id": "no product specified"}}, request_id)
+            return
+
+        opened, consumed = [], []
+        for guid in products:
+            product = archetype_by_guid(guid)
+            if product is None:
+                log.warning("[game %s] unknown product %s", self.peer, guid)
+                continue
+            attrs = {x["n"]: (x.get("v") or {}) for x in product["attrs"]}
+            set_key = attrs.get(ATTR_SET, {}).get("s")
+            consumed.append(self._item(guid, attrs.get(ATTR_NAME_KEY, {}).get("s")))
+            for card in pack_contents(set_key):
+                cattrs = {x["n"]: (x.get("v") or {}) for x in card["attrs"]}
+                opened.append(self._item(
+                    uuid_to_guid_str(card["lo"], card["hi"]),
+                    cattrs.get(ATTR_CARD_NAME, {}).get("s")))
+
+        if not consumed:
+            self.send("ProductsOpenedFailure",
+                      {"error": {"id": "unknown product"}}, request_id)
+            return
+
+        log.info("[game %s] opened %d product(s) -> %d card(s)",
+                 self.peer, len(consumed), len(opened))
+        write_frame(self.sock, msg("ProductsOpened", {
+            "accountID": self.account["accountID"] if self.account else ZERO_GUID,
+            "items": opened,
+            "products": consumed,
+            "additionalData": {},
         }), request_id)
 
     def on_ValidateDecks(self, value, request_id):
