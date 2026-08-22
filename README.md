@@ -359,6 +359,49 @@ evidence about stamp variants and no evidence at all about alternate arts.
 
 ## To do
 
+### What a donor's client would give us — the big one
+
+**The installer only ships a baseline.** The client downloads the real content
+on first login and caches it locally, so a machine that actually played the
+game holds content that no longer exists anywhere else.
+
+Verified on this install — the runtime folder is
+
+```
+%USERPROFILE%\AppData\LocalLow\The Pokémon Company International\Pokemon Trading Card Game Online```
+
+| Item | What it is | Baseline here |
+| --- | --- | --- |
+| `archetypes\` | One file per card. **Full definitions** — attack costs, damage, game text, ability IDs, all JSON | 9,942 |
+| `bundleCache\` | Downloaded art: card faces, foil masks, set symbols, product images | 51 |
+| `LocalizationDB-UTF16.db` | Card names, attack text, set names | through SM6 |
+| `AttributeDB.db` | Attribute definitions | — |
+
+A 2023 player would have far more of the first two.
+
+**The client code is not the limitation.** The assemblies are dated January
+2023 — the final build — and contain `RareHoloVMAX`, `RareHoloVSTAR`,
+`VSTARDamageColor`, `RareRadiant`, `Foil_Radiant`, `FUSION_STRIKE` and the
+Tag Team abilities. Sword & Shield mechanics are already implemented; only the
+data and art are missing. Card behaviour is data-driven JSON in the archetype
+files, so restoring the data restores the cards.
+
+Scarlet & Violet is a different matter: PTCGO's final content was Crown Zenith
+(January 2023), matching the build date exactly, and it shut down before SV
+ever arrived. Those cards were never in this game.
+
+Ask a donor to run `tools/find_cache.ps1`, or just this:
+
+```powershell
+$p = Get-Item "$env:USERPROFILE\AppData\LocalLow\The Pok*mon Company International\Pokemon Trading Card Game Online"
+"archetypes:  " + (Get-ChildItem "$($p.FullName)rchetypes").Count
+"bundleCache: " + (Get-ChildItem "$($p.FullName)undleCache").Count
+```
+
+Baseline is 9,942 and 51. Meaningfully higher means they have the real thing.
+They should zip that folder minus `cake.cfg` and `output_log.txt` — local
+config and logs, not needed, and the only files there with anything personal.
+
 ### Original bundles (still worth having)
 
 Card art is done, but the originals would still be an upgrade: authentic scans at the

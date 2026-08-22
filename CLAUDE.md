@@ -214,6 +214,30 @@ Useful attribute keys: `200580` set code, `200630` name, `200550` rarity,
 `200490` HP, `200540` stage, `10140` localized-name key, `201420` league order
 (scenarios).
 
+## The installer is only a baseline
+
+Card data through SM4, localization through SM6, four set icons. Everything
+else came over the wire on first login and was cached under
+
+    %USERPROFILE%\AppData\LocalLow\The Pokémon Company International        Pokemon Trading Card Game Online        archetypes\          one file per card, FULL definitions (attack
+                             costs, damage, gameText, abilityID - all JSON)
+        bundleCache\         card faces, foil masks, set symbols, products
+        LocalizationDB-*.db  names and attack text
+        AttributeDB.db       attribute definitions
+
+Baseline here: 9,942 archetypes, 51 bundles. A live player has far more.
+
+Do NOT conclude that later sets are unaddable because the client is old. The
+assemblies are January 2023 - the final build - and carry RareHoloVMAX,
+RareHoloVSTAR, VSTARDamageColor, RareRadiant, Foil_Radiant, FUSION_STRIKE and
+Tag Team abilities. SWSH mechanics are implemented; only data and art are
+missing, and card behaviour is data-driven JSON. I asserted the opposite from
+the localization table alone, which only showed what the BASELINE knows, not
+what the code supports. Check the binaries before ruling something out.
+
+Scarlet & Violet genuinely never existed here: PTCGO's last content was Crown
+Zenith, January 2023, matching the build date.
+
 ## Card art
 
 Only **5 of 62 sets** ship art locally (XY12 + the four energy sets). The rest,
