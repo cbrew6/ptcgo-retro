@@ -22,8 +22,9 @@ details or hardcoded ports.
 builder. UI text renders. The collection holds 4 of every card — 9,940 archetypes
 across all 62 sets. The session stays connected with no disconnects.
 
-**Not working:** card images (see [Card art](#card-art), the main open problem) and
-gameplay — the match engine is not implemented.
+**Not working:** card art for 57 of 62 sets, and menu backgrounds — both were streamed
+from the CDN and never cached locally (see [Card art](#card-art)). Gameplay is not
+implemented.
 
 | Stage | State |
 | --- | --- |
@@ -36,7 +37,10 @@ gameplay — the match engine is not implemented.
 | Localization (labels) | Working — 27,550 strings served |
 | Card database | Working — 9,940 cards, all 62 sets |
 | Collection | Working — 4 of every card |
-| Card art / bundles | Partial — only 5 of 62 sets have art on disk |
+| Asset bundles | Working — 233 bundles, 6,529 assets indexed |
+| Cosmetics (boxes, sleeves, coins, avatars) | Working |
+| Card art | Partial — energy sets + XY12 only; rest was CDN-hosted |
+| Backgrounds | Absent — CDN-hosted, no bundle ships locally |
 | Trainer Challenge | Stub scenarios only |
 | Matches / gameplay | Not implemented |
 

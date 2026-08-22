@@ -203,7 +203,12 @@ bundles into StreamingAssets\en_US\ makes them available with no code change.
 ## Status / next
 
 Working: login (DeviceID + sha1), full load to main menu, 27,550 localized
-strings, 62 sets, 9,940 cards, 4 of each in the collection.
+strings, 62 sets, 9,940 cards, 4 of each in the collection, and all 233 local
+asset bundles (deck boxes, sleeves, coins, avatars, packs, set icons, energy
+and XY12 card art all confirmed rendering).
+
+Absent, not broken: card art for the other 57 sets, and menu backgrounds
+(`Background{resolution}/Background{crRelease}` - no such bundle ships).
 
 Next: card art (see above), then deck saving/loading, then gameplay (the match
 engine — much larger; `dwd.core.match` namespaces).
