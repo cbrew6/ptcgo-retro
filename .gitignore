@@ -20,3 +20,5 @@ __pycache__/
 # Build artifacts / third-party tooling for the loose-art patch
 patch/*.dll
 patch/cecil/
+tools/setcache/
+tools/fetch_all_art.log
