@@ -219,7 +219,9 @@ Useful attribute keys: `200580` set code, `200630` name, `200550` rarity,
 Card data through SM4, localization through SM6, four set icons. Everything
 else came over the wire on first login and was cached under
 
-    %USERPROFILE%\AppData\LocalLow\The Pokémon Company International        Pokemon Trading Card Game Online        archetypes\          one file per card, FULL definitions (attack
+    %USERPROFILE%\AppData\LocalLow\The Pokémon Company International\
+        Pokemon Trading Card Game Online\
+        archetypes\          one file per card, FULL definitions (attack
                              costs, damage, gameText, abilityID - all JSON)
         bundleCache\         card faces, foil masks, set symbols, products
         LocalizationDB-*.db  names and attack text

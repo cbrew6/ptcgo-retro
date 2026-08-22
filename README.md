@@ -368,7 +368,9 @@ game holds content that no longer exists anywhere else.
 Verified on this install — the runtime folder is
 
 ```
-%USERPROFILE%\AppData\LocalLow\The Pokémon Company International\Pokemon Trading Card Game Online```
+%USERPROFILE%\AppData\LocalLow\The Pokémon Company International\
+    Pokemon Trading Card Game Online\
+```
 
 | Item | What it is | Baseline here |
 | --- | --- | --- |
