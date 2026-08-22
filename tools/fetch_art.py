@@ -52,7 +52,53 @@ IMAGE = ("https://limitlesstcg.nyc3.cdn.digitaloceanspaces.com"
 UA = "Mozilla/5.0 (compatible; ptcgo-local personal archive)"
 DELAY = 2.0          # be polite to a community-run site
 
+# Geometry measured from the client's own shipped XY12 textures (DXT1,
+# 1024x1024): the card does NOT fill the square. It sits in a centred column
+# spanning x=110..912 (803px wide) over the full 1024 height, with white
+# padding either side. The display quad crops to that column, so a full-bleed
+# image gets magnified and its left/right edges cut off - which is exactly the
+# "stretched wide" symptom.
+#
+# Reproduce that layout rather than any theoretical card aspect: whatever the
+# game ships is by definition what renders correctly.
+# The client's own art is ~0.78 aspect (yellow border spans x=111..909 over the
+# full 1024 height). Source images elsewhere are usually a true card scan at
+# ~0.719. Do NOT stretch one to the other - scaling a 0.719 image into the
+# 0.78 column makes every card render ~9% too wide.
+#
+# Instead: fit to full height, keep the source's own aspect, centre it, and let
+# white padding take up the slack. The quad crops to roughly the card column,
+# so a slightly narrower card sits inside that crop at correct proportions.
+CARD_TEXTURE = (1024, 1024)
+PAD_COLOUR = (255, 255, 255, 255)
+
 ATTR_SET, ATTR_NAME, ATTR_NUM = 200580, 200630, 200780
+
+# Foil mask layers, requested as "{set}_{mask}/{number}" (and a _Foil2 variant
+# for the second layer). These are masks, not artwork: with none bound the foil
+# shader samples leftover reflection state and paints a stray sheen across the
+# middle of the card. A fully transparent black mask means "no foil here",
+# which removes the artefact.
+FOIL_MASKS = ("wp_std", "wp_ph", "wp_pcd", "wp_secondary")
+NEUTRAL_FOIL = (0, 0, 0, 0)
+
+
+def write_foil_masks(ptcgo_set, number):
+    """Blank out every foil layer for one card."""
+    try:
+        from PIL import Image
+    except ImportError:
+        return 0
+    blank = Image.new("RGBA", CARD_TEXTURE, NEUTRAL_FOIL)
+    written = 0
+    for mask in FOIL_MASKS:
+        for suffix in ("", "_Foil2"):
+            name = "%s_%s%s_%03d.png" % (ptcgo_set, mask, suffix, number)
+            path = os.path.join(LOOSE_ART, name)
+            if not os.path.exists(path):
+                blank.save(path, format="PNG")
+                written += 1
+    return written
 
 
 def local_card(ptcgo_set, number):
@@ -67,6 +113,29 @@ def local_card(ptcgo_set, number):
         if at.get(ATTR_NUM, {}).get("i") == number:
             return at.get(ATTR_NAME, {}).get("s")
     return None
+
+
+def to_card_texture(data):
+    """Lay the card out the way the client's own textures are laid out.
+
+    1024x1024 canvas, card scaled into the centred column x=110..912 over full
+    height, white either side. See the CARD_* constants for why.
+    """
+    try:
+        from PIL import Image
+    except ImportError:
+        print("    (Pillow not installed - saving as-is; art will look wrong. "
+              "pip install Pillow)")
+        return data
+    import io
+    src = Image.open(io.BytesIO(data)).convert("RGBA")
+    tw, th = CARD_TEXTURE
+    w = max(1, min(tw, int(round(th * src.width / float(src.height)))))
+    canvas = Image.new("RGBA", CARD_TEXTURE, PAD_COLOUR)
+    canvas.paste(src.resize((w, th), Image.LANCZOS), ((tw - w) // 2, 0))
+    buf = io.BytesIO()
+    canvas.save(buf, format="PNG")
+    return buf.getvalue()
 
 
 def get(url, binary=False):
@@ -107,12 +176,15 @@ def fetch(ptcgo_set, number):
         print("  %s/%03d  image failed: %s" % (ptcgo_set, number, exc))
         return False
 
+    img = to_card_texture(img)
     os.makedirs(LOOSE_ART, exist_ok=True)
     out = os.path.join(LOOSE_ART, "%s_%03d.png" % (ptcgo_set, number))
     with open(out, "wb") as fh:
         fh.write(img)
-    print("  %s/%03d  %-22s -> %s (%d KB)"
-          % (ptcgo_set, number, expected, os.path.basename(out), len(img) // 1024))
+    n = write_foil_masks(ptcgo_set, number)
+    print("  %s/%03d  %-22s -> %s (%d KB)%s"
+          % (ptcgo_set, number, expected, os.path.basename(out), len(img) // 1024,
+             ("  +%d foil masks" % n) if n else ""))
     return True
 
 
