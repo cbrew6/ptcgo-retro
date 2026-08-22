@@ -663,6 +663,19 @@ class Accounts:
             self.data[username.lower()]["password"] = password
             self._save()
 
+    def visited_scenes(self, username):
+        return self.data[username.lower()].get("visitedScenes") or []
+
+    def add_visited_scene(self, username, scene):
+        with self.lock:
+            account = self.data[username.lower()]
+            scenes = account.setdefault("visitedScenes", [])
+            if scene not in scenes:
+                scenes.append(scene)
+                self._save()
+                return True
+            return False
+
     def _save(self):
         tmp = self.path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as fh:
@@ -671,6 +684,60 @@ class Accounts:
 
 
 ACCOUNTS = Accounts(os.path.join(HERE, "accounts.json"))
+
+# --------------------------------------------------------------------------
+# onboarding
+# --------------------------------------------------------------------------
+#
+# The client decides you are a new user by asking its own account attributes:
+#
+#     VisitedScenesDataProvider.HasVisitedScene(scene):
+#         string[] value = userModel.A.Attributes.GetAttribute(P.F.c).get_Value();
+#         return value.Contains(scene.ToString());
+#
+# and it reports visits back with UserHasVisitedScene, which the server is
+# meant to persist. We were dropping those and sending "attributes": {}, so
+# every login looked like a first login: the account upsell, the "Have Fun!"
+# decline dialog, and the forced walk into Trainer Challenge.
+#
+# P.F.c is the AttributeDefinition<string[]> at 202101. The decompiler folds
+# several P.F fields onto the name "c" (they differ only by case), so the id
+# is picked by TYPE rather than position: HasVisitedScene calls get_Value()
+# into a string[], and 202101 is the only string[] definition named c.
+# 201730, 10910, 201545, 10860 and 202200 are the other string[] fields, under
+# different names - if 202101 turns out to be wrong, they are the candidates.
+ATTR_VISITED_SCENES = 202101
+
+# VisitedScenesDataProvider.VisitedScene, compared by ToString().
+VISITED_SCENES = ("TrainerChallenge", "Versus", "Deckbuilder",
+                  "TCGoldComplete", "TCLoss", "VersusUpdate")
+
+SCENE_BY_FLAG = {1: "TrainerChallenge", 2: "Versus", 4: "Deckbuilder",
+                 8: "TCGoldComplete", 16: "TCLoss", 32: "VersusUpdate"}
+
+# Treat every account as having seen everything. This is a local sandbox with
+# one player who has already been through the intro; the onboarding only
+# slows down getting to a game.
+SEED_ALL_SCENES_VISITED = True
+
+
+def account_attributes(username):
+    """The account attribute list sent at login.
+
+    MutableAttributes deserialises from either an object or an array of
+    attribute objects, and each is {name, value, originalValue} - the same
+    shape the client uses when it sends deck attributes back to us.
+    """
+    scenes = list(ACCOUNTS.visited_scenes(username))
+    if SEED_ALL_SCENES_VISITED:
+        for scene in VISITED_SCENES:
+            if scene not in scenes:
+                scenes.append(scene)
+    return [{
+        "name": ATTR_VISITED_SCENES,
+        "value": scenes,
+        "originalValue": scenes,
+    }]
 
 
 # --------------------------------------------------------------------------
@@ -1036,7 +1103,15 @@ class GameSession:
                            body, request_id)
 
     def on_UserHasVisitedScene(self, value, request_id):
-        pass  # client telemetry; no reply expected
+        # Not telemetry: this is how the account records that the intro for a
+        # screen has been seen, and the client reads it back from its own
+        # account attributes on the next login. No reply expected.
+        flag = (value or {}).get("scene")
+        scene = SCENE_BY_FLAG.get(flag)
+        if scene and self.username:
+            if ACCOUNTS.add_visited_scene(self.username, scene):
+                log.info("[game %s] %s has now visited %s",
+                         self.peer, self.username, scene)
 
     def on_GetCollectionCount(self, value, request_id):
         # JSON, not protobuf. A dwd.Protobuf.Collection.CollectionCountFound
@@ -1196,6 +1271,9 @@ class GameSession:
 
     def _succeed(self, username, request_id):
         self.authenticated = True
+        # Pin it here rather than relying on whichever auth path got us here,
+        # so later handlers (visited scenes) always know who this is.
+        self.username = username
         log.info("[game %s] AUTH OK for %s", self.peer, username)
         self.send("AuthenticationSuccessful", {
             "account": {
@@ -1203,10 +1281,10 @@ class GameSession:
                 "accountID": self.account["accountID"],
                 # Must be present and non-null: the client wraps this in
                 # ReadOnlyAttributes and reads user flags straight off it.
-                # An empty set is fine - MutableAttributes.GetAttribute falls
-                # back to each definition's registered default. Passing null
-                # here throws NullReferenceException in the user-flags ctor.
-                "attributes": {},
+                # Passing null throws NullReferenceException in the user-flags
+                # constructor. It is no longer empty - see account_attributes,
+                # which is what tells the client this is not a brand-new user.
+                "attributes": account_attributes(username),
             },
             "sessionID": self.session_id,
         }, request_id)
