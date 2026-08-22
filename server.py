@@ -377,6 +377,45 @@ def build_collection():
     return _collection
 
 
+_format_legality = None
+
+# ArchFormatLegality.FormatLegality is a bool[] indexed by FormatType:
+#   0 Standard ("Modified")   1 Expanded   2 Legacy   3 Unlimited
+# The client reads 0..2 unconditionally, so the array must have at least
+# three entries or it throws IndexOutOfRange inside the message handler.
+FORMAT_COUNT = 4
+
+# formatLegalityTime is "legal from this moment", checked as
+#   ServerTimeNow() >= WargTime.FromMilliseconds(value)
+# but only recorded when the value is >= 0. Sending -1 skips the entry
+# entirely, and isTimeLegal() returns true when there is no entry - so the
+# legality answer never depends on our clock agreeing with the client's.
+NEVER_TIME_LOCKED = -1
+
+
+def build_format_legality():
+    """Every archetype legal in every format.
+
+    A deliberate deviation: real legality was rotation data the server owned,
+    and it is gone. Everything-legal is the useful answer for a local sandbox,
+    and the alternative - inventing a rotation - would silently make cards
+    unplayable for reasons no one could check.
+    """
+    global _format_legality
+    if _format_legality is None:
+        _format_legality = [
+            {
+                "archetypeID": uuid_to_guid_str(a["lo"], a["hi"]),
+                "formatLegality": [True] * FORMAT_COUNT,
+                "formatLegalityTime": [NEVER_TIME_LOCKED] * FORMAT_COUNT,
+            }
+            for a in load_cards()
+        ]
+        log.info("built format legality: %d archetypes, all formats",
+                 len(_format_legality))
+    return _format_legality
+
+
 def protobuf_message(type_name, body=b""):
     """Wrap `body` in a ProtoMessage naming `type_name`."""
     name = type_name.encode("utf-8")
@@ -704,7 +743,20 @@ class GameSession:
         self.send("ArchetypeIDsByFamily", {"familyMap": {}}, request_id)
 
     def on_GetFormatLegalityForArchetypes(self, value, request_id):
-        self.send("FormatLegalityForArchetypes", {"archLegality": []}, request_id)
+        # Must not be empty. FormatLegalityProvider.handle() reads indexes
+        # 0, 1 and 2 of every entry unconditionally, then sets Initialized =
+        # true whether or not the list had anything in it. An empty list
+        # therefore leaves the provider "ready" with empty dictionaries, so
+        # IsModifiedLegal/IsExpandedLegal/IsLegacyLegal answer false for every
+        # card in the game - which is what makes the deck builder look empty
+        # and warns on every card you try to add.
+        legality = build_format_legality()
+        log.info("[game %s] -> FormatLegalityForArchetypes (%d entries)",
+                 self.peer, len(legality))
+        write_frame(self.sock,
+                    msg("FormatLegalityForArchetypes",
+                        {"archLegality": legality}),
+                    request_id)
 
     def send_protobuf(self, type_name, body=b"", request_id=0):
         log.info("[game %s] -> [protobuf] %s", self.peer, type_name)
@@ -788,6 +840,18 @@ class GameSession:
         # DynamicVersions model lands in the data manager. Without a reply the
         # loading screen never advances.
         self.send("DynamicVersions", {"versionData": {}}, request_id)
+
+    def on_SetDeckShareMode(self, value, request_id):
+        # Fire-and-forget from the deck builder; the client does not wait for
+        # anything back. Handled only so it stops being logged as unhandled.
+        pass
+
+    def on_GetThemeDeckContents(self, value, request_id):
+        # ThemeDeckContentsMap.themeDeckContentsMap is
+        # Dictionary<ArchetypeID, ArchetypeID[]>, read by lookup, so an empty
+        # map is safe - it just means no theme deck has known contents.
+        self.send("ThemeDeckContentsMap", {"themeDeckContentsMap": {}},
+                  request_id)
 
     def on_GetArchetypeCorrections(self, value, request_id):
         self.send("ArchetypeCorrections", {"correctionMap": {}}, request_id)
