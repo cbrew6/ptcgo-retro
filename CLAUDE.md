@@ -76,6 +76,7 @@ normally. Everything is logged — inbound frames, outbound frames, and
   and nothing renders.
 - `patch/` — loose-art patch (Mono.Cecil IL injection). See `patch/README.md`.
 - `tools/fetch_all_art.py` — bulk art fetcher; all 4,532 cards, resumable.
+- `tools/fix_missing_art.py` — variant printings + Trainer Kit reprints.
 - `tools/fetch_art.py` — single-card fetcher (`--from-log`), kept for one-offs.
 - `tools/find_cache.ps1` — scans all drives for a donor `bundleCache`.
 - `build_cache.py` — writes an on-disk archetype cache. **Currently dead
@@ -246,6 +247,26 @@ Three things that bit during that run, all worth remembering:
   spell out gender symbols, allow prefix/suffix - but never let a rank
   marker (`ex`, `gx`, `break`) be the only difference, or Charizard gets
   Charizard-EX's art.
+
+**Attribute 10020 is an asset-name override.** An archetype carrying it makes
+the client request `XY4/065xy` instead of `XY4/065`. These are variant
+printings: same illustration, different foil treatment (Charizard in
+Evolutions has three - AngledPillars / Galaxy / Rainbow). Two consequences,
+both of which bit:
+
+- Keying art on the card number makes these archetypes look like duplicates,
+  so they get silently dropped and the card renders blank.
+- The real asset name is `attr 10020 or "%03d" % number`, never just the
+  number. 335 of 9,135 asset requests use an override.
+
+The client's miss log is the fastest way to find this class of bug: it prints
+the exact string it wanted, and `XY4/065xy` explains itself immediately where
+staring at card data does not.
+
+`tools/fix_missing_art.py` handles overrides and the Trainer Kits (TK5A-TK10B,
+reprints that no public database carries as sets - resolved by name against art
+already on disk, preferring the same era, since a reprint usually keeps its
+original illustration).
 
 `tools/fetch_art.py --from-log` reads the client's own miss log and fetches
 only the cards actually encountered. It name-checks every download against

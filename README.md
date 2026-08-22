@@ -34,7 +34,7 @@ cosmetics and card art. The collection holds 4 of every card.
 | Collection | Working — 4 of every card |
 | Asset bundles | Working — 233 bundles, 18,857 asset names indexed |
 | Cosmetics (boxes, sleeves, coins, packs, logos) | Working |
-| Card art | Working. All 4,532 cards have art |
+| Card art | Working. 4,957 assets; every card the client requests |
 | Backgrounds | Working via loose-art patch (one file) |
 | Foil / holo | Authentic for XY12 only; masks elsewhere absent |
 | Avatar items | **Not recoverable** — definitions never shipped |
@@ -80,7 +80,9 @@ for anything unimplemented. That log is the main tool for finding what to build 
 | `asset_server.py` | CDN stand-in on **8081** (plain HTTP): manifest, config, bundles |
 | `bundle_index.py` | Extracts asset names from the shipped `.unity3d` bundles |
 | `patch/` | Loose-art patch — makes the client load PNGs ([details](patch/README.md)) |
-| `tools/fetch_art.py` | Name-verified card art fetcher |
+| `tools/fetch_all_art.py` | Bulk art fetcher, resumable |
+| `tools/fix_missing_art.py` | Fills variant printings and Trainer Kit reprints |
+| `tools/fetch_art.py` | Single-card fetcher, kept for one-offs |
 | `tools/find_cache.ps1` | Scans all drives for a donor `bundleCache` |
 | `test_client.py` | Handshake replay for testing without the game |
 | `build_cache.py` | **Dead code** — targets a class this build never constructs |
@@ -205,7 +207,7 @@ The client only loads card art from Unity asset bundles, and the originals are g
 | `BW10/008` | `BW10_008.png` |
 | `BW10_wp_ph/008` | `BW10_wp_ph_008.png` (foil mask) |
 
-**Every card already has art.** `tools/fetch_all_art.py` downloaded all 4,532 of them
+**Every card already has art.** `tools/fetch_all_art.py` downloaded 4,532 of them
 in 40 minutes. That is 4,532 files rather than 9,940 because art is keyed by set and
 number, so reprints and reverse holos share one picture.
 
@@ -228,6 +230,21 @@ no API calls at all.
 Unresolved assets are still logged as `[LooseArt] miss: <request>`, so if anything is
 ever missing the client tells you exactly what it wants; `tools/fetch_art.py --from-log`
 fetches just those.
+
+### Asset names are not always the card number
+
+One card number can have several printings, and an archetype may carry **attribute
+10020**, an asset-name override. The client then asks for `XY4/065xy` rather than
+`XY4/065`. These are the same illustration under a different foil treatment — Charizard
+in Evolutions has three, differing only in foil pattern (AngledPillars / Galaxy /
+Rainbow) — so the base card's art is the correct art for them.
+
+This is easy to miss twice over: keying art on the card number makes those archetypes
+look like duplicates, so they get skipped, and the resulting hole only shows up on the
+handful of cards that have variants. `tools/fix_missing_art.py` resolves them, along with
+the Trainer Kit sets (TK5A–TK10B), whose cards are reprints that no public database
+carries — they are matched by name against art already on disk, preferring a printing
+from the same era.
 
 Images are laid out to match the client's own textures: **1024×1024, card scaled to full
 height at its native aspect, centred, white padding**. Do not stretch to fill — see
@@ -276,6 +293,16 @@ unguarded and throws otherwise, killing the connection.
 **Downloaded art is a third-party scan**, not the client's own texture. It renders at
 the right geometry and reads correctly, but it is not byte-identical to what shipped.
 Original bundles would still be an upgrade — see To do.
+
+**What is still without art** (244 of 9,135 asset requests):
+
+| Kind | Count | Why |
+| --- | --- | --- |
+| Product art — booster packs, theme decks, elite trainer boxes, league bundles | 240 | Product photography, CDN-hosted, with no card behind it to look up |
+| Trainer-Kit-exclusive cards (Pikachu Libre) | 2 | Printed only in a Trainer Kit; no public database carries those sets |
+| UI logos (`Logos/globalNavLogo`, `Logos/logo_outline`) | 2 | Client artwork, not card data |
+
+None are cards you can play with; they are storefront and chrome.
 
 ---
 
