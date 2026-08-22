@@ -6,22 +6,30 @@ most of the game and wrong in two ways that leave visible holes:
 
   Variant printings.  An archetype can carry attribute 10020, an asset-name
                       override, and the client then asks for "XY4/065xy"
-                      rather than "XY4/065". These are alternate FOIL
-                      TREATMENTS of the same illustration - Charizard in
-                      Evolutions has three, differing only in foil pattern
-                      (AngledPillars / Galaxy / Rainbow) - so the base card's
-                      art is the correct art for them. Worse, keying on card
-                      number made these archetypes look like duplicates, so
-                      they were skipped entirely.
+                      rather than "XY4/065". Keying art on the card number
+                      makes these archetypes look like duplicates of the base
+                      card, so they get dropped and render blank.
 
-  Trainer Kits.       TK5A..TK10B are reprints, and no public database
-                      carries them as sets. Their cards do exist elsewhere
-                      though, so they are resolved by name against art
-                      already on disk, and only failing that by asking the
-                      API for the name directly.
+                      What they actually are was settled by extracting both
+                      textures from the authentic XY12 bundles, which ship
+                      "011" and "011xy" side by side: the variant is the SAME
+                      card - same name, HP, ability, attack, illustration -
+                      carrying a set-logo stamp in the art box. So the base
+                      card's art is the right card, and differs only by that
+                      cosmetic stamp. Substituting it states nothing false
+                      about the card.
 
-Everything it writes is a copy of art already verified, or a download checked
-against the same name rules, so nothing here can invent a card.
+NO NAME MATCHING.  An earlier version of this filled the Trainer Kits
+(TK5A-TK10B) by copying art from a same-named card in another set. That was
+wrong and it shipped: TK10B's Alolan Raichu got Crimson Invasion's Alolan
+Raichu, which has different attacks. Two cards sharing a name in different
+sets are different cards, and carddata carries nothing that distinguishes
+them - attribute 10190 looks like a card id but is a per-set constant (all 20
+archetypes in TK10B share it). A wrong card face is worse than a blank one,
+because it misstates the card while you are playing it.
+
+So this tool only ever copies art between printings that share a set AND a
+card number. Anything else is reported as unresolved and left blank.
 
 Usage:
     python tools/fix_missing_art.py            # fill what is missing
@@ -31,19 +39,14 @@ Usage:
 import io
 import json
 import os
-import re
 import shutil
 import sys
-import time
-import urllib.error
-import urllib.request
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(HERE, "tools"))
 
 CARD_DIR = os.path.join(HERE, "carddata")
 INDEX_PATH = os.path.join(HERE, "bundle_index.json")
-NAME_CACHE = os.path.join(HERE, "tools", "namecache")
 LOOSE_ART = os.path.join(
     os.path.dirname(HERE),
     "PokemonTradingCardGameOnline",
@@ -60,16 +63,7 @@ _spec = importlib.util.spec_from_file_location(
 faa = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(faa)
 
-ATTR_ASSET, ATTR_NAME, ATTR_NUM, ATTR_SET = 10020, 200630, 200780, 200580
-
-API_NAME = ('https://api.pokemontcg.io/v2/cards?q=name:"{name}"'
-            '&pageSize=250&select=id,name,number,set,images')
-
-# Which era a Trainer Kit belongs to. A reprint usually keeps its original
-# illustration, so preferring the printing from the same era makes the copied
-# art more likely to be the one that kit actually used.
-KIT_ERA = {"TK5": "BW", "TK6": "XY", "TK7": "XY", "TK8": "XY", "TK9": "XY",
-           "TK10": "SM"}
+ATTR_ASSET, ATTR_NAME, ATTR_NUM = 10020, 200630, 200780
 
 
 def log(msg):
@@ -128,59 +122,6 @@ def requirements():
     return out
 
 
-def art_by_name(reqs, on_disk):
-    """norm(card name) -> [stem, ...] for art we already hold."""
-    index = {}
-    for s, asset, name, num in reqs:
-        if not name or num is None:
-            continue
-        stem = "%s_%03d" % (s, num)
-        if stem in on_disk:
-            index.setdefault(faa.norm(name), []).append(stem)
-    return index
-
-
-def pick(stems, prefer):
-    """Choose which existing printing to copy, preferring the same era."""
-    if prefer:
-        for st in stems:
-            if st.startswith(prefer):
-                return st
-    return stems[0]
-
-
-def api_by_name(name):
-    """Cached name search. One request per distinct name, at most."""
-    os.makedirs(NAME_CACHE, exist_ok=True)
-    safe = re.sub(r"[^A-Za-z0-9]", "_", name)[:80]
-    path = os.path.join(NAME_CACHE, safe + ".json")
-    if os.path.exists(path):
-        try:
-            with open(path, encoding="utf-8") as fh:
-                return json.load(fh)
-        except Exception:
-            pass
-    try:
-        body = json.loads(faa.get(API_NAME.format(
-            name=urllib.request.quote(name)), retries=4))
-    except Exception as exc:
-        log("      name search failed for %r: %s" % (name, str(exc)[:70]))
-        return []
-    data = body.get("data", [])
-    with open(path, "w", encoding="utf-8") as fh:
-        json.dump(data, fh)
-    time.sleep(1.0)
-    return data
-
-
-def save(stem, data):
-    out = os.path.join(LOOSE_ART, stem + ".png")
-    tmp = out + ".part"
-    with open(tmp, "wb") as fh:
-        fh.write(data)
-    os.replace(tmp, out)
-
-
 def stem_of(s, asset):
     """File stem for an asset request. The loose-art patch maps '/' to '_',
     so "packs/BW1BlackWhite" becomes part of a filename, not a directory."""
@@ -231,14 +172,13 @@ def main(argv):
 
     log("%d asset requests, %d without art\n" % (len(reqs), len(missing)))
 
-    by_name = art_by_name(reqs, on_disk)
-    made = {"variant": 0, "reprint": 0, "downloaded": 0}
+    made = {"variant": 0}
     unresolved = []
 
     for s, asset, name, num in missing:
         stem = stem_of(s, asset)
 
-        # 1. A variant printing: same illustration, different foil treatment.
+        # The only safe substitution: same set, same card number.
         if num is not None:
             base = "%s_%03d" % (s, num)
             if base in on_disk and base != stem:
@@ -250,54 +190,14 @@ def main(argv):
                 made["variant"] += 1
                 continue
 
-        if not name:
-            unresolved.append((stem, "no card name to search on"))
-            continue
+        # There is deliberately no name-based fallback. See NO NAME MATCHING
+        # at the top of this file: two cards sharing a name in different sets
+        # are different cards, and nothing in carddata can tell them apart.
+        unresolved.append(
+            (stem, "no verifiable source" if name else "no card name"))
 
-        # 2. The same card printed in another set, art already verified.
-        stems = by_name.get(faa.norm(name))
-        if stems:
-            era = KIT_ERA.get(re.match(r"(TK\d+)", s).group(1)) if \
-                s.startswith("TK") else None
-            src = pick(stems, era)
-            if not dry:
-                shutil.copyfile(os.path.join(LOOSE_ART, src + ".png"),
-                                os.path.join(LOOSE_ART, stem + ".png"))
-                foil_for(s, asset)
-                on_disk.add(stem)
-            made["reprint"] += 1
-            continue
-
-        # 3. Ask upstream for the name directly.
-        if dry:
-            unresolved.append((stem, "would search upstream for %r" % name))
-            continue
-        cards = api_by_name(name)
-        chosen = None
-        for c in cards:
-            if faa.names_agree(name, c.get("name")):
-                imgs = c.get("images") or {}
-                if imgs.get("large") or imgs.get("small"):
-                    chosen = imgs.get("large") or imgs.get("small")
-                    break
-        if not chosen:
-            unresolved.append((stem, "not found upstream: %r" % name))
-            continue
-        try:
-            data = faa.to_card_texture(faa.get(chosen, binary=True))
-        except Exception as exc:
-            unresolved.append((stem, "download failed: %s" % str(exc)[:60]))
-            continue
-        save(stem, data)
-        foil_for(s, asset)
-        on_disk.add(stem)
-        by_name.setdefault(faa.norm(name), []).append(stem)
-        made["downloaded"] += 1
-        time.sleep(faa.IMAGE_DELAY)
-
-    log("%s%d variant printings, %d reprints matched by name, %d downloaded"
-        % ("would create: " if dry else "created: ",
-           made["variant"], made["reprint"], made["downloaded"]))
+    log("%s%d variant printings"
+        % ("would create: " if dry else "created: ", made["variant"]))
 
     if unresolved:
         log("\n%d still without art:" % len(unresolved))

@@ -34,7 +34,7 @@ cosmetics and card art. The collection holds 4 of every card.
 | Collection | Working — 4 of every card |
 | Asset bundles | Working — 233 bundles, 18,857 asset names indexed |
 | Cosmetics (boxes, sleeves, coins, packs, logos) | Working |
-| Card art | Working. 4,957 assets; every card the client requests |
+| Card art | Working for every set the client shipped; 366 Trainer Kit / promo cards blank |
 | Backgrounds | Working via loose-art patch (one file) |
 | Foil / holo | Authentic for XY12 only; masks elsewhere absent |
 | Avatar items | **Not recoverable** — definitions never shipped |
@@ -294,15 +294,29 @@ unguarded and throws otherwise, killing the connection.
 the right geometry and reads correctly, but it is not byte-identical to what shipped.
 Original bundles would still be an upgrade — see To do.
 
-**What is still without art** (244 of 9,135 asset requests):
+**What is still without art** (606 of 9,135 asset requests):
 
 | Kind | Count | Why |
 | --- | --- | --- |
-| Product art — booster packs, theme decks, elite trainer boxes, league bundles | 240 | Product photography, CDN-hosted, with no card behind it to look up |
-| Trainer-Kit-exclusive cards (Pikachu Libre) | 2 | Printed only in a Trainer Kit; no public database carries those sets |
-| UI logos (`Logos/globalNavLogo`, `Logos/logo_outline`) | 2 | Client artwork, not card data |
+| Product art — booster packs, theme decks, elite trainer boxes, league bundles | 240 | Product photography, with no card behind it to look up |
+| Trainer Kit cards (TK5A–TK10B) | 337 | No public database carries these sets, and they cannot be filled from a same-named card — see below |
+| Championship promos (RSP), SM basic energy | 29 | Same |
+| UI logos | 2 | Client artwork, not card data |
 
-None are cards you can play with; they are storefront and chrome.
+**Never fill a gap by matching on card name.** Two cards sharing a name in
+different sets are different cards with different attacks. This was tried and
+it shipped: TK10B's Alolan Raichu was filled with Crimson Invasion's Alolan
+Raichu, which has a different attack, and it was spotted in play. carddata
+carries nothing that can tell two printings apart — attribute `10190` looks
+like a card id but is a per-set constant (all 20 archetypes in TK10B share
+it). A wrong card face is worse than a blank one, because it misstates the
+card while you are playing with it. Those 358 files were deleted.
+
+The one safe substitution is a variant printing: same set, same card number.
+Extracting both textures from the authentic XY12 bundles, which ship `011` and
+`011xy` side by side, settled what those are — the same card, same HP, ability
+and attack, differing only by a set-logo stamp in the art box. 64 of those are
+filled from their base card and are correct about every fact on the card.
 
 ---
 

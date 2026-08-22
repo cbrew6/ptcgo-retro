@@ -268,6 +268,24 @@ reprints that no public database carries as sets - resolved by name against art
 already on disk, preferring the same era, since a reprint usually keeps its
 original illustration).
 
+**Never fill missing art by matching card names.** Tried, shipped, wrong:
+TK10B Alolan Raichu got Crimson Invasion's Alolan Raichu, different attack,
+caught in play. Same name in two sets = different cards, and carddata has no
+attribute that separates them (`10190` looks like a card id but is per-set:
+all 20 TK10B archetypes share it). Blank beats wrong - a substituted face
+misstates the card during a game.
+
+Also worth carrying: verifying that a copy succeeded is not verifying that
+the source was right. Checking `TK10B_017 == SM4_031` byte for byte proved
+the file copied, which was never in doubt, and said nothing about whether
+SM4 was the correct card. Pick the check that can actually fail.
+
+The one safe substitution is same set + same card number (variant printings).
+That was settled empirically rather than assumed: the authentic XY12 bundles
+ship `011` and `011xy` together, and extracting both textures (UnityWeb ->
+LZMA-alone -> DXT1 via a synthetic DDS header, then flip vertically) shows the
+same card with a set-logo stamp in the art box.
+
 `tools/fetch_art.py --from-log` reads the client's own miss log and fetches
 only the cards actually encountered. It name-checks every download against
 `carddata/` and skips sets whose art already ships locally (LooseArt takes
