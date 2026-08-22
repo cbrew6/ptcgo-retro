@@ -231,6 +231,30 @@ Unresolved assets are still logged as `[LooseArt] miss: <request>`, so if anythi
 ever missing the client tells you exactly what it wants; `tools/fetch_art.py --from-log`
 fetches just those.
 
+### Set symbols and the SM energies
+
+`tools/fetch_set_icons.py` covers two gaps that made the client look broken
+rather than incomplete:
+
+- **Set symbols.** The client asks for `setIcons/{set}` to draw the expansion
+  symbol beside every card and in the set filter list. The shipped `setIcons`
+  bundle carries exactly four; the other 61 came from the CDN, so the filter
+  list rendered as a column of blanks. 40 are now restored. A set symbol is
+  the expansion's printed logo and carries no gameplay information, so
+  sourcing it publicly is safe in a way a card face is not.
+- **Sun & Moon basic energies.** Every other era ships its energies as local
+  bundles; SM is the one series that does not, so its nine basic energies were
+  blank in every deck that played them. They come from Sun & Moon base
+  #164–172 — a verified set+number lookup with a name check.
+
+### A logged miss does not mean a missing asset
+
+`[LooseArt] miss:` is printed *before* the client falls through to the normal
+bundle path, so assets the bundles serve perfectly well still appear in it —
+`XY12/018` is logged as a miss and is in the bundles. Always confirm against
+`bundle_index.json` before concluding something is absent. The log is also
+capped at the first 40 distinct misses, so it is a lead, not an inventory.
+
 ### Asset names are not always the card number
 
 One card number can have several printings, and an archetype may carry **attribute
@@ -299,6 +323,7 @@ Original bundles would still be an upgrade — see To do.
 | Kind | Count | Why |
 | --- | --- | --- |
 | Product art — booster packs, theme decks, elite trainer boxes, league bundles | 240 | Product photography, with no card behind it to look up |
+| Set symbols | 0 | **Fixed** — see below |
 | Trainer Kit cards (TK5A–TK10B) | 337 | No public database carries these sets, and they cannot be filled from a same-named card — see below |
 | Championship promos (RSP), SM basic energy | 29 | Same |
 | UI logos | 2 | Client artwork, not card data |
