@@ -43,7 +43,16 @@ SETS = {
     "SM1": "SUM", "SM2": "GRI", "SM3": "BUS", "SM4": "CIN",
     "HGSS1": "HS", "HGSS2": "UL", "HGSS3": "UD", "HGSS4": "TM",
     "COL": "CL", "DV": "DV",
+    "TwentiethAnn": "GEN",
+    "Promo_XY": "XYP", "Promo_BW": "BWP", "Promo_SM": "SMP",
+    "Promo_HGSS": "HSP",
 }
+
+# Sets whose art already ships in StreamingAssets. LooseArt takes priority over
+# bundles, so downloading these would REPLACE authentic local art with a
+# third-party scan. Skip them.
+LOCAL_ART_SETS = ("XY12", "BW_Energy", "HGSS_Energy", "XY_Energy",
+                  "Free_Energy", "SM_Energy")
 
 PAGE = "https://limitlesstcg.com/cards/{set}/{num}"
 IMAGE = ("https://limitlesstcg.nyc3.cdn.digitaloceanspaces.com"
@@ -165,7 +174,13 @@ def fetch(ptcgo_set, number):
     m = re.search(r"<title>([^<]*)</title>", html)
     title = m.group(1) if m else ""
     remote = title.split(" - ")[0].strip()
-    if remote.lower() != expected.lower():
+    # PTCGO strips punctuation from names ("CharizardEX") where public
+    # databases keep it ("Charizard-EX"). Compare on letters and digits only:
+    # still catches a genuinely wrong set mapping, but stops rejecting the
+    # same card over a hyphen, apostrophe or space.
+    def norm(s):
+        return re.sub(r"[^a-z0-9]", "", s.lower())
+    if norm(remote) != norm(expected):
         print("  %s/%03d  MISMATCH - we have %r, %s #%d is %r; not saving"
               % (ptcgo_set, number, expected, code, number, remote))
         return False
@@ -188,9 +203,49 @@ def fetch(ptcgo_set, number):
     return True
 
 
+CLIENT_LOG = os.path.join(
+    os.environ.get("USERPROFILE", ""), "AppData", "LocalLow",
+    "The Pokémon Company International",
+    "Pokemon Trading Card Game Online", "output_log.txt")
+
+MISS_RE = re.compile(r"\[LooseArt\] miss: ([A-Za-z0-9_]+)/(\d+)\b")
+
+
+def from_log(path=None):
+    """Cards the client actually asked for and couldn't find.
+
+    The patched client logs every unresolved asset, so this fetches exactly
+    what you've encountered in game rather than crawling whole sets.
+    """
+    path = path or CLIENT_LOG
+    if not os.path.exists(path):
+        print("no client log at %s" % path)
+        return []
+    wanted = []
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            m = MISS_RE.search(line)
+            if not m:
+                continue
+            s, n = m.group(1), int(m.group(2))
+            if any(s == k or s.startswith(k + "_") for k in LOCAL_ART_SETS):
+                continue                      # authentic art already on disk
+            if "_wp_" in s:
+                continue                      # foil mask, not card art
+            spec = "%s/%d" % (s, n)
+            if spec not in wanted:
+                wanted.append(spec)
+    return wanted
+
+
 def main(args):
+    if args and args[0] == "--from-log":
+        args = from_log(args[1] if len(args) > 1 else None)
+        if not args:
+            sys.exit("nothing to fetch from the client log")
+        print("%d card(s) requested by the client and missing:\n" % len(args))
     if not args:
-        sys.exit(__doc__.strip().splitlines()[-1])
+        sys.exit("usage: fetch_art.py SET/NUM [SET/NUM ...] | --from-log")
     ok = 0
     for i, spec in enumerate(args):
         if "/" not in spec:
