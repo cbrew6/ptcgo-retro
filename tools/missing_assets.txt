@@ -1,0 +1,601 @@
+# Assets the client requests that we cannot supply.
+# Drop a PNG named <file> into <game>_Data/LooseArt/ and it is used.
+#
+# request	file	card name
+AvatarItems/packs/AvatarCharizardPack	AvatarItems_packs_AvatarCharizardPack.png	
+AvatarItems/packs/AvatarPikachuPack	AvatarItems_packs_AvatarPikachuPack.png	
+BW1/bw1blueassault	BW1_bw1blueassault.png	
+BW1/bw1greentornado	BW1_bw1greentornado.png	
+BW1/bw1redfrenzy	BW1_bw1redfrenzy.png	
+BW1/packs/BW1BlackWhite	BW1_packs_BW1BlackWhite.png	
+BW1/packs/BW1BlackWhitePT	BW1_packs_BW1BlackWhitePT.png	
+BW10/bw10mindwipe	BW10_bw10mindwipe.png	
+BW10/bw10solarstrike	BW10_bw10solarstrike.png	
+BW10/packs/BW10PlasmaBlast	BW10_packs_BW10PlasmaBlast.png	
+BW10/packs/BW10PlasmaBlastPT	BW10_packs_BW10PlasmaBlastPT.png	
+BW11/packs/BW11LegendaryTreasures	BW11_packs_BW11LegendaryTreasures.png	
+BW2/bw2powerplay	BW2_bw2powerplay.png	
+BW2/bw2toxictricks	BW2_bw2toxictricks.png	
+BW2/packs/BW2EmergingPowers	BW2_packs_BW2EmergingPowers.png	
+BW2/packs/BW2EmergingPowersPT	BW2_packs_BW2EmergingPowersPT.png	
+BW3/bw3fastdaze	BW3_bw3fastdaze.png	
+BW3/bw3furiousknights	BW3_bw3furiousknights.png	
+BW3/packs/BW3NobleVictories	BW3_packs_BW3NobleVictories.png	
+BW3/packs/BW3NobleVictoriesPT	BW3_packs_BW3NobleVictoriesPT.png	
+BW4/bw4explosiveedge	BW4_bw4explosiveedge.png	
+BW4/bw4voltagevortex	BW4_bw4voltagevortex.png	
+BW4/packs/BW4NextDestinies	BW4_packs_BW4NextDestinies.png	
+BW4/packs/BW4NextDestiniesPT	BW4_packs_BW4NextDestiniesPT.png	
+BW5/bw5raiders	BW5_bw5raiders.png	
+BW5/bw5shadows	BW5_bw5shadows.png	
+BW5/packs/BW5DarkExplorers	BW5_packs_BW5DarkExplorers.png	
+BW5/packs/BW5DarkExplorersPT	BW5_packs_BW5DarkExplorersPT.png	
+BW6/bw6dragonsnarl	BW6_bw6dragonsnarl.png	
+BW6/bw6dragonspeed	BW6_bw6dragonspeed.png	
+BW6/packs/BW6DragonsExalted	BW6_packs_BW6DragonsExalted.png	
+BW6/packs/BW6DragonsExaltedPT	BW6_packs_BW6DragonsExaltedPT.png	
+BW7/bw7coldfire	BW7_bw7coldfire.png	
+BW7/bw7iceshock	BW7_bw7iceshock.png	
+BW7/packs/BW7BoundariesCrossed	BW7_packs_BW7BoundariesCrossed.png	
+BW7/packs/BW7BoundariesCrossedPT	BW7_packs_BW7BoundariesCrossedPT.png	
+BW8/bw8plasmaclaw	BW8_bw8plasmaclaw.png	
+BW8/bw8plasmashadow	BW8_bw8plasmashadow.png	
+BW8/packs/BW8PlasmaStorm	BW8_packs_BW8PlasmaStorm.png	
+BW8/packs/BW8PlasmaStormPT	BW8_packs_BW8PlasmaStormPT.png	
+BW9/bw9frostray	BW9_bw9frostray.png	
+BW9/bw9psycrusher	BW9_bw9psycrusher.png	
+BW9/packs/BW9PlasmaFreeze	BW9_packs_BW9PlasmaFreeze.png	
+BW9/packs/BW9PlasmaFreezePT	BW9_packs_BW9PlasmaFreezePT.png	
+COL/packs/COLCallOfLegends	COL_packs_COLCallOfLegends.png	
+DV/packs/DragonVault	DV_packs_DragonVault.png	
+HGSS1/hgss1emberspark	HGSS1_hgss1emberspark.png	
+HGSS1/hgss1growthclash	HGSS1_hgss1growthclash.png	
+HGSS1/hgss1mindflood	HGSS1_hgss1mindflood.png	
+HGSS1/packs/HGSS1HeartGoldSoulSilver	HGSS1_packs_HGSS1HeartGoldSoulSilver.png	
+HGSS2/hgss2chaoscontrol	HGSS2_hgss2chaoscontrol.png	
+HGSS2/hgss2steelsentinel	HGSS2_hgss2steelsentinel.png	
+HGSS2/packs/HGSS2Unleashed	HGSS2_packs_HGSS2Unleashed.png	
+HGSS3/hgss3daybreak	HGSS3_hgss3daybreak.png	
+HGSS3/hgss3nightfall	HGSS3_hgss3nightfall.png	
+HGSS3/packs/HGSS3Undaunted	HGSS3_packs_HGSS3Undaunted.png	
+HGSS4/hgss4royalguard	HGSS4_hgss4royalguard.png	
+HGSS4/hgss4verdantfrost	HGSS4_hgss4verdantfrost.png	
+HGSS4/packs/HGSS4Triumphant	HGSS4_packs_HGSS4Triumphant.png	
+NoSet/BoulderLeagueBundle	NoSet_BoulderLeagueBundle.png	
+NoSet/Darkrai2017Deckbox	NoSet_Darkrai2017Deckbox.png	
+NoSet/December2014Bundle	NoSet_December2014Bundle.png	
+NoSet/DewfordLeagueBundle	NoSet_DewfordLeagueBundle.png	
+NoSet/FortreeLeagueBundle	NoSet_FortreeLeagueBundle.png	
+NoSet/GearLeagueBundle	NoSet_GearLeagueBundle.png	
+NoSet/LBD_HoOh_DeckBox	NoSet_LBD_HoOh_DeckBox.png	
+NoSet/LBD_Lugia_DeckBox	NoSet_LBD_Lugia_DeckBox.png	
+NoSet/LavaridgeLeagueBundle	NoSet_LavaridgeLeagueBundle.png	
+NoSet/MarshLeagueBundle	NoSet_MarshLeagueBundle.png	
+NoSet/MauvilleLeagueBundle	NoSet_MauvilleLeagueBundle.png	
+NoSet/MonthlyNewsletterApril	NoSet_MonthlyNewsletterApril.png	
+NoSet/MonthlyNewsletterAugust	NoSet_MonthlyNewsletterAugust.png	
+NoSet/MonthlyNewsletterDecember	NoSet_MonthlyNewsletterDecember.png	
+NoSet/MonthlyNewsletterFebruary	NoSet_MonthlyNewsletterFebruary.png	
+NoSet/MonthlyNewsletterJanuary	NoSet_MonthlyNewsletterJanuary.png	
+NoSet/MonthlyNewsletterJuly	NoSet_MonthlyNewsletterJuly.png	
+NoSet/MonthlyNewsletterJune	NoSet_MonthlyNewsletterJune.png	
+NoSet/MonthlyNewsletterMarch	NoSet_MonthlyNewsletterMarch.png	
+NoSet/MonthlyNewsletterMay	NoSet_MonthlyNewsletterMay.png	
+NoSet/MonthlyNewsletterNovember	NoSet_MonthlyNewsletterNovember.png	
+NoSet/MonthlyNewsletterOctober	NoSet_MonthlyNewsletterOctober.png	
+NoSet/MonthlyNewsletterSeptember	NoSet_MonthlyNewsletterSeptember.png	
+NoSet/MossdeepLeagueBundle	NoSet_MossdeepLeagueBundle.png	
+NoSet/OPLeague2016Q1Season1	NoSet_OPLeague2016Q1Season1.png	
+NoSet/OPLeague2016Q1Season2	NoSet_OPLeague2016Q1Season2.png	
+NoSet/OPLeague2016Q1Season3	NoSet_OPLeague2016Q1Season3.png	
+NoSet/OPLeague2016Q2Season1	NoSet_OPLeague2016Q2Season1.png	
+NoSet/OPLeague2016Q2Season2	NoSet_OPLeague2016Q2Season2.png	
+NoSet/OPLeague2016Q2Season3	NoSet_OPLeague2016Q2Season3.png	
+NoSet/OPLeague2016SeasonOne1	NoSet_OPLeague2016SeasonOne1.png	
+NoSet/OPLeague2016SeasonThree1	NoSet_OPLeague2016SeasonThree1.png	
+NoSet/OPLeague2016SeasonTwo1	NoSet_OPLeague2016SeasonTwo1.png	
+NoSet/OpLeauge2017Season1	NoSet_OpLeauge2017Season1.png	
+NoSet/OpLeauge2017Season2	NoSet_OpLeauge2017Season2.png	
+NoSet/OpLeauge2017Season3	NoSet_OpLeauge2017Season3.png	
+NoSet/PetalburgLeagueBundle	NoSet_PetalburgLeagueBundle.png	
+NoSet/RescueLeagueBundle	NoSet_RescueLeagueBundle.png	
+NoSet/RustboroLeagueBundle1	NoSet_RustboroLeagueBundle1.png	
+NoSet/SM2OpLeauge2017Season1	NoSet_SM2OpLeauge2017Season1.png	
+NoSet/SM2OpLeauge2017Season2	NoSet_SM2OpLeauge2017Season2.png	
+NoSet/SM2OpLeauge2017Season3	NoSet_SM2OpLeauge2017Season3.png	
+NoSet/SootopolisLeagueBundle	NoSet_SootopolisLeagueBundle.png	
+NoSet/SteamLeagueBundle	NoSet_SteamLeagueBundle.png	
+NoSet/ThunderLeagueBundle	NoSet_ThunderLeagueBundle.png	
+NoSet/currency/boostercredit_icon	NoSet_currency_boostercredit_icon.png	
+NoSet/currency/money	NoSet_currency_money.png	
+NoSet/packs/boosterPack_bw1	NoSet_packs_boosterPack_bw1.png	
+NoSet/powerrelay	NoSet_powerrelay.png	
+NoSet/rallyingcry	NoSet_rallyingcry.png	
+NoSet/rayquazavskeldeobundle	NoSet_rayquazavskeldeobundle.png	
+NoSet/xvybattlearenabundle	NoSet_xvybattlearenabundle.png	
+Promo_BW/world2013	Promo_BW_world2013.png	
+Promo_XY/203	Promo_XY_203.png	
+Promo_XY/204	Promo_XY_204.png	
+Promo_XY/205	Promo_XY_205.png	
+Promo_XY/206	Promo_XY_206.png	
+Promo_XY/207	Promo_XY_207.png	
+Promo_XY/208	Promo_XY_208.png	
+Promo_XY/209	Promo_XY_209.png	
+Promo_XY/210	Promo_XY_210.png	
+RSP/001	RSP_001.png	MaxiesHiddenBallTrick
+RSP/001xy	RSP_001xy.png	ChampionsFestival
+RSP/002	RSP_002.png	ChampionsFestival
+RSP/002xy	RSP_002xy.png	ChampionsFestival
+RSP/003	RSP_003.png	ChampionsFestival
+RSP/003xy	RSP_003xy.png	ChampionsFestival
+RSP/004	RSP_004.png	ChampionsFestival
+RSP/004xy	RSP_004xy.png	ChampionsFestival
+RSP/005	RSP_005.png	ChampionsFestival
+RSP/005xy	RSP_005xy.png	ChampionsFestival
+RSP/006	RSP_006.png	ChampionsFestival
+RSP/006xy	RSP_006xy.png	ChampionsFestival
+RSP/007	RSP_007.png	ChampionsFestival
+RSP/008	RSP_008.png	ChampionsFestival
+RSP/009	RSP_009.png	ChampionsFestival
+RSP/010	RSP_010.png	ChampionsFestival
+RSP/011	RSP_011.png	ChampionsFestival
+RSP/012	RSP_012.png	ChampionsFestival
+RSP/013	RSP_013.png	ChampionsFestival
+RSP/014	RSP_014.png	Delibird
+RewardItems/packs/TreasureBoxPack	RewardItems_packs_TreasureBoxPack.png	
+RewardItems/packs/TreasureBoxPackHolo	RewardItems_packs_TreasureBoxPackHolo.png	
+SL/packs/SLBooster6Card	SL_packs_SLBooster6Card.png	
+SL/packs/SLBoosterBase	SL_packs_SLBoosterBase.png	
+SM1/brighttidesm1pcd	SM1_brighttidesm1pcd.png	
+SM1/forestshadowsm1pcd	SM1_forestshadowsm1pcd.png	
+SM1/packs/sm1sunandmoon	SM1_packs_sm1sunandmoon.png	
+SM1/packs/sm1sunandmoonpt	SM1_packs_sm1sunandmoonpt.png	
+SM1/prereleasepacksm1	SM1_prereleasepacksm1.png	
+SM1/roaringheatsm1pcd	SM1_roaringheatsm1pcd.png	
+SM2/HiddenMoonSM2PCD	SM2_HiddenMoonSM2PCD.png	
+SM2/SteelSunSM2PCD	SM2_SteelSunSM2PCD.png	
+SM2/packs/SM2Booster	SM2_packs_SM2Booster.png	
+SM2/packs/SM2Boosterpt	SM2_packs_SM2Boosterpt.png	
+SM2/prereleasepacksm2	SM2_prereleasepacksm2.png	
+SM3/SM3LuminousFrostPCD	SM3_SM3LuminousFrostPCD.png	
+SM3/SM3RockSteadyPCD	SM3_SM3RockSteadyPCD.png	
+SM3/packs/SM3Booster	SM3_packs_SM3Booster.png	
+SM3/packs/SM3Boosterpt	SM3_packs_SM3Boosterpt.png	
+SM3/prereleasepacksm3	SM3_prereleasepacksm3.png	
+SM4/SM4ClangingThunderPCD	SM4_SM4ClangingThunderPCD.png	
+SM4/SM4DestructionFangPCD	SM4_SM4DestructionFangPCD.png	
+SM4/packs/SM4Booster6Card	SM4_packs_SM4Booster6Card.png	
+SM4/packs/SM4BoosterBase	SM4_packs_SM4BoosterBase.png	
+SM4/prereleasepacksm4	SM4_prereleasepacksm4.png	
+TATM/packs/TATMTeamAquaTeamMagma	TATM_packs_TATMTeamAquaTeamMagma.png	
+TK10A/001	TK10A_001.png	Caterpie
+TK10A/004	TK10A_004.png	Trumbeak
+TK10A/005	TK10A_005.png	FightingEnergy
+TK10A/011	TK10A_011.png	Fletchling
+TK10A/012	TK10A_012.png	Yungoos
+TK10A/013	TK10A_013.png	Fletchinder
+TK10A/014	TK10A_014.png	Rockruff
+TK10A/015	TK10A_015.png	Pikipek
+TK10A/016	TK10A_016.png	Lycanroc
+TK10A/018	TK10A_018.png	Makuhita
+TK10A/019	TK10A_019.png	Hau
+TK10A/021	TK10A_021.png	GreatBall
+TK10A/022	TK10A_022.png	Toucannon
+TK10A/023	TK10A_023.png	Hau
+TK10A/025	TK10A_025.png	GreatBall
+TK10A/027	TK10A_027.png	BigMalasada
+TK10A/029	TK10A_029.png	Rockruff
+TK10A/030	TK10A_030.png	Lycanroc
+TK10B/002	TK10B_002.png	LightningEnergy
+TK10B/004	TK10B_004.png	Stufful
+TK10B/006	TK10B_006.png	Golbat
+TK10B/011	TK10B_011.png	Zubat
+TK10B/013	TK10B_013.png	Spearow
+TK10B/014	TK10B_014.png	Pikachu
+TK10B/015	TK10B_015.png	Potion
+TK10B/016	TK10B_016.png	Grubbin
+TK10B/017	TK10B_017.png	AlolanRaichu
+TK10B/018	TK10B_018.png	Bewear
+TK10B/019	TK10B_019.png	Hau
+TK10B/020	TK10B_020.png	PsychicEnergy
+TK10B/021	TK10B_021.png	GreatBall
+TK10B/022	TK10B_022.png	Drowzee
+TK10B/023	TK10B_023.png	Hau
+TK10B/025	TK10B_025.png	GreatBall
+TK10B/026	TK10B_026.png	Togedemaru
+TK10B/029	TK10B_029.png	Pikachu
+TK10B/030	TK10B_030.png	AlolanRaichu
+TK10B/TK10	TK10B_TK10.png	
+TK5A/001	TK5A_001.png	Purrloin
+TK5A/002	TK5A_002.png	Watchog
+TK5A/003	TK5A_003.png	DarknessEnergy
+TK5A/004	TK5A_004.png	Minccino
+TK5A/005	TK5A_005.png	DarknessEnergy
+TK5A/006	TK5A_006.png	DarknessEnergy
+TK5A/007	TK5A_007.png	DarknessEnergy
+TK5A/008	TK5A_008.png	DarknessEnergy
+TK5A/009	TK5A_009.png	DarknessEnergy
+TK5A/010	TK5A_010.png	DarknessEnergy
+TK5A/011	TK5A_011.png	PlusPower
+TK5A/012	TK5A_012.png	Patrat
+TK5A/013	TK5A_013.png	Zorua
+TK5A/014	TK5A_014.png	Pidove
+TK5A/015	TK5A_015.png	Tranquill
+TK5A/016	TK5A_016.png	EnergyRetrieval
+TK5A/017	TK5A_017.png	Zoroark
+TK5A/018	TK5A_018.png	PokemonCommunication
+TK5A/019	TK5A_019.png	Minccino
+TK5A/020	TK5A_020.png	DarknessEnergy
+TK5A/021	TK5A_021.png	Pidove
+TK5A/022	TK5A_022.png	DarknessEnergy
+TK5A/023	TK5A_023.png	Zorua
+TK5A/024	TK5A_024.png	DarknessEnergy
+TK5A/025	TK5A_025.png	Purrloin
+TK5A/026	TK5A_026.png	DarknessEnergy
+TK5A/027	TK5A_027.png	EnergySearch
+TK5A/028	TK5A_028.png	DarknessEnergy
+TK5A/029	TK5A_029.png	Patrat
+TK5A/030	TK5A_030.png	Zoroark
+TK5A/tk5nighthunter	TK5A_tk5nighthunter.png	
+TK5B/001	TK5B_001.png	Lillipup
+TK5B/002	TK5B_002.png	FightingEnergy
+TK5B/003	TK5B_003.png	FightingEnergy
+TK5B/004	TK5B_004.png	EnergySwitch
+TK5B/005	TK5B_005.png	FightingEnergy
+TK5B/006	TK5B_006.png	FightingEnergy
+TK5B/007	TK5B_007.png	FightingEnergy
+TK5B/008	TK5B_008.png	FightingEnergy
+TK5B/009	TK5B_009.png	FightingEnergy
+TK5B/010	TK5B_010.png	FightingEnergy
+TK5B/011	TK5B_011.png	Timburr
+TK5B/012	TK5B_012.png	Audino
+TK5B/013	TK5B_013.png	Drilbur
+TK5B/014	TK5B_014.png	Gurdurr
+TK5B/015	TK5B_015.png	Potion
+TK5B/016	TK5B_016.png	PlusPower
+TK5B/017	TK5B_017.png	Excadrill
+TK5B/018	TK5B_018.png	Audino
+TK5B/019	TK5B_019.png	Herdier
+TK5B/020	TK5B_020.png	FightingEnergy
+TK5B/021	TK5B_021.png	EnergySearch
+TK5B/022	TK5B_022.png	FightingEnergy
+TK5B/023	TK5B_023.png	Potion
+TK5B/024	TK5B_024.png	PokemonCommunication
+TK5B/025	TK5B_025.png	Drilbur
+TK5B/026	TK5B_026.png	FightingEnergy
+TK5B/027	TK5B_027.png	Lillipup
+TK5B/028	TK5B_028.png	FightingEnergy
+TK5B/029	TK5B_029.png	Timburr
+TK5B/030	TK5B_030.png	Excadrill
+TK6A/001	TK6A_001.png	Spoink
+TK6A/002	TK6A_002.png	Gourgeist
+TK6A/003	TK6A_003.png	Arbok
+TK6A/004	TK6A_004.png	Bunnelby
+TK6A/005	TK6A_005.png	PsychicEnergy
+TK6A/006	TK6A_006.png	PsychicEnergy
+TK6A/007	TK6A_007.png	PsychicEnergy
+TK6A/008	TK6A_008.png	PsychicEnergy
+TK6A/009	TK6A_009.png	PsychicEnergy
+TK6A/010	TK6A_010.png	PsychicEnergy
+TK6A/011	TK6A_011.png	Pumpkaboo
+TK6A/012	TK6A_012.png	Noibat
+TK6A/013	TK6A_013.png	Noivern
+TK6A/014	TK6A_014.png	PokemonCatcher
+TK6A/015	TK6A_015.png	Potion
+TK6A/016	TK6A_016.png	Ekans
+TK6A/017	TK6A_017.png	PsychicEnergy
+TK6A/018	TK6A_018.png	Pumpkaboo
+TK6A/019	TK6A_019.png	DarknessEnergy
+TK6A/020	TK6A_020.png	Furfrou
+TK6A/021	TK6A_021.png	PokeBall
+TK6A/022	TK6A_022.png	DarknessEnergy
+TK6A/023	TK6A_023.png	Noibat
+TK6A/024	TK6A_024.png	ProfessorsLetter
+TK6A/025	TK6A_025.png	PsychicEnergy
+TK6A/026	TK6A_026.png	DarknessEnergy
+TK6A/027	TK6A_027.png	Potion
+TK6A/028	TK6A_028.png	DarknessEnergy
+TK6A/029	TK6A_029.png	Switch
+TK6A/030	TK6A_030.png	Noivern
+TK6A/xytrainerkit	TK6A_xytrainerkit.png	
+TK6B/001	TK6B_001.png	Fletchling
+TK6B/002	TK6B_002.png	FairyEnergy
+TK6B/003	TK6B_003.png	FairyEnergy
+TK6B/004	TK6B_004.png	Switch
+TK6B/005	TK6B_005.png	FairyEnergy
+TK6B/006	TK6B_006.png	FairyEnergy
+TK6B/007	TK6B_007.png	FairyEnergy
+TK6B/008	TK6B_008.png	FairyEnergy
+TK6B/009	TK6B_009.png	FairyEnergy
+TK6B/010	TK6B_010.png	FairyEnergy
+TK6B/011	TK6B_011.png	Snubbull
+TK6B/012	TK6B_012.png	FairyEnergy
+TK6B/013	TK6B_013.png	Eevee
+TK6B/014	TK6B_014.png	Granbull
+TK6B/015	TK6B_015.png	Sylveon
+TK6B/016	TK6B_016.png	Furfrou
+TK6B/017	TK6B_017.png	FairyEnergy
+TK6B/018	TK6B_018.png	FairyEnergy
+TK6B/019	TK6B_019.png	Fletchling
+TK6B/020	TK6B_020.png	Potion
+TK6B/021	TK6B_021.png	Eevee
+TK6B/022	TK6B_022.png	Furfrou
+TK6B/023	TK6B_023.png	PokemonCatcher
+TK6B/024	TK6B_024.png	Potion
+TK6B/025	TK6B_025.png	FairyEnergy
+TK6B/026	TK6B_026.png	PokeBall
+TK6B/027	TK6B_027.png	Snubbull
+TK6B/028	TK6B_028.png	ProfessorsLetter
+TK6B/029	TK6B_029.png	Granbull
+TK6B/030	TK6B_030.png	Sylveon
+TK7A/001	TK7A_001.png	Fletchling
+TK7A/002	TK7A_002.png	MetalEnergy
+TK7A/003	TK7A_003.png	MetalEnergy
+TK7A/004	TK7A_004.png	Vigoroth
+TK7A/005	TK7A_005.png	MetalEnergy
+TK7A/006	TK7A_006.png	MetalEnergy
+TK7A/007	TK7A_007.png	MetalEnergy
+TK7A/008	TK7A_008.png	MetalEnergy
+TK7A/009	TK7A_009.png	MetalEnergy
+TK7A/010	TK7A_010.png	MetalEnergy
+TK7A/011	TK7A_011.png	Honedge
+TK7A/012	TK7A_012.png	Bidoof
+TK7A/013	TK7A_013.png	Pawniard
+TK7A/014	TK7A_014.png	Doublade
+TK7A/015	TK7A_015.png	Slakoth
+TK7A/016	TK7A_016.png	Bisharp
+TK7A/017	TK7A_017.png	Patrat
+TK7A/018	TK7A_018.png	MetalEnergy
+TK7A/019	TK7A_019.png	Tierno
+TK7A/020	TK7A_020.png	Trevor
+TK7A/021	TK7A_021.png	Pawniard
+TK7A/022	TK7A_022.png	MetalEnergy
+TK7A/023	TK7A_023.png	Doublade
+TK7A/024	TK7A_024.png	MetalEnergy
+TK7A/025	TK7A_025.png	Potion
+TK7A/026	TK7A_026.png	Slakoth
+TK7A/027	TK7A_027.png	Honedge
+TK7A/028	TK7A_028.png	Vigoroth
+TK7A/029	TK7A_029.png	Potion
+TK7A/030	TK7A_030.png	Bisharp
+TK7A/tk7	TK7A_tk7.png	
+TK7B/001	TK7B_001.png	Swirlix
+TK7B/002	TK7B_002.png	Pidgeotto
+TK7B/003	TK7B_003.png	FairyEnergy
+TK7B/004	TK7B_004.png	Sentret
+TK7B/005	TK7B_005.png	FairyEnergy
+TK7B/006	TK7B_006.png	FairyEnergy
+TK7B/007	TK7B_007.png	FairyEnergy
+TK7B/008	TK7B_008.png	FairyEnergy
+TK7B/009	TK7B_009.png	FairyEnergy
+TK7B/010	TK7B_010.png	FairyEnergy
+TK7B/011	TK7B_011.png	Pidgey
+TK7B/012	TK7B_012.png	Jigglypuff
+TK7B/013	TK7B_013.png	Clefairy
+TK7B/014	TK7B_014.png	Wigglytuff
+TK7B/015	TK7B_015.png	Potion
+TK7B/016	TK7B_016.png	Clefable
+TK7B/017	TK7B_017.png	FairyEnergy
+TK7B/018	TK7B_018.png	Swirlix
+TK7B/019	TK7B_019.png	Clefairy
+TK7B/020	TK7B_020.png	Potion
+TK7B/021	TK7B_021.png	FairyEnergy
+TK7B/022	TK7B_022.png	FairyEnergy
+TK7B/023	TK7B_023.png	Pidgeotto
+TK7B/024	TK7B_024.png	Trevor
+TK7B/025	TK7B_025.png	Jigglypuff
+TK7B/026	TK7B_026.png	Tierno
+TK7B/027	TK7B_027.png	FairyEnergy
+TK7B/028	TK7B_028.png	Clefable
+TK7B/029	TK7B_029.png	Pidgey
+TK7B/030	TK7B_030.png	Wigglytuff
+TK8A/001	TK8A_001.png	Skitty
+TK8A/002	TK8A_002.png	FightingEnergy
+TK8A/003	TK8A_003.png	FightingEnergy
+TK8A/004	TK8A_004.png	Rhydon
+TK8A/005	TK8A_005.png	FightingEnergy
+TK8A/006	TK8A_006.png	FightingEnergy
+TK8A/007	TK8A_007.png	FightingEnergy
+TK8A/008	TK8A_008.png	FightingEnergy
+TK8A/009	TK8A_009.png	FightingEnergy
+TK8A/010	TK8A_010.png	FightingEnergy
+TK8A/011	TK8A_011.png	Machop
+TK8A/012	TK8A_012.png	Solrock
+TK8A/013	TK8A_013.png	Latios
+TK8A/014	TK8A_014.png	Machoke
+TK8A/015	TK8A_015.png	Rhyhorn
+TK8A/016	TK8A_016.png	PsychicEnergy
+TK8A/017	TK8A_017.png	FightingEnergy
+TK8A/018	TK8A_018.png	PsychicEnergy
+TK8A/019	TK8A_019.png	Delcatty
+TK8A/020	TK8A_020.png	AcroBike
+TK8A/021	TK8A_021.png	Potion
+TK8A/022	TK8A_022.png	Machoke
+TK8A/023	TK8A_023.png	Rhyhorn
+TK8A/024	TK8A_024.png	Delcatty
+TK8A/025	TK8A_025.png	Rhydon
+TK8A/026	TK8A_026.png	Solrock
+TK8A/027	TK8A_027.png	Skitty
+TK8A/028	TK8A_028.png	Machop
+TK8A/029	TK8A_029.png	PsychicEnergy
+TK8A/030	TK8A_030.png	Latios
+TK8A/TK8	TK8A_TK8.png	
+TK8B/001	TK8B_001.png	GrassEnergy
+TK8B/002	TK8B_002.png	GrassEnergy
+TK8B/003	TK8B_003.png	GrassEnergy
+TK8B/004	TK8B_004.png	Fletchling
+TK8B/005	TK8B_005.png	GrassEnergy
+TK8B/006	TK8B_006.png	Lombre
+TK8B/007	TK8B_007.png	Treecko
+TK8B/008	TK8B_008.png	PsychicEnergy
+TK8B/009	TK8B_009.png	PsychicEnergy
+TK8B/010	TK8B_010.png	PsychicEnergy
+TK8B/011	TK8B_011.png	Lotad
+TK8B/012	TK8B_012.png	Tangrowth
+TK8B/013	TK8B_013.png	Tangela
+TK8B/014	TK8B_014.png	Latias
+TK8B/015	TK8B_015.png	Potion
+TK8B/016	TK8B_016.png	Surskit
+TK8B/017	TK8B_017.png	PsychicEnergy
+TK8B/018	TK8B_018.png	Grovyle
+TK8B/019	TK8B_019.png	GrassEnergy
+TK8B/020	TK8B_020.png	AcroBike
+TK8B/021	TK8B_021.png	Lombre
+TK8B/022	TK8B_022.png	PsychicEnergy
+TK8B/023	TK8B_023.png	Lotad
+TK8B/024	TK8B_024.png	Treecko
+TK8B/025	TK8B_025.png	Tangrowth
+TK8B/026	TK8B_026.png	Tangela
+TK8B/027	TK8B_027.png	Grovyle
+TK8B/028	TK8B_028.png	PsychicEnergy
+TK8B/029	TK8B_029.png	AcroBike
+TK8B/030	TK8B_030.png	Latias
+TK9A/001	TK9A_001.png	Glameow
+TK9A/002	TK9A_002.png	LightningEnergy
+TK9A/003	TK9A_003.png	LightningEnergy
+TK9A/004	TK9A_004.png	Electivire
+TK9A/005	TK9A_005.png	LightningEnergy
+TK9A/006	TK9A_006.png	LightningEnergy
+TK9A/007	TK9A_007.png	Taillow
+TK9A/008	TK9A_008.png	LightningEnergy
+TK9A/009	TK9A_009.png	LightningEnergy
+TK9A/010	TK9A_010.png	LightningEnergy
+TK9A/011	TK9A_011.png	Electrike
+TK9A/012	TK9A_012.png	Blitzle
+TK9A/013	TK9A_013.png	Manectric
+TK9A/014	TK9A_014.png	PikachuLibre
+TK9A/015	TK9A_015.png	Electabuzz
+TK9A/016	TK9A_016.png	Fletchling
+TK9A/017	TK9A_017.png	LightningEnergy
+TK9A/018	TK9A_018.png	LightningEnergy
+TK9A/019	TK9A_019.png	Purugly
+TK9A/020	TK9A_020.png	Tierno
+TK9A/021	TK9A_021.png	Potion
+TK9A/022	TK9A_022.png	Manectric
+TK9A/023	TK9A_023.png	Electabuzz
+TK9A/024	TK9A_024.png	Purugly
+TK9A/025	TK9A_025.png	Electivire
+TK9A/026	TK9A_026.png	Blitzle
+TK9A/027	TK9A_027.png	Glameow
+TK9A/028	TK9A_028.png	Electrike
+TK9A/029	TK9A_029.png	LightningEnergy
+TK9A/030	TK9A_030.png	PikachuLibre
+TK9A/TK9	TK9A_TK9.png	
+TK9B/001	TK9B_001.png	WaterEnergy
+TK9B/002	TK9B_002.png	WaterEnergy
+TK9B/003	TK9B_003.png	WaterEnergy
+TK9B/004	TK9B_004.png	Eevee
+TK9B/005	TK9B_005.png	WaterEnergy
+TK9B/006	TK9B_006.png	Frogadier
+TK9B/007	TK9B_007.png	Ducklett
+TK9B/008	TK9B_008.png	WaterEnergy
+TK9B/009	TK9B_009.png	WaterEnergy
+TK9B/010	TK9B_010.png	WaterEnergy
+TK9B/011	TK9B_011.png	Froakie
+TK9B/012	TK9B_012.png	Seaking
+TK9B/013	TK9B_013.png	Goldeen
+TK9B/014	TK9B_014.png	Suicune
+TK9B/015	TK9B_015.png	Potion
+TK9B/016	TK9B_016.png	Piplup
+TK9B/017	TK9B_017.png	WaterEnergy
+TK9B/018	TK9B_018.png	Swanna
+TK9B/019	TK9B_019.png	WaterEnergy
+TK9B/020	TK9B_020.png	Tierno
+TK9B/021	TK9B_021.png	Frogadier
+TK9B/022	TK9B_022.png	WaterEnergy
+TK9B/023	TK9B_023.png	Froakie
+TK9B/024	TK9B_024.png	Ducklett
+TK9B/025	TK9B_025.png	Seaking
+TK9B/026	TK9B_026.png	Goldeen
+TK9B/027	TK9B_027.png	Swanna
+TK9B/028	TK9B_028.png	WaterEnergy
+TK9B/029	TK9B_029.png	Tierno
+TK9B/030	TK9B_030.png	Suicune
+TwentiethAnn/generationselitetrainerbox	TwentiethAnn_generationselitetrainerbox.png	
+TwentiethAnn/packs/TwentiethAnniversary	TwentiethAnn_packs_TwentiethAnniversary.png	
+XY0/xy0card12	XY0_xy0card12.png	
+XY0/xy0card3	XY0_xy0card3.png	
+XY0/xy0card8	XY0_xy0card8.png	
+XY1/packs/XY1XandY	XY1_packs_XY1XandY.png	
+XY1/packs/XY1XandYPT	XY1_packs_XY1XandYPT.png	
+XY1/xy1destructionrush	XY1_xy1destructionrush.png	
+XY1/xy1resilientlife	XY1_xy1resilientlife.png	
+XY10/MegaMawileBox	XY10_MegaMawileBox.png	
+XY10/battlerulerxy10pcd	XY10_battlerulerxy10pcd.png	
+XY10/packs/XY10FatesCollide	XY10_packs_XY10FatesCollide.png	
+XY10/prereleasepackxy10	XY10_prereleasepackxy10.png	
+XY10/skyguardianxy10pcd	XY10_skyguardianxy10pcd.png	
+XY10/xerneasexsummer2016	XY10_xerneasexsummer2016.png	
+XY10/xy10elitetrainerbox	XY10_xy10elitetrainerbox.png	
+XY10/yveltalexsummer2016	XY10_yveltalexsummer2016.png	
+XY10/zygardeexsummer2016	XY10_zygardeexsummer2016.png	
+XY11/articunopcd	XY11_articunopcd.png	
+XY11/gearsoffirexy11pcd	XY11_gearsoffirexy11pcd.png	
+XY11/magearnafall2016	XY11_magearnafall2016.png	
+XY11/moltrespcd	XY11_moltrespcd.png	
+XY11/packs/XY11SteamSiege	XY11_packs_XY11SteamSiege.png	
+XY11/packs/xy11steamsiege	XY11_packs_xy11steamsiege.png	
+XY11/pikachufall2016	XY11_pikachufall2016.png	
+XY11/prereleasepackxy11	XY11_prereleasepackxy11.png	
+XY11/ringoflightningxy11pcd	XY11_ringoflightningxy11pcd.png	
+XY11/volcanionfall2016	XY11_volcanionfall2016.png	
+XY11/xy11elitetrainerbox	XY11_xy11elitetrainerbox.png	
+XY11/zapdospcd	XY11_zapdospcd.png	
+XY12/XY12elitetrainermblastoisebox	XY12_XY12elitetrainermblastoisebox.png	
+XY12/XY12elitetrainermcharizardybox	XY12_XY12elitetrainermcharizardybox.png	
+XY12/mewtwomayhemxy12pcd	XY12_mewtwomayhemxy12pcd.png	
+XY12/packs/XY12Evolutions	XY12_packs_XY12Evolutions.png	
+XY12/packs/xy12evolutions	XY12_packs_xy12evolutions.png	
+XY12/pikachupowerxy12pcd	XY12_pikachupowerxy12pcd.png	
+XY12/prereleasepackxy12	XY12_prereleasepackxy12.png	
+XY2/packs/XY2Flashfire	XY2_packs_XY2Flashfire.png	
+XY2/packs/XY2FlashfirePT	XY2_packs_XY2FlashfirePT.png	
+XY2/xy2helioliskdeck	XY2_xy2helioliskdeck.png	
+XY2/xy2meowsticdeck	XY2_xy2meowsticdeck.png	
+XY3/packs/XY3FuriousFists	XY3_packs_XY3FuriousFists.png	
+XY3/packs/XY3FuriousFistsPT	XY3_packs_XY3FuriousFistsPT.png	
+XY3/pangoroxy3deck	XY3_pangoroxy3deck.png	
+XY3/sylveonxy3deck	XY3_sylveonxy3deck.png	
+XY4/bolttwisterxy4deck	XY4_bolttwisterxy4deck.png	
+XY4/burningwindsxy4deck	XY4_burningwindsxy4deck.png	
+XY4/packs/XY4PhantomForce	XY4_packs_XY4PhantomForce.png	
+XY4/packs/XY4PhantomForcePT	XY4_packs_XY4PhantomForcePT.png	
+XY5/earthspulsexy5deck	XY5_earthspulsexy5deck.png	
+XY5/groudonspring2015	XY5_groudonspring2015.png	
+XY5/kyogrespring2015	XY5_kyogrespring2015.png	
+XY5/oceanscorexy5deck	XY5_oceanscorexy5deck.png	
+XY5/packs/XY5PrimalClash	XY5_packs_XY5PrimalClash.png	
+XY5/packs/XY5PrimalClashPT	XY5_packs_XY5PrimalClashPT.png	
+XY6/aurorablastxy6deck	XY6_aurorablastxy6deck.png	
+XY6/blazikenexsummer2015	XY6_blazikenexsummer2015.png	
+XY6/packs/XY6RoaringSkies	XY6_packs_XY6RoaringSkies.png	
+XY6/sceptileexsummer2015	XY6_sceptileexsummer2015.png	
+XY6/stormriderxy6deck	XY6_stormriderxy6deck.png	
+XY6/swampertexsummer2015	XY6_swampertexsummer2015.png	
+XY7/darkraivsmewtwo	XY7_darkraivsmewtwo.png	
+XY7/hoopaexfall2015	XY7_hoopaexfall2015.png	
+XY7/irontidexy7deck	XY7_irontidexy7deck.png	
+XY7/latiosexfall2015	XY7_latiosexfall2015.png	
+XY7/packs/XY7AncientOrigins	XY7_packs_XY7AncientOrigins.png	
+XY7/rayquazaexfall2015	XY7_rayquazaexfall2015.png	
+XY7/stoneheartxy7deck	XY7_stoneheartxy7deck.png	
+XY7/xy7bundle3packa	XY7_xy7bundle3packa.png	
+XY7/xy7bundle3packb	XY7_xy7bundle3packb.png	
+XY7/xy7bundlecoinpacka	XY7_xy7bundlecoinpacka.png	
+XY7/xy7bundlecoinpackb	XY7_xy7bundlecoinpackb.png	
+XY8/burningspark	XY8_burningspark.png	
+XY8/nightstriker	XY8_nightstriker.png	
+XY8/packs/XY8Breakthrough	XY8_packs_XY8Breakthrough.png	
+XY8/xy8bundle3packa	XY8_xy8bundle3packa.png	
+XY8/xy8bundle3packb	XY8_xy8bundle3packb.png	
+XY8/xy8bundlecoinpacka	XY8_xy8bundlecoinpacka.png	
+XY8/xy8bundlecoinpackb	XY8_xy8bundlecoinpackb.png	
+XY8/xy8elitetrainerbundlex	XY8_xy8elitetrainerbundlex.png	
+XY8/xy8elitetrainerbundley	XY8_xy8elitetrainerbundley.png	
+XY9/electriceyexy9pcd	XY9_electriceyexy9pcd.png	
+XY9/gyaradosspring2016	XY9_gyaradosspring2016.png	
+XY9/machampspring2016	XY9_machampspring2016.png	
+XY9/mewtwospring2016	XY9_mewtwospring2016.png	
+XY9/packs/XY9BREAKpoint	XY9_packs_XY9BREAKpoint.png	
+XY9/waveslasherxy9pcd	XY9_waveslasherxy9pcd.png	
+XY9/xy9elitetrainerbox	XY9_xy9elitetrainerbox.png	
