@@ -1,0 +1,209 @@
+# CLAUDE.md
+
+Working notes for this repo. Read this before changing anything — most of it
+is knowledge that cost real time to recover and is not obvious from the code.
+
+## What this is
+
+A local server for the **Pokémon Trading Card Game Online** client
+(v2.95.0.5815), which lost its servers on 2023-06-05. Everything was
+reverse-engineered from the client binaries on this machine. Goal: play
+offline. Currently reaches the main menu and deck builder with a full card
+collection; no gameplay yet.
+
+## Environment
+
+Windows. The client is a Unity 2018.4.11f1 / Mono game.
+
+| What | Where |
+| --- | --- |
+| Repo | `%APPDATA%\Pokémon Trading Card Game Online\ptcgo-local\` |
+| Client install | `%APPDATA%\Pokémon Trading Card Game Online\PokemonTradingCardGameOnline\` |
+| Managed DLLs | `<install>\Pokemon Trading Card Game Online_Data\Managed\` |
+| StreamingAssets | `<install>\Pokemon Trading Card Game Online_Data\StreamingAssets\` |
+| persistentDataPath | `%USERPROFILE%\AppData\LocalLow\The Pokémon Company International\Pokemon Trading Card Game Online\` |
+| Client log | `<persistentDataPath>\output_log.txt` |
+
+Note the `é` in the path — it breaks PowerShell scripts written as UTF-8
+without BOM. Glob around it: `Get-Item "$env:APPDATA\*Trading Card Game Online\..."`.
+
+## Running
+
+```
+start-server.cmd          # or: python server.py
+```
+
+Server must be up before the client tries to log in. Then launch the client
+normally. Everything is logged — inbound frames, outbound frames, and
+`no handler for '<Name>'` for anything unimplemented.
+
+`test_client.py` replays the handshake without the game.
+
+## First-time setup (after a fresh clone)
+
+`carddata/` and `certs/` are gitignored. To rebuild:
+
+1. **Certs** — self-signed, SANs for `127.0.0.1`, `localhost`,
+   `tcgo-gateway.direwolfdigital.com`, `subject == issuer`:
+   ```
+   openssl req -x509 -newkey rsa:2048 -nodes -keyout certs/server.key \
+     -out certs/server.crt -days 3650 -config certs/san.cnf -sha256
+   ```
+2. **Card data** — export from the client's shipped archetype blobs. See
+   "Reading the archetype blobs" below.
+3. **Client config** — write an override `cake.cfg` into persistentDataPath
+   (the client reads that before the shipped one, so the install stays clean):
+   ```
+   hostname=127.0.0.1
+   versionURL=http://127.0.0.1:8081/
+   assetURL=http://127.0.0.1:8081/
+   ShouldPatch=false
+   ```
+   plus the `*AppSecret` lines copied from the shipped config. Also mirror
+   `StreamingAssets\tcgo-gateway.direwolfdigital.com\` to
+   `StreamingAssets\127.0.0.1\` (some paths derive from the hostname).
+
+## Architecture
+
+- `server.py` — gateway (39389, TLS), game server (39390, TLS). All message
+  handlers are `GameSession.on_<MessageName>`; dispatch is by method name, so
+  adding a handler is just adding a method.
+- `asset_server.py` — CDN stand-in on 8081 (plain HTTP, not TLS — Unity's curl
+  would reject a self-signed cert). Serves the bundle manifest, dynamic
+  config, motd, and `.unity3d` bundles.
+- `build_cache.py` — writes an on-disk archetype cache. **Currently dead
+  code**: it targets `WargArchetypesSource`, which nothing in this build
+  constructs. Kept only as a reference for the file format.
+
+## Protocol essentials
+
+Frame: `[int32 BE length][uint32 BE requestID][uint32 BE flags][payload]`,
+where `length` counts requestID + flags + payload (`payload = length - 8`).
+
+Flags: `0x01` compressed (deflate, skip 2 leading bytes), `0x02` protobuf,
+`0x04` ping/pong, `0x10` connection error, `0x20` ack, `0x40` reconnect.
+
+JSON payload: `{"name": "<C# class name>", "value": {...}}`, fields named by
+each class's `[JsonName]`. The client resolves `name` against classes marked
+`[DwdJsonMessage]`.
+
+Protobuf payload: wrapped in `dwd.Protobuf.ProtoMessage` —
+field 1 = full .NET type name, field 2 = a tag number, field `<tag>` = the
+body (arrives as a protobuf-net *extension*). Tag is writer's choice; we use
+100.
+
+The gateway port **39389 is hardcoded in the client**, not configurable.
+
+## Traps — read these
+
+**A `dwd.Protobuf.*` type existing does NOT mean the message is protobuf.**
+`CollectionCountFound` has one, but nothing registers it as a
+`ProtobufCounterpart`, so sending it as protobuf made
+`ProtobufProcessor.Convert()` return the raw protobuf object and
+`WargSocket.Read()` threw `InvalidCastException` — which killed the read
+thread and dropped the session with no error message. Always confirm a
+`[ProtobufCounterpart(typeof(...))]` registration exists first.
+
+**Arrays must be present and non-null.** The client iterates them unguarded.
+Empty is fine; null is a `NullReferenceException`.
+
+**Blocking loops gate the loading bar.** Several commands do
+`while (model == null) yield return null;`. If you see the bar stick at a
+percentage, find the message whose reply populates that model
+(`GetDynamicVersions` and `GetGuidOverride` were two).
+
+**`sausage-core` is largely dead code in this build.** `WargArchetypesSource`
+is never constructed. The live archetype path is in `pie-src` and is per-set.
+Verify a class is actually instantiated before building against it — this cost
+an entire wrong implementation.
+
+**Don't invent localization releases.** Returning a dummy release to dodge
+error `2700200` writes garbage into the client's local DB. Serve the real
+strings (see below) instead.
+
+**The client reports its own crashes** as `LogClientError`, with a full stack
+in `debugInfo.Stack`. This is the fastest debugging tool available — the
+server log usually explains a client-side failure before `output_log.txt`
+does.
+
+## Reverse-engineering techniques
+
+**Decompiling.** `ilspycmd` with `DOTNET_ROLL_FORWARD=LatestMajor` (it targets
+.NET 6, which isn't installed). Decompile to a **single flat file** —
+obfuscated namespaces `b` and `B` collide on a case-insensitive filesystem and
+silently overwrite each other in per-file output.
+
+**Obfuscated strings.** Encrypted in a `<PrivateImplementationDetails>` class
+with ~1200 static decryptor methods. Don't reverse the cipher — load the
+assemblies by reflection and invoke the decryptors. Yields ~7,557 strings and
+makes the protocol readable. (`dumpstr.ps1` pattern.)
+
+**Obfuscated field names.** Many fields share a name (`A`, `a`, `B`) and
+differ only by type. Aligning decompiler declaration order to reflection order
+**does not work** — it mismatched on 38 of 191 fields and produced a wrong
+answer. Instead read the method's IL:
+`MethodBase.GetMethodBody().GetILAsByteArray()`, take the operand of each
+`ldsfld` (opcode `0x7E`), resolve with `Module.ResolveField(token)`. Exact,
+and gives the live value too.
+
+**Reading the archetype blobs.** `StreamingAssets\<hostname>\<SET>` files are
+BinaryFormatter-serialized `dwd.Protobuf.Collection.ArchetypesFound`. .NET
+Framework's BinaryFormatter refuses them (obfuscated fields differ only in
+case → CLS check). Mono doesn't care, but we're not on Mono. Workaround: an
+`ISerializable` shim class plus a `SerializationBinder` that maps every
+`dwd.*` type to the shim — `ISerializable` bypasses the member-binding check.
+Bind `List<dwd.Protobuf.X>` to `List<Shim>` and let enums (`+Type`) resolve
+normally. That produced all 9,940 cards.
+
+**Localization.** The prebuilt `LocalizationDB-UTF16.db` in StreamingAssets is
+stamped `user_version=3` but this build's config wants 4, so `PieDB.Init`
+wipes it on every launch — it is permanently stale. Strings therefore have to
+come from the server: read the prebuilt DB directly and serve its ~27,550
+rows as one release.
+
+## Card data
+
+`carddata/*.json`, one file per set, `{set, checksum, archetypes:[{lo, hi,
+attrs:[{n, v}]}]}` where `lo/hi` are the protobuf UUID halves and `v` is a
+`dwd.Protobuf.Object`.
+
+`uuid_to_guid_str()` mirrors `ProtobufExtensions.ToGuid` bit-for-bit. It has
+to: `CollectionCount.archetypeID` is a GUID string and must match what the
+client derives from the protobuf UUID.
+
+Archetype IDs must be unique across sets — the client does
+`dictionary.Add(archetypeID, ...)` and throws on duplicates, aborting the
+whole load. `load_cards()` de-dupes defensively.
+
+Useful attribute keys: `200580` set code, `200630` name, `200550` rarity,
+`200490` HP, `200540` stage, `10140` localized-name key, `201420` league order
+(scenarios).
+
+## Card art — the open problem
+
+Only **5 of 62 sets** have art on disk (XY12 + the four energy sets). The
+other 57 were CDN-hosted and the CDN is dead; `bundleCache/` was never
+populated. Shipped bundles are mostly cosmetics (avatars, sleeves, coins, deck
+boxes, packs, logos, set icons).
+
+Card art is loaded **only** via `AssetBundle.LoadFromFile` — there is no
+loose-image path for cards, so external PNGs can't be dropped in without
+either repackaging into Unity 5.2.4f1 `UnityWeb` bundles (version-locked) or
+patching the client.
+
+Promising route: `pie-src` `N/V.cs` already has
+`GetURLImage(string url, callback)` — a URL→Texture loader with caching, used
+for landing-page banners. Patching the card art path to use it would remove
+the bundle dependency entirely and let any image source work.
+
+`asset_server.py` already serves `.unity3d` files over HTTP at
+`/bundles/pc/{locale}/{locale}_{name}_{version}.unity3d`, so dropping recovered
+bundles into StreamingAssets\en_US\ makes them available with no code change.
+
+## Status / next
+
+Working: login (DeviceID + sha1), full load to main menu, 27,550 localized
+strings, 62 sets, 9,940 cards, 4 of each in the collection.
+
+Next: card art (see above), then deck saving/loading, then gameplay (the match
+engine — much larger; `dwd.core.match` namespaces).

@@ -1,0 +1,14 @@
+# Extracted game data - derived from the local PTCGO install, not ours to
+# redistribute. Regenerate with the exporter (see CLAUDE.md).
+carddata/
+
+# Self-signed TLS key/cert - regenerate locally, never commit a private key.
+certs/
+
+# Per-machine state
+accounts.json
+server.log
+*.log
+
+__pycache__/
+*.pyc
