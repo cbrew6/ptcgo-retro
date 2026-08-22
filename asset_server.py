@@ -35,7 +35,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 PORT = 8081
 # Bump when the manifest contents change - the client caches the manifest by
 # version number and won't re-fetch otherwise.
-MANIFEST_VERSION = 3
+MANIFEST_VERSION = 4
 
 log = logging.getLogger("assets")
 
@@ -57,9 +57,25 @@ def load_index():
 
 
 def asset_aliases(bundle, names):
-    """Register "{prefix}/{asset}" for every underscore-delimited prefix."""
+    """Register "{prefix}/{asset}" for each underscore-delimited prefix.
+
+    Foil bundles must NOT claim the bare set prefix. Card art is requested as
+    "{set}/{number}" and foil masks as "{set}_{mask}/{number}", but a bundle
+    like XY12_wp_ph_Foil_CR85 holds asset "011" just as XY12_fire_CR85 does.
+    Allowing the foil bundle to also claim "XY12/011" makes it overwrite the
+    art in the asset map (last writer wins), so the client asks for the card
+    face and gets handed a foil mask - foils render, art doesn't.
+
+    So for any bundle carrying a wp_<mask> segment, aliases start at the
+    prefix that includes that segment and never get shorter.
+    """
     parts = bundle.split("_")
-    prefixes = {"_".join(parts[:i]) for i in range(1, len(parts) + 1)}
+    start = 1
+    for k, p in enumerate(parts):
+        if p == "wp" and k + 1 < len(parts):
+            start = k + 2          # keep e.g. "XY12_wp_ph", never plain "XY12"
+            break
+    prefixes = {"_".join(parts[:i]) for i in range(start, len(parts) + 1)}
     out = []
     for pref in sorted(prefixes):
         for n in names:
