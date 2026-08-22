@@ -446,6 +446,45 @@ def build_family_map():
 DECKS_PATH = os.path.join(HERE, "decks.json")
 ZERO_GUID = "00000000-0000-0000-0000-000000000000"
 
+# validationResults must NOT be empty, and this is the second time an empty
+# array has looked harmless and not been. The deck builder's DeckSaved
+# coroutine does, in effect:
+#
+#     foreach (r in validation) if (r.Valid) list.Add(r);
+#     if (list.Count > 0) {
+#         r2 = validation.FirstOrDefault(x => x.FormatName == <primary>);
+#         if (r2 != null && r2.Valid)  ... proceed ...
+#         else { ... may set flag2 = false ... }
+#     }
+#     if (!flag2) yield break;          // never reaches HandleSaveDeckCleanup
+#
+# so with nothing valid the save completes on the server, the deck is written
+# to disk, and the UI simply never advances - exactly the "sits in the deck
+# builder" symptom.
+#
+# The format name it looks for is an encrypted string constant, so rather than
+# decrypt it we answer for every format name the client knows about (the
+# DeckType and FormatType enums, unioned). FirstOrDefault then matches
+# whichever one it wanted. Extra names are inert: every lookup in that
+# coroutine is a by-name search, not an iteration over what we sent.
+DECK_FORMAT_NAMES = ("Standard", "Modified", "Expanded", "Legacy", "Unlimited",
+                     "ThemeDeck", "TrainerChallengeDeck", "Intermediate",
+                     "Unfinished")
+
+
+def deck_validation(deck_id):
+    """Every format, valid, no failure details - consistent with legality."""
+    return [
+        {
+            "deckID": deck_id,
+            "format": ZERO_GUID,
+            "formatName": name,
+            "valid": True,
+            "results": [],
+        }
+        for name in DECK_FORMAT_NAMES
+    ]
+
 _decks = None
 _decks_lock = threading.Lock()
 
@@ -893,7 +932,7 @@ class GameSession:
         write_frame(self.sock, msg("DeckSaved", {
             "deckID": deck_id,
             "deck": deck,
-            "validationResults": [],
+            "validationResults": deck_validation(deck_id),
         }), request_id)
 
     def on_CakeDeleteDeck(self, value, request_id):
