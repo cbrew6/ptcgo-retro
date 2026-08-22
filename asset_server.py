@@ -35,12 +35,37 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 PORT = 8081
 # Bump when the manifest contents change - the client caches the manifest by
 # version number and won't re-fetch otherwise.
-MANIFEST_VERSION = 2
+MANIFEST_VERSION = 3
 
 log = logging.getLogger("assets")
 
 LOCALE = "en_US"
 PLATFORM = "pc"
+
+INDEX_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          "bundle_index.json")
+
+
+def load_index():
+    """bundle name -> asset names, produced by bundle_index.py."""
+    if not os.path.exists(INDEX_PATH):
+        log.error("%s missing - run bundle_index.py, or every image will be "
+                  "black", INDEX_PATH)
+        return {}
+    with open(INDEX_PATH, encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def asset_aliases(bundle, names):
+    """Register "{prefix}/{asset}" for every underscore-delimited prefix."""
+    parts = bundle.split("_")
+    prefixes = {"_".join(parts[:i]) for i in range(1, len(parts) + 1)}
+    out = []
+    for pref in sorted(prefixes):
+        for n in names:
+            out.append({"name": "%s/%s" % (pref, n)})
+    return out
+
 
 BUNDLE_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -62,17 +87,28 @@ def discover_bundles():
     so as long as name/version round-trip, the client loads straight off disk
     and never touches the network.
 
-    `assets` is left empty: it only feeds the asset-name -> bundle index, and
-    card art is requested as "{set}/{cardNumber}", which resolves through
-    getFullBundleName() substring matching on the bundle NAME instead. It must
-    still be present and non-null - SetBundle() iterates it unguarded.
+    `assets` is populated from bundle_index.json and is NOT optional: every
+    art request in the client is gated behind
+    DoesAssetExistInManifest(assetName), which is just a lookup in the
+    asset-name -> bundle map built from these arrays. Leave it empty and the
+    client never requests a single bundle - everything renders black.
+
+    Lookups use the name FormatAssetRequest() builds, "{bundle}/{asset}",
+    where {bundle} is a logical name that may be shorter than the real bundle
+    name: card art asks for "XY12/064" while the bundle is
+    "XY12_colorless_CR85", and cosmetics ask for "deckBoxes/x" while the
+    bundle is "deckBoxes_CR72". Since the logical name isn't recoverable from
+    the file, register every underscore-delimited prefix as an alias. They all
+    point at the same descriptor, so extra aliases are harmless.
     """
     if not os.path.isdir(BUNDLE_DIR):
         log.error("no bundle directory at %s - images will be missing",
                   BUNDLE_DIR)
         return []
 
+    index = load_index()
     bundles = []
+    total_assets = 0
     for fn in sorted(os.listdir(BUNDLE_DIR)):
         if not fn.endswith(".unity3d"):
             continue
@@ -84,9 +120,11 @@ def discover_bundles():
         if not name or not ver.isdigit():
             continue
         version = int(ver)
+        assets = asset_aliases(name, index.get(name, []))
+        total_assets += len(assets)
         bundles.append({
             "name": name,
-            "assets": [],
+            "assets": assets,
             # SingleOrDefault is used to pick these by locale, so exactly one
             # entry per locale - a duplicate would throw.
             "versionings": [{
@@ -103,7 +141,8 @@ def discover_bundles():
             }],
             "timesensitive": 0,
         })
-    log.info("discovered %d local asset bundles", len(bundles))
+    log.info("discovered %d local asset bundles, %d asset entries",
+             len(bundles), total_assets)
     return bundles
 
 

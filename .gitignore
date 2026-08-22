@@ -2,6 +2,10 @@
 # redistribute. Regenerate with the exporter (see CLAUDE.md).
 carddata/
 
+# Asset-name index extracted from the installed .unity3d bundles.
+# Regenerate with: python bundle_index.py
+bundle_index.json
+
 # Self-signed TLS key/cert - regenerate locally, never commit a private key.
 certs/
 
