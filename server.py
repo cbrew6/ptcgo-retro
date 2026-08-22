@@ -424,6 +424,55 @@ def build_family_map():
     return _family_map
 
 
+_family_names = None
+
+ATTR_NAME_KEY = 10140
+
+# Lowest stage first: the family is named after what it evolves from, so
+# family 27 reads "Pikachu" and family 84 "Charmander".
+STAGE_ORDER = ["Basic", "Restored", "Stage1", "Stage2", "Break", "LevelUp",
+               "Legend", "VMAX", "VSTAR", "VUNION"]
+
+
+def build_pokemon_family_names():
+    """pokemonFamilyMap: {family id: LocalizableText}, i.e. {"id": <key>}.
+
+    The third unguarded lookup in this chain. w.D.get_PokemonFamilyString()
+    is just
+
+        return n.j.A[this.A];
+
+    and n.j.A is assigned straight from this message, so a missing family id
+    throws. It is called from DeckCoallationUtil.BuildPokemonFamilyMap, which
+    runs from CakeDeckBuilderDeckDataSource.Update() - every frame - so an
+    empty map means the deck panel can never draw. Cards go into the deck
+    (the 4-copy limit still fires) but nothing about it renders.
+
+    Attribute 10140 holds the card's name key, wrapped as "$$$...$$$".
+    LocalizableText's constructor trims '$', so the wrapper is harmless, but
+    the keys are stored mixed-case while the localization table is lowercase -
+    and the table is what we serve, so lowercase is what the client will have.
+    """
+    global _family_names
+    if _family_names is None:
+        best = {}
+        for a in load_cards():
+            attrs = {x["n"]: (x.get("v") or {}) for x in a["attrs"]}
+            family = attrs.get(ATTR_FAMILY, {}).get("i")
+            raw = attrs.get(ATTR_NAME_KEY, {}).get("s")
+            stage = attrs.get(ATTR_STAGE, {}).get("s")
+            if family is None or not raw:
+                continue
+            rank = (STAGE_ORDER.index(stage) if stage in STAGE_ORDER
+                    else len(STAGE_ORDER))
+            key = raw.strip('"').strip("$").lower()
+            if str(family) not in best or rank < best[str(family)][0]:
+                best[str(family)] = (rank, key)
+        _family_names = {f: {"id": k} for f, (_, k) in best.items()}
+        log.info("built pokemon family names: %d families", len(_family_names))
+    return _family_names
+
+
 _format_legality = None
 
 # ArchFormatLegality.FormatLegality is a bool[] indexed by FormatType:
@@ -923,7 +972,12 @@ class GameSession:
         self.send("NoMotdSet", {}, request_id)
 
     def on_GetPokemonFamilyMap(self, value, request_id):
-        self.send("PokemonFamilyMap", {"pokemonFamilyMap": {}}, request_id)
+        names = build_pokemon_family_names()
+        log.info("[game %s] -> PokemonFamilyMap (%d families)",
+                 self.peer, len(names))
+        write_frame(self.sock,
+                    msg("PokemonFamilyMap", {"pokemonFamilyMap": names}),
+                    request_id)
 
     def on_QuestsEnabled(self, value, request_id):
         # Client telling the server it opted into quests; no reply expected.
