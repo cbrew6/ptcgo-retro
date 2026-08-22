@@ -30,6 +30,8 @@ import json
 import logging
 import os
 import re
+import urllib.parse
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PORT = 8081
@@ -196,10 +198,53 @@ CLIENT_CONFIG = {
     # WebRequest.Create, so blanking them throws UriFormatException and stalls
     # the loading bar at 0%. The shipped defaults point at Pokemon's dead SSO;
     # aim them at this server instead so nothing leaves the machine.
+    #
+    # hostName has no "/sso" suffix on purpose: the CAS command builds
+    #     hostName + "/sso/login?service=" + serviceID + "&locale=" + lang
+    # so putting it here too produced /sso/sso/login and a 404, which the
+    # client reports as "couldn't reach pokemon.com".
     "serviceID": "http://127.0.0.1:8081/sso/game_client_signin",
-    "hostName": "http://127.0.0.1:8081/sso",
+    "hostName": "http://127.0.0.1:8081",
     "disableAnalytics": "true",
 }
+
+# --------------------------------------------------------------------------
+# CAS single sign-on stand-in
+# --------------------------------------------------------------------------
+#
+# Logging in with a username instead of a device ID is what makes the client
+# treat the account as a real one rather than a guest, and that is what stops
+# the account upsell, the "Have Fun!" dialog and the forced walk into Trainer
+# Challenge. That path goes through Pokemon's CAS server, which is gone.
+#
+# The client does an ordinary two-step CAS scrape (pie-src, command o.X):
+#
+#   GET  {hostName}/sso/login?service={serviceID}&locale={lang}
+#        -> parses two hidden fields out of the HTML:
+#             <input type="hidden" name="lt" value="([^"]+)
+#             <input type="hidden" name="execution" value="([^"]+)
+#   POST same URL with lt, execution, _eventId=submit, username, password
+#        -> looks for a ticket, first in a "Location" response header and
+#           then in the body, both with the regex \?ticket=([^&]+)
+#
+# So a redirect to {service}?ticket=ST-... is all it needs. Any username and
+# password are accepted: the WARG side auto-creates accounts anyway, and this
+# is a local server with no one else on it.
+
+SSO_LOGIN_PATH = "/sso/login"
+
+SSO_FORM = """<!doctype html>
+<html><head><title>Sign in</title></head><body>
+<form method="post" action="{action}">
+<input type="hidden" name="lt" value="{lt}" />
+<input type="hidden" name="execution" value="{execution}" />
+<input type="hidden" name="_eventId" value="submit" />
+<input type="text" name="username" />
+<input type="password" name="password" />
+<input type="submit" value="Sign in" />
+</form>
+</body></html>
+"""
 
 VERSION_RE = re.compile(r"^/bundles/(?:[^/]+/)*manifest\.version$")
 MANIFEST_RE = re.compile(r"^/bundles/(?:[^/]+/)*manifest_(\d+)\.manifest$")
@@ -220,8 +265,49 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _service_from_query(self):
+        qs = self.path.split("?", 1)[1] if "?" in self.path else ""
+        params = urllib.parse.parse_qs(qs)
+        return (params.get("service") or [""])[0]
+
+    def do_POST(self):
+        path = self.path.split("?", 1)[0]
+        if path != SSO_LOGIN_PATH:
+            log.warning("404 POST %s", path)
+            self._send(b"not found", "text/plain", status=404)
+            return
+
+        length = int(self.headers.get("Content-Length") or 0)
+        body = self.rfile.read(length) if length else b""
+        fields = urllib.parse.parse_qs(body.decode("utf-8", "replace"))
+        username = (fields.get("username") or [""])[0]
+
+        service = self._service_from_query()
+        ticket = "ST-" + uuid.uuid4().hex
+        target = "%s%sticket=%s" % (service, "&" if "?" in service else "?",
+                                    ticket)
+        log.info("-> SSO ticket for %r: %s", username, ticket)
+        # ScrapeHeader checks the Location header first; a 302 is the shape a
+        # real CAS server replies with. The body carries the ticket too, so
+        # ScrapeTicket still finds it if the redirect is followed instead.
+        body = ("<html><body>Redirecting to %s</body></html>" % target).encode()
+        self.send_response(302)
+        self.send_header("Location", target)
+        self.send_header("Content-Type", "text/html")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_GET(self):
         path = self.path.split("?", 1)[0]
+
+        if path == SSO_LOGIN_PATH:
+            page = SSO_FORM.format(action=self.path,
+                                   lt="LT-" + uuid.uuid4().hex,
+                                   execution="e1s1").encode("utf-8")
+            log.info("-> sso/login form")
+            self._send(page, "text/html")
+            return
 
         if VERSION_RE.match(path):
             log.info("-> manifest.version = %d  (%s)", MANIFEST_VERSION, path)

@@ -1278,7 +1278,29 @@ class GameSession:
 
         self._succeed(username, request_id)
 
-    def _succeed(self, username, request_id):
+    def on_AuthenticateCASTicket(self, value, request_id):
+        # The client got a ticket from our SSO stand-in. There is nothing to
+        # validate against - we issued it - so accept and log in.
+        value = value or {}
+        username = value.get("accountName") or self.username or "player"
+        self.account = ACCOUNTS.get_or_create(username)
+        log.info("[game %s] CAS ticket accepted for %s", self.peer, username)
+        self._succeed(username, request_id)
+
+    def on_UpgradeDeviceAccount(self, value, request_id):
+        # Sent instead of AuthenticateCASTicket when the client is already in
+        # a device (guest) account. Replying with supplementaryInfo
+        # "AccountUpgradeSuccessful" is what clears the guest flag: the login
+        # handler takes a branch that sets it false, which is what stops the
+        # upsell and the "Have Fun!" dialog.
+        value = value or {}
+        username = value.get("username") or self.username or "player"
+        self.account = ACCOUNTS.get_or_create(username)
+        log.info("[game %s] device account upgraded to %s", self.peer, username)
+        self._succeed(username, request_id,
+                      supplementary="AccountUpgradeSuccessful")
+
+    def _succeed(self, username, request_id, supplementary=None):
         self.authenticated = True
         # Pin it here rather than relying on whichever auth path got us here,
         # so later handlers (visited scenes) always know who this is.
@@ -1296,6 +1318,10 @@ class GameSession:
                 "attributes": account_attributes(username),
             },
             "sessionID": self.session_id,
+            # AuthenticationSuccessful.supplementaryInfo. "AccountUpgradeSuccessful"
+            # makes the login handler take the branch that clears the guest
+            # flag; None on an ordinary login leaves the normal path alone.
+            "supplementaryInfo": supplementary,
         }, request_id)
 
         # EulaViewMediator reads a EulaData state that defaults to NONE, which
