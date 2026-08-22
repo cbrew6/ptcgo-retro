@@ -424,6 +424,61 @@ def build_family_map():
     return _family_map
 
 
+# --------------------------------------------------------------------------
+# decks
+# --------------------------------------------------------------------------
+#
+# The client sends CakeSaveDeck with a SerializableDeck:
+#
+#   {"deckID": <guid>, "deckName": str,
+#    "attributes": [{"name": int, "value": guid, "originalValue": guid}],
+#    "piles": {"CakePile": [archetypeID, ...]}}
+#
+# deckID is the zero GUID for a new deck; the server is what assigns a real
+# one. The reply is DeckSaved {deckID, deck, validationResults}, and
+# SaveDeckToServer.handle() just stores those and finishes, so an empty
+# validation array means "no problems" and is safe.
+#
+# Decks live in decks.json next to this file. Keeping them as the exact
+# structure the client sent means GetDeckList can hand them straight back
+# without a second format to keep in step.
+
+DECKS_PATH = os.path.join(HERE, "decks.json")
+ZERO_GUID = "00000000-0000-0000-0000-000000000000"
+
+_decks = None
+_decks_lock = threading.Lock()
+
+
+def load_decks():
+    global _decks
+    if _decks is None:
+        try:
+            with open(DECKS_PATH, encoding="utf-8") as fh:
+                _decks = json.load(fh)
+            log.info("loaded %d saved deck(s) from %s", len(_decks), DECKS_PATH)
+        except FileNotFoundError:
+            _decks = []
+        except Exception as exc:
+            # A corrupt file must not cost the session; start clean and say so
+            # rather than failing the save that is about to happen.
+            log.error("could not read %s (%s) - starting with no decks",
+                      DECKS_PATH, exc)
+            _decks = []
+    return _decks
+
+
+def store_decks():
+    """Write atomically so an interrupted save cannot truncate the file."""
+    tmp = DECKS_PATH + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(_decks, fh, indent=1)
+        os.replace(tmp, DECKS_PATH)
+    except Exception as exc:
+        log.error("could not save decks: %s", exc)
+
+
 _family_names = None
 
 ATTR_NAME_KEY = 10140
@@ -803,7 +858,58 @@ class GameSession:
         self.send("CurrentWallet", {"currencies": []}, request_id)
 
     def on_GetDeckList(self, value, request_id):
-        self.send("OnlineDecksFound", {"decks": []}, request_id)
+        decks = load_decks()
+        log.info("[game %s] -> OnlineDecksFound (%d decks)",
+                 self.peer, len(decks))
+        write_frame(self.sock, msg("OnlineDecksFound", {"decks": decks}),
+                    request_id)
+
+    def on_CakeSaveDeck(self, value, request_id):
+        deck = dict((value or {}).get("deck") or {})
+        if not deck:
+            log.warning("[game %s] CakeSaveDeck with no deck", self.peer)
+            self.send("DeckSaveFailed", {"deckID": ZERO_GUID}, request_id)
+            return
+
+        deck_id = deck.get("deckID") or ZERO_GUID
+        if deck_id == ZERO_GUID:
+            deck_id = str(uuid.uuid4())      # a new deck; we assign the id
+        deck["deckID"] = deck_id
+
+        with _decks_lock:
+            decks = load_decks()
+            for i, existing in enumerate(decks):
+                if existing.get("deckID") == deck_id:
+                    decks[i] = deck
+                    break
+            else:
+                decks.append(deck)
+            store_decks()
+
+        cards = len((deck.get("piles") or {}).get("CakePile") or [])
+        log.info("[game %s] saved deck %r (%s, %d cards) - %d total",
+                 self.peer, deck.get("deckName"), deck_id, cards,
+                 len(load_decks()))
+        write_frame(self.sock, msg("DeckSaved", {
+            "deckID": deck_id,
+            "deck": deck,
+            "validationResults": [],
+        }), request_id)
+
+    def on_CakeDeleteDeck(self, value, request_id):
+        deck_id = (value or {}).get("deckID")
+        with _decks_lock:
+            decks = load_decks()
+            kept = [d for d in decks if d.get("deckID") != deck_id]
+            if len(kept) == len(decks):
+                log.warning("[game %s] delete: no deck %s", self.peer, deck_id)
+                self.send("DeleteDeckFailed", {"deckID": deck_id}, request_id)
+                return
+            decks[:] = kept
+            store_decks()
+        log.info("[game %s] deleted deck %s (%d left)",
+                 self.peer, deck_id, len(load_decks()))
+        self.send("DeckDeleted", {"deckID": deck_id}, request_id)
 
     def on_GetAvatarDeckList(self, value, request_id):
         self.send("OnlineAvatarDecksFound", {"decks": []}, request_id)

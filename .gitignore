@@ -25,3 +25,4 @@ tools/fetch_all_art.log
 tools/art_state.json
 tools/namecache/
 tools/art_provenance.json
+decks.json
