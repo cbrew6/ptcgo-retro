@@ -377,6 +377,53 @@ def build_collection():
     return _collection
 
 
+_family_map = None
+
+# Attribute 200260 is the evolution family id, confirmed against the data:
+# family 27 is Pikachu / Raichu / AlolanRaichu / RaichuGX / RaichuBREAK,
+# family 84 is Charmander / Charmeleon / Charizard.
+ATTR_FAMILY, ATTR_STAGE = 200260, 200540
+
+
+def build_family_map():
+    """familyMap: {family id: {PokemonStage: [archetypeID, ...]}}.
+
+    This one is not optional either, and it fails harder than the legality
+    list did. PreviousEvolutionsOwned() does
+
+        get_archUtil().get_ArchetypeIDsByFamily()[num].ContainsKey(...)
+
+    where the OUTER lookup is unguarded, so any Pokemon whose family id is
+    missing from the map throws KeyNotFoundException. That happens inside the
+    deck builder's collection filter, which aborts the whole list rebuild -
+    so the symptom is not one broken card but a deck you cannot add anything
+    to at all.
+
+    Building from carddata means every family id the client can ask about is
+    present by construction.
+
+    Stage keys are the enum member names (Basic, Stage1, Stage2, Break...).
+    carddata stores exactly those strings in attribute 200540, which is what
+    the original server sent, so that is the wire form.
+    """
+    global _family_map
+    if _family_map is None:
+        families = {}
+        for a in load_cards():
+            attrs = {x["n"]: (x.get("v") or {}) for x in a["attrs"]}
+            family = attrs.get(ATTR_FAMILY, {}).get("i")
+            stage = attrs.get(ATTR_STAGE, {}).get("s")
+            if family is None or not stage:
+                continue
+            families.setdefault(str(family), {}).setdefault(stage, []).append(
+                uuid_to_guid_str(a["lo"], a["hi"]))
+        _family_map = families
+        log.info("built family map: %d families, %d archetypes placed",
+                 len(families),
+                 sum(len(v) for f in families.values() for v in f.values()))
+    return _family_map
+
+
 _format_legality = None
 
 # ArchFormatLegality.FormatLegality is a bool[] indexed by FormatType:
@@ -740,7 +787,12 @@ class GameSession:
                            body, request_id)
 
     def on_GetArchetypeIDsByFamily(self, value, request_id):
-        self.send("ArchetypeIDsByFamily", {"familyMap": {}}, request_id)
+        families = build_family_map()
+        log.info("[game %s] -> ArchetypeIDsByFamily (%d families)",
+                 self.peer, len(families))
+        write_frame(self.sock,
+                    msg("ArchetypeIDsByFamily", {"familyMap": families}),
+                    request_id)
 
     def on_GetFormatLegalityForArchetypes(self, value, request_id):
         # Must not be empty. FormatLegalityProvider.handle() reads indexes
