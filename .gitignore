@@ -16,3 +16,7 @@ server.log
 
 __pycache__/
 *.pyc
+
+# Build artifacts / third-party tooling for the loose-art patch
+patch/*.dll
+patch/cecil/
