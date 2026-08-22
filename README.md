@@ -312,11 +312,23 @@ like a card id but is a per-set constant (all 20 archetypes in TK10B share
 it). A wrong card face is worse than a blank one, because it misstates the
 card while you are playing with it. Those 358 files were deleted.
 
-The one safe substitution is a variant printing: same set, same card number.
-Extracting both textures from the authentic XY12 bundles, which ship `011` and
-`011xy` side by side, settled what those are — the same card, same HP, ability
-and attack, differing only by a set-logo stamp in the art box. 64 of those are
-filled from their base card and are correct about every fact on the card.
+**Variant printings are two different things.** An archetype carrying
+attribute 10020 asks for `XY4/065xy` instead of `XY4/065`, and treating them as
+one class also produced a wrong card face:
+
+- **Alternate art** — attribute `200790` carries a second collector number
+  (`65a/119`, `28a/83`, `XY150a`). These are separate printings with their own
+  illustration: XY4's Aegislash-EX `65a` is the *full art*, not the regular
+  card. Public data indexes by exactly that number, so the client supplies the
+  mapping and the name check confirms it. **19 of these, downloaded.**
+- **Stamp / foil** — no second collector number. Settled by extracting both
+  textures from the authentic XY12 bundles, which ship `011` and `011xy` side
+  by side: same card, same HP, ability, attack and illustration, with a
+  set-logo stamp in the art box. **43 of these, copied from the base card**,
+  correct about every fact on the card.
+
+Four samples of one kind did not describe the class. The XY12 pair was real
+evidence about stamp variants and no evidence at all about alternate arts.
 
 ---
 
