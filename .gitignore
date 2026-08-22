@@ -23,3 +23,4 @@ patch/cecil/
 tools/setcache/
 tools/fetch_all_art.log
 tools/art_state.json
+tools/namecache/
