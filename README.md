@@ -18,13 +18,8 @@ details or hardcoded ports.
 
 ## Status
 
-**Working:** the client boots, logs in, loads fully, and reaches the main menu and deck
-builder. UI text renders. The collection holds 4 of every card — 9,940 archetypes
-across all 62 sets. The session stays connected with no disconnects.
-
-**Not working:** card art for 57 of 62 sets, and menu backgrounds — both were streamed
-from the CDN and never cached locally (see [Card art](#card-art)). Gameplay is not
-implemented.
+The client boots, logs in, loads to the main menu and deck builder, and renders UI text,
+cosmetics and card art. The collection holds 4 of every card.
 
 | Stage | State |
 | --- | --- |
@@ -32,17 +27,32 @@ implemented.
 | Asset preload | Working |
 | Gateway handshake | Working |
 | Session + login | Working (DeviceID and sha1/digest) |
-| Post-login data load | Working — 37 message handlers |
-| Main menu | Reached, stable |
-| Localization (labels) | Working — 27,550 strings served |
+| Post-login data load | Working — 38 message handlers |
+| Main menu / deck builder | Reached, stable |
+| Localization | Working — 27,550 strings served |
 | Card database | Working — 9,940 cards, all 62 sets |
 | Collection | Working — 4 of every card |
-| Asset bundles | Working — 233 bundles, 6,529 assets indexed |
-| Cosmetics (boxes, sleeves, coins, avatars) | Working |
-| Card art | Partial — energy sets + XY12 only; rest was CDN-hosted |
-| Backgrounds | Absent — CDN-hosted, no bundle ships locally |
-| Trainer Challenge | Stub scenarios only |
+| Asset bundles | Working — 233 bundles, 18,857 asset names indexed |
+| Cosmetics (boxes, sleeves, coins, packs, logos) | Working |
+| Card art | Working via loose-art patch; art sourced per card |
+| Backgrounds | Working via loose-art patch (one file) |
+| Foil / holo | Authentic for XY12 only; masks elsewhere absent |
+| Avatar items | **Not recoverable** — definitions never shipped |
 | Matches / gameplay | Not implemented |
+
+### What is genuinely gone
+
+Card art, foil masks and menu backgrounds were streamed from a CDN that no longer
+exists, and `bundleCache/` was never populated on this install. Only **5 of 62 sets**
+ship art locally (XY12 plus the four energy sets).
+
+The [loose-art patch](patch/) works around this: the client will display ordinary PNGs,
+so art can come from any source. It is a sourcing problem now, not a technical one.
+
+**Avatar items are the exception — they cannot be restored.** The wardrobe *art*
+survives (4,653 assets across 18 bundles), but only 2 of the 9,940 archetypes reference
+avatar art and both are pack products. The item definitions lived server-side. An empty
+avatar collection is the correct rendering of the data that exists.
 
 ---
 
@@ -52,15 +62,13 @@ implemented.
 start-server.cmd
 ```
 
-Then launch the game normally. The server must be running *before* the client tries to
-log in. Requires Python 3 (tested on 3.12).
+Then launch the game. The server must be running *before* the client logs in.
+Requires Python 3 (tested on 3.12); `Pillow` is needed for the art tools.
 
-Logging is verbose by design: every frame in and out is printed, and any message
-without a handler logs `no handler for '<Name>'`. That log is the primary tool for
-finding what to implement next.
+Logging is verbose by design: every frame in and out, plus `no handler for '<Name>'`
+for anything unimplemented. That log is the main tool for finding what to build next.
 
-`test_client.py` replays the full gateway → session → login handshake without launching
-the game — useful for checking the server in isolation after a change.
+`test_client.py` replays the gateway → session → login handshake without the game.
 
 ---
 
@@ -69,18 +77,21 @@ the game — useful for checking the server in isolation after a change.
 | File | Purpose |
 | --- | --- |
 | `server.py` | Gateway (**39389**) and game server (**39390**), both TLS |
-| `asset_server.py` | CDN stand-in on **8081** (plain HTTP) |
+| `asset_server.py` | CDN stand-in on **8081** (plain HTTP): manifest, config, bundles |
+| `bundle_index.py` | Extracts asset names from the shipped `.unity3d` bundles |
+| `patch/` | Loose-art patch — makes the client load PNGs ([details](patch/README.md)) |
+| `tools/fetch_art.py` | Name-verified card art fetcher |
+| `tools/find_cache.ps1` | Scans all drives for a donor `bundleCache` |
 | `test_client.py` | Handshake replay for testing without the game |
-| `certs/` | Self-signed cert + key |
-| `accounts.json` | Account store; accounts are auto-created on first login |
-| `start-server.cmd` | Launcher |
+| `build_cache.py` | **Dead code** — targets a class this build never constructs |
+
+Generated, not committed: `carddata/`, `bundle_index.json`, `certs/`, `accounts.json`.
 
 ---
 
 ## The protocol
 
-Dire Wolf Digital's "WARG" protocol. TLS sockets carrying JSON, with a few protobuf
-messages mixed in.
+Dire Wolf Digital's "WARG" protocol: TLS sockets carrying JSON, with some protobuf.
 
 ### Framing
 
@@ -99,22 +110,15 @@ Flags: `0x01` compressed (deflate, skip 2 bytes), `0x02` protobuf, `0x04` ping/p
 {"name": "<ClassName>", "value": { ...fields... }}
 ```
 
-`name` is the C# class name; fields use the class's `[JsonName]` values. The client
-resolves the name against types marked `[DwdJsonMessage]`.
+`name` is the C# class name; fields use each class's `[JsonName]`. The client resolves
+the name against types marked `[DwdJsonMessage]`.
 
 ### Protobuf messages
 
-Wrapped in `dwd.Protobuf.ProtoMessage`:
-
-```
-field 1 (string)  messageName  - full .NET type name in ProtobufMessages.dll
-field 2 (varint)  messageTag   - field number the body is stored under
-field <tag>       the serialized message
-```
-
-`ProtoMessage` declares only fields 1 and 2, so the body arrives as a protobuf-net
-*extension* and is read back with `Extensible.TryGetValue` at that tag. The tag is
-chosen by the writer; any non-declared field number works (this server uses 100).
+Wrapped in `dwd.Protobuf.ProtoMessage`: field 1 = full .NET type name, field 2 = a tag
+number, field `<tag>` = the body. `ProtoMessage` declares only fields 1 and 2, so the
+body arrives as a protobuf-net *extension* read back via `Extensible.TryGetValue`. The
+tag is the writer's choice; this server uses 100.
 
 ### Login flow
 
@@ -131,35 +135,44 @@ game    :39390   C-> RequestSession {connectionInfo{...}}
                  S-> AuthenticationSuccessful {account, sessionID}
 ```
 
-Two auth types are supported:
-
 - **DeviceID** — what the client actually uses. `RequestDeviceID` → `AuthenticateDeviceID {deviceID}`.
-- **sha1** — the username/password form. `RequestedUsername` → `RequestSaltForUser {username}`
-  → `DigestSalt {salt}` → `AuthenticateDigest {username, digest}` where
+- **sha1** — the username/password form. `RequestedUsername` → `RequestSaltForUser` →
+  `DigestSalt {salt}` → `AuthenticateDigest {username, digest}`, where
   `digest = sha1_hex(password + ":" + salt)`.
 
-Unknown usernames are auto-created and the first password used is pinned.
+Unknown usernames are auto-created; the first password used is pinned.
+
+### Card data
+
+Archetypes are fetched **per set**, and the keys drive everything:
+
+```
+GetArchetypeListKeys      -> ArchetypeKeys {keys: [62 set names]}
+GetProtobufArchetypesList -> ArchetypesFound {archetypes, checksum, key}   (x62)
+```
+
+The client waits for exactly `keys.Length + 1` responses (the +1 is the avatar list).
+An empty `keys` array means no cards at all.
 
 ### TLS
 
-`CertificateValidator` is constructed with `allowSelfSigned: true, allowExpired: true`,
-so a self-signed cert is accepted — but the hostname must still match, so
-`certs/server.crt` carries SANs for `127.0.0.1`, `localhost`, and
-`tcgo-gateway.direwolfdigital.com`. The cert is self-signed with `subject == issuer`,
-which the validator's chain check requires.
+`CertificateValidator` is built with `allowSelfSigned: true, allowExpired: true`, so a
+self-signed cert works — but hostname must still match, so `certs/server.crt` carries
+SANs for `127.0.0.1`, `localhost` and `tcgo-gateway.direwolfdigital.com`, and is
+self-signed with `subject == issuer` (the chain check requires it).
 
 ---
 
 ## Client configuration
 
-An override `cake.cfg` lives in the client's `persistentDataPath`:
+An override `cake.cfg` in the client's `persistentDataPath`:
 
 ```
 %USERPROFILE%\AppData\LocalLow\The Pokémon Company International\Pokemon Trading Card Game Online\cake.cfg
 ```
 
-The client reads that location *before* the shipped config, so the original install is
-untouched. Contents differ from stock in three ways:
+The client reads that before the shipped config, so the install stays clean. It differs
+from stock in four ways:
 
 ```
 hostname=127.0.0.1                  # was tcgo-gateway.direwolfdigital.com
@@ -168,144 +181,133 @@ assetURL=http://127.0.0.1:8081/     # was https://dfsqwbwcu8r1a.cloudfront.net/
 ShouldPatch=false                   # added; skips the dead updater
 ```
 
-`ShouldPatch=false` matters: without it the client tries to download a patch manifest
-from the dead CDN and aborts before login.
+Without `ShouldPatch=false` the client tries the dead patch CDN and aborts before login.
+The gateway **port 39389 is hardcoded in the client**, not read from config.
 
-The gateway **port (39389) is hardcoded in the client**, not read from config.
-
-### To revert
-
-Delete that `cake.cfg` and the client goes back to stock behaviour (and back to being
-unable to connect).
-
-### Other change on disk
+**To revert:** delete that `cake.cfg`. To remove the loose-art patch, restore
+`pie-bundles.dll.orig` over `pie-bundles.dll` in `Managed/`.
 
 `StreamingAssets\tcgo-gateway.direwolfdigital.com\` was **copied** (not moved) to
-`StreamingAssets\127.0.0.1\` because some client paths are derived from the configured
-hostname. The original directory is intact. If `hostname` ever changes, mirror it again
-or the shipped card databases won't be found under the new name.
+`StreamingAssets\127.0.0.1\`, because some client paths derive from the hostname. If
+`hostname` changes again, mirror it again.
+
+---
+
+## Getting card art
+
+The client only loads card art from Unity asset bundles, and the originals are gone. The
+[loose-art patch](patch/) removes that constraint: drop a PNG in
+`<game>_Data/LooseArt/` named after the asset request and it is used directly.
+
+| Request | File |
+| --- | --- |
+| `Background/Background` | `Background_Background.png` |
+| `BW10/008` | `BW10_008.png` |
+| `BW10_wp_ph/008` | `BW10_wp_ph_008.png` (foil mask) |
+
+Unresolved assets are logged as `[LooseArt] miss: <request>`, so the client tells you
+exactly what it wants. `tools/fetch_art.py --from-log` reads that and fetches only the
+cards you actually encountered — bounded, and far kinder to a community-run site than
+crawling whole sets.
+
+Images are laid out to match the client's own textures: **1024×1024, card scaled to full
+height at its native aspect, centred, white padding**. Do not stretch to fill — see
+Known issues.
+
+`fetch_art.py` verifies every download by comparing the card's name in `carddata/`
+against the source page, so a wrong set mapping is skipped rather than silently saved as
+the wrong art. It also skips sets whose art already ships locally, since LooseArt takes
+priority over bundles and would otherwise replace authentic art.
 
 ---
 
 ## Known issues
 
-<a id="card-art"></a>
-**Card art is mostly unrecoverable from this machine.** Only **5 of 62 sets** have art
-on disk — XY12 and the four energy sets. The rest was served from the CDN on demand and
-cached in `bundleCache/`, which on this install was never populated. The CDN is dead, so
-those images are simply absent; this is missing data, not a wiring bug. What does ship in
-`StreamingAssets\en_US\` is mostly cosmetics: avatars, sleeves, coins, deck boxes, packs,
-logos, set icons.
+**Foil masks are missing outside XY12.** The `_wp_std` / `_wp_ph` / `_wp_pcd` assets are
+foil **masks**, not alternate printings. Real ones are 512×512 DXT5 with ~40% coverage —
+hand-authored per card, and CDN-hosted. With none bound the shader samples stale
+reflection state and smears a sheen across the card, so `fetch_art.py` writes neutral
+(transparent) masks alongside each card to suppress that. XY12 has 108 authentic masks
+locally and shows the real effect.
 
-Card art loads **only** through `AssetBundle.LoadFromFile`. There is no loose-image path
-for cards, so PNGs from an external source can't be dropped in without either repackaging
-them into Unity 5.2.4f1 `UnityWeb` bundles (version-locked) or patching the client. See
-the To do section for the most promising route.
+**Card texture geometry is easy to get wrong.** The card does *not* fill the square. The
+client's own art spans x=110..912 (~0.78 aspect) over full height with white padding, and
+the display quad crops to that column. Three wrong attempts before it was measured:
+full-bleed (edges cropped), stretched into the column (~9% too wide, since the source is
+0.719 and the column 0.78), then aspect-preserving and centred, which is correct.
 
-**`getLocales` throws `NullReferenceException`** whenever the client asks for a bundle
-that doesn't exist (e.g. `BW1`). Same root cause as above; it stops once the bundle is
-present.
+**20 ambiguous asset names remain**, all avatar clothing items present in two avatar
+bundles. Either resolution works; no tiebreak is applied.
 
-**Set data is thin.** `SetDataList` is built from the archetype filenames on disk, so the
-names are right but `count`, `legalFormats`, and `block` are all empty/zero.
+**Set data is thin.** `SetDataList` is built from archetype filenames, so names are right
+but `count`, `legalFormats` and `block` are empty.
 
-**Set data is thin.** `SetDataList` is built from the archetype filenames on disk, so the
-names are right but `count`, `legalFormats`, and `block` are all empty/zero.
+**Trainer Challenge scenarios are fabricated** — three roots exist purely to satisfy
+`determineLeagueAvailability()`, which indexes `League.Gold`/`Platinum`/`CityChampionship`
+unguarded and throws otherwise, killing the connection.
 
-**Trainer Challenge scenarios are fabricated.** Three root scenarios exist purely to
-satisfy `determineLeagueAvailability()`, which indexes `League.Gold` / `Platinum` /
-`CityChampionship` without a containment check and throws `KeyNotFoundException`
-otherwise — killing the connection. They carry attribute key `201420` (the int the client
-casts to `O.g.League`) set to 1, 2, 3. They are not real campaign content.
-
-**Everything post-login returns empty.** Wallet, decks, collection, notifications,
-tournaments, lots, banned cards — all valid but empty. Correct for a fresh account,
-but it means nothing is populated.
+**`TwentiethAnn` numbering** doesn't map cleanly (Generations has a separately-numbered
+Radiant Collection), so high card numbers 404.
 
 ---
 
 ## To do
 
-### Next up — card art
+### Card art at scale
 
-The blocker is format, not identification: every card's set code and number are already
-in `carddata/`, so no lookup table is needed. But the client only loads art from Unity
-asset bundles.
+The mechanism works; it is now purely a sourcing question. Options, best first:
 
-In order of preference:
+1. **Original `.unity3d` bundles** — an archived CDN mirror, a backup, or an install with
+   a populated `bundleCache/`. `tools/find_cache.ps1` scans every drive and reports
+   whether a cache holds real set art or only the cosmetics every install has. Drop files
+   into `StreamingAssets\en_US\`, rerun `bundle_index.py`, bump `MANIFEST_VERSION`. Best
+   fidelity, includes foil masks, no patching. A web search found no public mirror.
+2. **Per-card images** via `fetch_art.py --from-log` as you play.
 
-1. **Find the original `.unity3d` bundles** — an archived CDN mirror, a backup, or an
-   install with a populated `bundleCache/`. No patching, no repackaging, restores every
-   set. `asset_server.py` already serves bundles at
-   `/bundles/pc/{locale}/{locale}_{name}_{version}.unity3d`, so dropping files into
-   `StreamingAssets\en_US\` is all that's required. A web search found no public mirror.
-2. **Patch the client to load loose images.** `pie-src` `N/V.cs` already contains
-   `GetURLImage(string url, callback)` — a URL→Texture loader with its own cache, used
-   today for landing-page banners. Routing the card art path through it removes the
-   bundle dependency entirely and makes any image source work. This is the most
-   promising route if no bundles turn up.
-3. **Build Unity 5.2.4f1 bundles** from external images. Needs that exact Editor
-   version; heavy and fragile for ~10,000 cards.
+### Foil masks
 
-Extracting the `assets[]` lists (asset name → bundle) would need the LZMA'd `UnityWeb`
-containers decompressed and their asset tables read. Only worth doing for route 1.
+Only synthesisable, not recoverable — real masks are per-card artwork, so generated ones
+would be plausible but invented. Compare against XY12 before deciding if that is worth it.
 
-### Then — deck saving
+### Deck saving
 
-`GetDeckList` / `OnlineDecksFound` return empty and nothing is persisted. Decks built in
-the deck builder are lost on restart.
+`GetDeckList` / `OnlineDecksFound` return empty and nothing persists.
 
-### Later — gameplay
+### Gameplay
 
-Substantially bigger than everything above combined. Needs the match engine: turn
-structure, the rules engine, and per-card effects. `sausage-core.dll` and the
-`dwd.core.match` namespaces are the place to start.
-
-### Housekeeping
-
-- Persist accounts properly (decks, collection) instead of returning empty every session
-- Handle the compressed frame flag (`0x01`) — not yet exercised, but the client can send it
-- Handle `MessageBundleMessage` (batched messages) on the read path
-- Move the hardcoded ports/paths in `server.py` into a small config
+Much larger than everything above combined: turn structure, rules engine, per-card
+effects. `sausage-core.dll` and the `dwd.core.match` namespaces are the starting point.
 
 ---
 
 ## Reverse-engineering notes
 
-Useful techniques, recorded because they'll be needed again:
-
 **Decompiling.** `ilspycmd` with `DOTNET_ROLL_FORWARD=LatestMajor` (it targets .NET 6,
-which isn't installed here). Decompile to a *single flat file* — the obfuscated
-namespaces `b` and `B` collide on a case-insensitive filesystem and silently overwrite
-each other in per-file output.
+not installed). Decompile to a **single flat file** — obfuscated namespaces `b` and `B`
+collide on a case-insensitive filesystem and silently overwrite each other.
 
-**Obfuscated strings.** String constants are encrypted in a `<PrivateImplementationDetails>`
-class with ~1200 static decryptor methods. Don't reverse the cipher — load the assemblies
-via reflection and invoke the decryptors. That yielded 7,557 strings across
-`core`/`pie-core`/`pie-src`/`sausage-core` and made the whole protocol readable.
+**Obfuscated strings.** Encrypted in a `<PrivateImplementationDetails>` class with ~1200
+static decryptor methods. Don't reverse the cipher — load the assemblies by reflection
+and invoke the decryptors. Yields ~7,557 strings and makes the protocol readable.
 
-**Obfuscated field names.** Many fields share a name (`A`, `a`, `B`) and differ only by
-type, so decompiler names can't be mapped back by name. Aligning decompiler declaration
-order to reflection order **does not work** — it mismatched on 38 of 191 fields and
-produced a wrong answer. Instead, read the method's IL via
-`MethodBase.GetMethodBody().GetILAsByteArray()`, pull the operand of each `ldsfld`
-(opcode `0x7E`), and resolve it with `Module.ResolveField(token)`. That gives the exact
-field and its runtime value.
+**Obfuscated field names.** Many fields share a name and differ only by type. Aligning
+decompiler declaration order to reflection order **does not work** — it mismatched on 38
+of 191 fields. Read the IL instead: `GetILAsByteArray()`, take each `ldsfld` operand
+(opcode `0x7E`), resolve with `Module.ResolveField(token)`.
 
-**Finding what to implement next.** Run the client and read the server log for
-`no handler for '<Name>'`. Then find the response type: search for classes marked
-`[DwdJsonMessage]`, and check whether the client blocks on it (a
-`while (x == null) yield return null;` loop means it gates the loading bar).
+**Reading the archetype blobs.** `StreamingAssets\<hostname>\<SET>` files are
+BinaryFormatter-serialized `ArchetypesFound`. .NET Framework refuses them (obfuscated
+fields differ only in case → CLS check). Use an `ISerializable` shim plus a
+`SerializationBinder` mapping every `dwd.*` type to it — `ISerializable` bypasses the
+member-binding check. Bind `List<dwd.Protobuf.X>` to `List<Shim>`; let enums resolve
+normally.
 
-**Watch out:** a `dwd.Protobuf.*` type existing does *not* mean the message is protobuf.
-`CollectionCountFound` has one, but nothing registers it as a `ProtobufCounterpart`, so
-sending it as protobuf made `ProtobufProcessor.Convert()` return the raw protobuf object
-and `WargSocket.Read()` threw `InvalidCastException` — killing the read thread and the
-session. Confirm a `[ProtobufCounterpart(typeof(...))]` registration exists before
-choosing protobuf.
+**Reading .unity3d bundles.** `UnityWeb` container: header, then an LZMA-alone stream.
+Inside, `m_Container` entries are little-endian length-prefixed ASCII padded to 4 bytes.
+Textures are DXT1/DXT5 — wrap the mip-0 bytes in a synthetic DDS header and Pillow will
+decode them, which is how the card geometry was measured.
 
-**Client-side crash reports.** The client sends its own exceptions to the server as
-`LogClientError`, with a full stack in `debugInfo.Stack`. This is the fastest way to
-diagnose client-side failures. `%USERPROFILE%\AppData\LocalLow\The Pokémon Company
-International\Pokemon Trading Card Game Online\output_log.txt` has the same information
-plus anything thrown before the session exists.
+**Localization.** The prebuilt `LocalizationDB-UTF16.db` is stamped `user_version=3` while
+this build wants 4, so `PieDB.Init` wipes it every launch — permanently stale. Strings
+must come from the server; read the prebuilt DB directly and serve its rows as one
+release.

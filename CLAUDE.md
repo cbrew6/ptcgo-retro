@@ -71,6 +71,12 @@ normally. Everything is logged — inbound frames, outbound frames, and
 - `asset_server.py` — CDN stand-in on 8081 (plain HTTP, not TLS — Unity's curl
   would reject a self-signed cert). Serves the bundle manifest, dynamic
   config, motd, and `.unity3d` bundles.
+- `bundle_index.py` — extracts asset names from the shipped `.unity3d`
+  bundles into `bundle_index.json`. Required: without it `assets[]` is empty
+  and nothing renders.
+- `patch/` — loose-art patch (Mono.Cecil IL injection). See `patch/README.md`.
+- `tools/fetch_art.py` — name-verified card art fetcher (`--from-log`).
+- `tools/find_cache.ps1` — scans all drives for a donor `bundleCache`.
 - `build_cache.py` — writes an on-disk archetype cache. **Currently dead
   code**: it targets `WargArchetypesSource`, which nothing in this build
   constructs. Kept only as a reference for the file format.
@@ -121,6 +127,20 @@ an entire wrong implementation.
 error `2700200` writes garbage into the client's local DB. Serve the real
 strings (see below) instead.
 
+**Empty arrays can silently disable whole subsystems.** Every art request is
+gated behind `DoesAssetExistInManifest(assetName)`, which reads an asset-name
+map built solely from each bundle descriptor's `assets[]`. Shipping that empty
+meant the client never requested a single bundle - everything rendered black,
+with no error and no failed request. "Nothing happened at all" is the signature
+of a gate like this, not of a broken loader.
+
+**Alias collisions overwrite silently.** The client builds its lookup as
+`assetPaths[name] = descriptor`, so the last writer wins. Registering every
+underscore-prefix as an alias let foil bundles claim `XY12/011` alongside the
+art bundle, and a request for the card face returned a foil mask. Bundles with
+a `wp_<mask>` segment must never claim the bare set prefix. This was only
+visible on XY12 - the one set with both art and foil locally.
+
 **The client reports its own crashes** as `LogClientError`, with a full stack
 in `debugInfo.Stack`. This is the fastest debugging tool available — the
 server log usually explains a client-side failure before `output_log.txt`
@@ -155,6 +175,19 @@ case → CLS check). Mono doesn't care, but we're not on Mono. Workaround: an
 Bind `List<dwd.Protobuf.X>` to `List<Shim>` and let enums (`+Type`) resolve
 normally. That produced all 9,940 cards.
 
+**Reading .unity3d bundles.** `UnityWeb` container: header (signature, format,
+unity version/revision, then minimumStreamedBytes + headerSize + level sizes as
+big-endian int32), then at `headerSize` an LZMA-alone stream. Inside, the
+`m_Container` entries are little-endian length-prefixed ASCII padded to 4
+bytes - that is where asset names live. Textures are DXT1/DXT5: wrap the mip-0
+bytes in a synthetic DDS header and Pillow decodes them, which is how the card
+geometry was measured. `bundle_index.py` does the name extraction.
+
+**Measuring texture layout.** Detect the card edge from the YELLOW border, not
+from non-white columns. The padding around the card is white, so a
+black-padding assumption reports the whole square as artwork and sends you
+down the wrong path.
+
 **Localization.** The prebuilt `LocalizationDB-UTF16.db` in StreamingAssets is
 stamped `user_version=3` but this build's config wants 4, so `PieDB.Init`
 wipes it on every launch — it is permanently stale. Strings therefore have to
@@ -179,36 +212,56 @@ Useful attribute keys: `200580` set code, `200630` name, `200550` rarity,
 `200490` HP, `200540` stage, `10140` localized-name key, `201420` league order
 (scenarios).
 
-## Card art — the open problem
+## Card art
 
-Only **5 of 62 sets** have art on disk (XY12 + the four energy sets). The
-other 57 were CDN-hosted and the CDN is dead; `bundleCache/` was never
-populated. Shipped bundles are mostly cosmetics (avatars, sleeves, coins, deck
-boxes, packs, logos, set icons).
+Only **5 of 62 sets** ship art locally (XY12 + the four energy sets). The rest,
+along with foil masks and menu backgrounds, was CDN-hosted; `bundleCache/` was
+never populated and the CDN is dead.
 
-Card art is loaded **only** via `AssetBundle.LoadFromFile` — there is no
-loose-image path for cards, so external PNGs can't be dropped in without
-either repackaging into Unity 5.2.4f1 `UnityWeb` bundles (version-locked) or
-patching the client.
+**This is solved mechanically** by the loose-art patch in `patch/`: the client
+now displays ordinary PNGs from `<game>_Data/LooseArt/`, named after the asset
+request with `/` replaced by `_`. See `patch/README.md`. It is a sourcing
+problem now, not a technical one.
 
-Promising route: `pie-src` `N/V.cs` already has
-`GetURLImage(string url, callback)` — a URL→Texture loader with caching, used
-for landing-page banners. Patching the card art path to use it would remove
-the bundle dependency entirely and let any image source work.
+`tools/fetch_art.py --from-log` reads the client's own miss log and fetches
+only the cards actually encountered. It name-checks every download against
+`carddata/` and skips sets whose art already ships locally (LooseArt takes
+priority over bundles, so fetching those would replace authentic art).
 
-`asset_server.py` already serves `.unity3d` files over HTTP at
-`/bundles/pc/{locale}/{locale}_{name}_{version}.unity3d`, so dropping recovered
-bundles into StreamingAssets\en_US\ makes them available with no code change.
+**Card texture geometry** - measured from the shipped XY12 DXT1 textures, not
+assumed. The card does NOT fill the square: the game's own art spans
+x=110..912 (~0.78 aspect) over full 1024 height with white padding, and the
+quad crops to that column. Getting this wrong looks like "stretched wide".
+Correct authoring is: 1024x1024 canvas, card scaled to full height at its
+NATIVE aspect, centred, white padding. Do not stretch to fill, and do not
+stretch to 0.78 either - the source is ~0.719 and stretching it is ~9% too
+wide.
+
+**Foil masks.** `_wp_std` / `_wp_ph` / `_wp_pcd` are foil MASKS, not alternate
+printings (`wp_ph` = reverse holo). Real ones are 512x512 DXT5, ~40% coverage,
+hand-authored per card. With none bound the shader samples stale reflection
+state and smears a sheen across the card, so `fetch_art.py` writes neutral
+transparent masks alongside each card. XY12 has 108 authentic masks locally.
+
+**Avatar items cannot be restored.** 4,653 avatar art assets exist across 18
+bundles, but only 2 of the 9,940 archetypes reference avatar art and both are
+pack products. The item definitions were server-side. An empty avatar
+collection is the correct rendering of the data that exists.
+
+`asset_server.py` serves `.unity3d` over HTTP at
+`/bundles/pc/{locale}/{locale}_{name}_{version}.unity3d`, so any recovered
+bundles dropped into `StreamingAssets\en_US\` work with no code change - rerun
+`bundle_index.py` and bump `MANIFEST_VERSION`.
 
 ## Status / next
 
-Working: login (DeviceID + sha1), full load to main menu, 27,550 localized
-strings, 62 sets, 9,940 cards, 4 of each in the collection, and all 233 local
-asset bundles (deck boxes, sleeves, coins, avatars, packs, set icons, energy
-and XY12 card art all confirmed rendering).
+Working: login (DeviceID + sha1), full load to main menu and deck builder,
+27,550 localized strings, 62 sets, 9,940 cards, 4 of each in the collection,
+233 asset bundles with 18,857 indexed asset names, cosmetics, backgrounds and
+card art (23 cards fetched so far).
 
-Absent, not broken: card art for the other 57 sets, and menu backgrounds
-(`Background{resolution}/Background{crRelease}` - no such bundle ships).
+Absent, not broken: card art/foil masks for 57 sets (source per card), and
+avatar items (definitions never shipped).
 
-Next: card art (see above), then deck saving/loading, then gameplay (the match
-engine — much larger; `dwd.core.match` namespaces).
+Next: more card art as encountered, then deck saving/loading, then gameplay
+(the match engine - much larger; `dwd.core.match` namespaces).
