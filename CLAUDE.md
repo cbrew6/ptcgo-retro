@@ -75,7 +75,8 @@ normally. Everything is logged — inbound frames, outbound frames, and
   bundles into `bundle_index.json`. Required: without it `assets[]` is empty
   and nothing renders.
 - `patch/` — loose-art patch (Mono.Cecil IL injection). See `patch/README.md`.
-- `tools/fetch_art.py` — name-verified card art fetcher (`--from-log`).
+- `tools/fetch_all_art.py` — bulk art fetcher; all 4,532 cards, resumable.
+- `tools/fetch_art.py` — single-card fetcher (`--from-log`), kept for one-offs.
 - `tools/find_cache.ps1` — scans all drives for a donor `bundleCache`.
 - `build_cache.py` — writes an on-disk archetype cache. **Currently dead
   code**: it targets `WargArchetypesSource`, which nothing in this build
@@ -223,6 +224,29 @@ now displays ordinary PNGs from `<game>_Data/LooseArt/`, named after the asset
 request with `/` replaced by `_`. See `patch/README.md`. It is a sourcing
 problem now, not a technical one.
 
+All 4,532 cards now have art, fetched by `tools/fetch_all_art.py` in 40 minutes
+from api.pokemontcg.io (734x1024, the exact texture height, so no upscaling).
+It is resumable through `tools/art_state.json` and safe to interrupt.
+
+Three things that bit during that run, all worth remembering:
+
+- **The logger killed the run.** A card name containing a gender symbol went
+  through `print()` on a cp1252 console, raised `UnicodeEncodeError` from
+  inside the loop, and ended a multi-hour job 1,200 cards in. Per-card
+  try/except did not help because the logging sat outside it. Wrapping the
+  work is not enough - anything that reports on the work has to be
+  unkillable too.
+- **A whole set can be lost to one transient error.** Three sets were skipped
+  to HTTP 500s that succeeded on the next attempt. The set-metadata call is
+  the single point where one failure costs 100+ cards, so it gets its own
+  larger retry budget and a deferred second pass.
+- **Name matching is where correctness actually lives.** PTCGO writes
+  `PokeBall`, `NidoranFemale`, `BattleCompressor`; upstream writes `Poké
+  Ball`, `Nidoran ♀`, `Battle Compressor Team Flare Gear`. Fold accents,
+  spell out gender symbols, allow prefix/suffix - but never let a rank
+  marker (`ex`, `gx`, `break`) be the only difference, or Charizard gets
+  Charizard-EX's art.
+
 `tools/fetch_art.py --from-log` reads the client's own miss log and fetches
 only the cards actually encountered. It name-checks every download against
 `carddata/` and skips sets whose art already ships locally (LooseArt takes
@@ -258,7 +282,7 @@ bundles dropped into `StreamingAssets\en_US\` work with no code change - rerun
 Working: login (DeviceID + sha1), full load to main menu and deck builder,
 27,550 localized strings, 62 sets, 9,940 cards, 4 of each in the collection,
 233 asset bundles with 18,857 indexed asset names, cosmetics, backgrounds and
-card art (23 cards fetched so far).
+card art (all 4,532 cards, 3.7 GB).
 
 Absent, not broken: card art/foil masks for 57 sets (source per card), and
 avatar items (definitions never shipped).

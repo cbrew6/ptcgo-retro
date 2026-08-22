@@ -177,6 +177,50 @@ except Exception:
     pass
 
 
+# Rank markers. These are the difference between two GENUINELY different
+# cards printed in the same set - Charizard and Charizard-EX are not the same
+# picture - so a name difference that consists only of one of these is a real
+# mismatch and must stay rejected.
+RANK_MARKERS = ("ex", "gx", "break", "lvx", "star", "prime", "legend",
+                "delta", "shiny", "light", "dark", "team", "v", "vmax")
+
+# Cards where the two sources describe the same printing so differently that
+# no rule relates them. Listed one by one rather than by loosening the check.
+NAME_ALIASES = {
+    "BW6/117": "Blend Energy GrassFirePsychicDarkness",
+    "BW6/118": "Blend Energy WaterLightningFightingMetal",
+}
+
+
+def names_agree(mine, theirs, key=None):
+    """Do these two names describe the same printing?
+
+    Exact match after normalising is the common case. The rest are cards where
+    one source carries a qualifier the other drops - PTCGO says
+    "BattleCompressor" where upstream says "Battle Compressor Team Flare
+    Gear", and "SpecialDarknessEnergy" where upstream says "Darkness Energy".
+    One name being a prefix or suffix of the other covers those.
+
+    The guard is RANK_MARKERS: if the ONLY thing separating the two names is a
+    rank suffix then they are different cards that happen to share a base
+    name, and that must still be rejected. Otherwise this rule would happily
+    accept Charizard-EX's art for plain Charizard.
+    """
+    a, b = norm(mine), norm(theirs)
+    if a == b:
+        return True
+    if key and key in NAME_ALIASES and norm(NAME_ALIASES[key]) == b:
+        return True
+    if not a or not b:
+        return False
+    if a.startswith(b) or b.startswith(a) or a.endswith(b) or b.endswith(a):
+        extra = a[len(b):] if len(a) > len(b) else b[len(a):]
+        if not extra or extra in RANK_MARKERS:
+            return False
+        return True
+    return False
+
+
 def log(msg):
     try:
         print(msg, flush=True)
@@ -359,7 +403,7 @@ def fetch_card(ptcgo_set, number, expected, index, sid):
     entry = lookup(index, number)
     if entry:
         remote, url = entry[0], entry[1]
-        if norm(remote) != norm(expected):
+        if not names_agree(expected, remote, "%s/%d" % (ptcgo_set, number)):
             return ("mismatch",
                     "we have %r, upstream #%d is %r" % (expected, number, remote))
     else:

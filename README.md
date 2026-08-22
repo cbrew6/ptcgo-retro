@@ -34,7 +34,7 @@ cosmetics and card art. The collection holds 4 of every card.
 | Collection | Working — 4 of every card |
 | Asset bundles | Working — 233 bundles, 18,857 asset names indexed |
 | Cosmetics (boxes, sleeves, coins, packs, logos) | Working |
-| Card art | Working via loose-art patch; art sourced per card |
+| Card art | Working. All 4,532 cards have art |
 | Backgrounds | Working via loose-art patch (one file) |
 | Foil / holo | Authentic for XY12 only; masks elsewhere absent |
 | Avatar items | **Not recoverable** — definitions never shipped |
@@ -205,19 +205,46 @@ The client only loads card art from Unity asset bundles, and the originals are g
 | `BW10/008` | `BW10_008.png` |
 | `BW10_wp_ph/008` | `BW10_wp_ph_008.png` (foil mask) |
 
-Unresolved assets are logged as `[LooseArt] miss: <request>`, so the client tells you
-exactly what it wants. `tools/fetch_art.py --from-log` reads that and fetches only the
-cards you actually encountered — bounded, and far kinder to a community-run site than
-crawling whole sets.
+**Every card already has art.** `tools/fetch_all_art.py` downloaded all 4,532 of them
+in 40 minutes. That is 4,532 files rather than 9,940 because art is keyed by set and
+number, so reprints and reverse holos share one picture.
+
+```
+python tools/fetch_all_art.py            # everything outstanding
+python tools/fetch_all_art.py BW1 XY6    # named sets only
+python tools/fetch_all_art.py --retry    # another go at past failures
+python tools/fetch_all_art.py --dry-run  # plan only
+```
+
+It is built to be left alone for hours: art already on disk is skipped, every outcome is
+recorded in `tools/art_state.json`, and an interrupted run resumes exactly where it
+stopped. Writes are atomic, so a kill cannot leave a half-written PNG behind.
+
+Sources are `api.pokemontcg.io` for names and images — its hi-res files are **734×1024**,
+exactly the height the client's textures want, so nothing is upscaled — with the
+limitless CDN as fallback. Set metadata is cached in `tools/setcache/`, so a re-run costs
+no API calls at all.
+
+Unresolved assets are still logged as `[LooseArt] miss: <request>`, so if anything is
+ever missing the client tells you exactly what it wants; `tools/fetch_art.py --from-log`
+fetches just those.
 
 Images are laid out to match the client's own textures: **1024×1024, card scaled to full
 height at its native aspect, centred, white padding**. Do not stretch to fill — see
 Known issues.
 
-`fetch_art.py` verifies every download by comparing the card's name in `carddata/`
-against the source page, so a wrong set mapping is skipped rather than silently saved as
-the wrong art. It also skips sets whose art already ships locally, since LooseArt takes
-priority over bundles and would otherwise replace authentic art.
+Every download is verified by comparing the card's name in `carddata/` against the
+source, so a wrong set mapping is skipped rather than silently saved as the wrong art.
+Sets whose art already ships locally are skipped entirely, since LooseArt takes priority
+over bundles and would otherwise replace authentic art with a third-party scan.
+
+Name comparison is the fiddly part. PTCGO writes `PokeBall`, `NidoranFemale`,
+`CharizardEX` and `BattleCompressor`; public data writes `Poké Ball`, `Nidoran ♀`,
+`Charizard-EX` and `Battle Compressor Team Flare Gear`. The check folds accents, spells
+out gender symbols, and accepts one name being a prefix or suffix of the other — but
+**not** when the only difference is a rank marker (`ex`, `gx`, `break`, …), because
+Charizard and Charizard-EX are genuinely different pictures. Two Blend Energies are
+listed as explicit aliases rather than loosening the rule further.
 
 ---
 
@@ -246,23 +273,23 @@ but `count`, `legalFormats` and `block` are empty.
 `determineLeagueAvailability()`, which indexes `League.Gold`/`Platinum`/`CityChampionship`
 unguarded and throws otherwise, killing the connection.
 
-**`TwentiethAnn` numbering** doesn't map cleanly (Generations has a separately-numbered
-Radiant Collection), so high card numbers 404.
+**Downloaded art is a third-party scan**, not the client's own texture. It renders at
+the right geometry and reads correctly, but it is not byte-identical to what shipped.
+Original bundles would still be an upgrade — see To do.
 
 ---
 
 ## To do
 
-### Card art at scale
+### Original bundles (still worth having)
 
-The mechanism works; it is now purely a sourcing question. Options, best first:
-
-1. **Original `.unity3d` bundles** — an archived CDN mirror, a backup, or an install with
-   a populated `bundleCache/`. `tools/find_cache.ps1` scans every drive and reports
-   whether a cache holds real set art or only the cosmetics every install has. Drop files
-   into `StreamingAssets\en_US\`, rerun `bundle_index.py`, bump `MANIFEST_VERSION`. Best
-   fidelity, includes foil masks, no patching. A web search found no public mirror.
-2. **Per-card images** via `fetch_art.py --from-log` as you play.
+Card art is done, but the originals would still be an upgrade: authentic scans at the
+client's own resolution, plus the real per-card foil masks, with no patching involved.
+Sources would be an archived CDN mirror, a backup, or an install with a populated
+`bundleCache/`. `tools/find_cache.ps1` scans every drive and reports whether a cache
+holds real set art or only the cosmetics every install has. Drop files into
+`StreamingAssets\en_US\`, rerun `bundle_index.py`, bump `MANIFEST_VERSION`. A web
+search found no public mirror.
 
 ### Foil masks
 
