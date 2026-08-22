@@ -161,14 +161,31 @@ def norm(s):
     catch a genuinely wrong set mapping.
     """
     s = (s or "")
-    s = s.replace("♀", "f").replace("♂", "m")
+    s = s.replace("♀", "female").replace("♂", "male")
     s = unicodedata.normalize("NFKD", s)
     s = "".join(c for c in s if not unicodedata.combining(c))
     return re.sub(r"[^a-z0-9]", "", s.lower())
 
 
+# Card names carry characters cp1252 cannot represent, and a Windows console
+# defaults to cp1252. Printing one raises UnicodeEncodeError - which, from
+# inside the download loop, kills a multi-hour run over a character in a
+# message. Ask for UTF-8, and still never trust print() with a bare call.
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
+
 def log(msg):
-    print(msg, flush=True)
+    try:
+        print(msg, flush=True)
+    except Exception:
+        enc = getattr(sys.stdout, "encoding", None) or "ascii"
+        try:
+            print(msg.encode(enc, "replace").decode(enc, "replace"), flush=True)
+        except Exception:
+            pass          # a run must never die for want of a log line
 
 
 # ---------------------------------------------------------------- state ----
@@ -216,7 +233,7 @@ def get(url, binary=False, retries=RETRIES):
     raise last
 
 
-def set_index(sid):
+def set_index(sid, retries=RETRIES):
     """number -> (name, image url) for one set, cached on disk.
 
     Cached because the API is the one rate-limited part of this: a re-run
@@ -234,7 +251,8 @@ def set_index(sid):
 
     cards, page = [], 1
     while True:
-        body = json.loads(get(API.format(sid=sid, page=page)))
+        body = json.loads(get(API.format(sid=sid, page=page),
+                              retries=retries))
         data = body.get("data", [])
         cards.extend(data)
         if len(data) < 250:
@@ -418,55 +436,93 @@ def main(argv):
         return
 
     tally = {"ok": 0, "mismatch": 0, "absent": 0, "failed": 0}
-    done = 0
+    counted = {"done": 0}
+
+    def do_card(s, sid, index, number, expected):
+        """One card. Nothing raised in here may reach the caller."""
+        counted["done"] += 1
+        done = counted["done"]
+        key = "%s/%d" % (s, number)
+        prev = state.get(key)
+        if prev:
+            head = prev.split(":")[0]
+            if head == "ok" or not retry:
+                tally[head] = tally.get(head, 0) + 1
+                return
+        try:
+            status, detail = fetch_card(s, number, expected, index, sid)
+        except Exception as exc:
+            status, detail = "failed", "unexpected: %s" % str(exc)[:100]
+
+        state[key] = status if status == "ok" else "%s:%s" % (status, detail)
+        tally[status] = tally.get(status, 0) + 1
+
+        if status == "ok":
+            if detail != "already on disk":
+                time.sleep(IMAGE_DELAY)
+        else:
+            log("    %-18s %-9s %s" % (key, status, detail))
+
+        if done % 50 == 0:
+            rate = done / max(1e-6, time.time() - started)
+            left = (total - done) / rate if rate else 0
+            log("  ... %d/%d  ok=%d mismatch=%d absent=%d failed=%d  ~%dm left"
+                % (done, total, tally["ok"], tally["mismatch"],
+                   tally["absent"], tally["failed"], left / 60))
+            save_state(state)
+
+    def do_set(s, patient=False):
+        """Index one set and fetch every card in it.
+
+        Returns False if the set could not be indexed. That metadata call is
+        the one place where a single failure costs a whole set, so it gets a
+        much longer retry budget than an individual image - and if it still
+        fails, the set is deferred to a second pass rather than written off.
+        """
+        sid = SETS[s]
+        cards = local_cards(s)
+        try:
+            index = set_index(sid, retries=10 if patient else 6)
+        except Exception as exc:
+            log("%-14s SET FAILED (%s)%s"
+                % (s, str(exc)[:70],
+                   " - giving up on its %d cards" % len(cards) if patient
+                   else " - deferred, will retry at the end"))
+            if patient:
+                counted["done"] += len(cards)
+            return False
+        log("%-14s %s  (%d cards, %d upstream)"
+            % (s, sid, len(cards), len(index)))
+        for number, expected in cards:
+            try:
+                do_card(s, sid, index, number, expected)
+            except Exception as exc:
+                # Belt and braces: not even the bookkeeping may end the run.
+                tally["failed"] = tally.get("failed", 0) + 1
+                log("    %s/%s  failed  loop: %s" % (s, number, str(exc)[:80]))
+        return True
+
+    deferred = []
     try:
         for s in targets:
-            sid = SETS[s]
-            cards = local_cards(s)
             try:
-                index = set_index(sid)
+                if not do_set(s):
+                    deferred.append(s)
             except Exception as exc:
-                # A set that cannot be indexed is skipped whole, rather than
-                # attempted card by card against nothing.
-                log("%-14s SET FAILED (%s) - skipping its %d cards"
-                    % (s, str(exc)[:80], len(cards)))
-                done += len(cards)
-                continue
-            log("%-14s %s  (%d cards, %d upstream)"
-                % (s, sid, len(cards), len(index)))
+                log("%-14s SET ERROR (%s) - continuing" % (s, str(exc)[:80]))
+                deferred.append(s)
+            save_state(state)
 
-            for number, expected in cards:
-                done += 1
-                key = "%s/%d" % (s, number)
-                prev = state.get(key)
-                if prev:
-                    head = prev.split(":")[0]
-                    if head == "ok" or not retry:
-                        tally[head] = tally.get(head, 0) + 1
-                        continue
+        if deferred:
+            log("\nRetrying %d set(s) that could not be indexed: %s"
+                % (len(deferred), ", ".join(deferred)))
+            time.sleep(30)
+            for s in deferred:
                 try:
-                    status, detail = fetch_card(s, number, expected, index, sid)
+                    do_set(s, patient=True)
                 except Exception as exc:
-                    status, detail = "failed", "unexpected: %s" % str(exc)[:100]
-
-                state[key] = (status if status == "ok"
-                              else "%s:%s" % (status, detail))
-                tally[status] = tally.get(status, 0) + 1
-
-                if status == "ok":
-                    if detail != "already on disk":
-                        time.sleep(IMAGE_DELAY)
-                else:
-                    log("    %-18s %-9s %s" % (key, status, detail))
-
-                if done % 50 == 0:
-                    rate = done / max(1e-6, time.time() - started)
-                    left = (total - done) / rate if rate else 0
-                    log("  ... %d/%d  ok=%d mismatch=%d absent=%d failed=%d"
-                        "  ~%dm left"
-                        % (done, total, tally["ok"], tally["mismatch"],
-                           tally["absent"], tally["failed"], left / 60))
-                    save_state(state)
+                    log("%-14s SET ERROR (%s)" % (s, str(exc)[:80]))
+                save_state(state)
     except KeyboardInterrupt:
         log("\ninterrupted - progress saved, re-run to resume")
     finally:
