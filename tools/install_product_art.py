@@ -1,6 +1,6 @@
 """
-Installs product art (packs, theme decks, blisters, bundles, tins) from a
-sprite rip into LooseArt/.
+Installs product art (packs, theme decks, blisters, bundles, tins, deck boxes)
+from a sprite rip into LooseArt/.
 
 The 240 product images the client asks for were CDN-hosted photography with no
 card behind them, so nothing in a card database can supply them. A rip of the
@@ -13,8 +13,26 @@ file matches - an ambiguous name is reported and skipped rather than guessed
 at, because a wrong pack picture is the same class of mistake as a wrong card
 face.
 
+Two habits of the rips shape the rest of this:
+
+  * Several products ship a second image with a "1" suffix (a back or angled
+    view). It normalises to a different key, so it simply never gets requested
+    and the plain shot the client's single request wants is what wins.
+
+  * The deck-box rips come in two flavours. "Deckbox Gen IV-VII" holds the
+    rendered product shot - the box photographed at an angle, matching every
+    other product image in this manifest. "DeckBox Text Gen IV-VII" holds the
+    flat UV wrap that the game pastes onto its 3D box model. They share
+    basenames, so passing both zips at once makes every deck box ambiguous.
+    Pass only the render zip; the flats are not product art.
+
+Rows whose file already exists in LooseArt are left alone. Those were placed by
+an earlier, deliberate choice of source, and several basenames appear in more
+than one rip with different content - re-running against a new zip must not
+quietly redecide them.
+
 Usage:
-    python tools/install_product_art.py <zip> [--apply]
+    python tools/install_product_art.py <zip> [<zip> ...] [--apply]
 """
 
 import io
@@ -50,36 +68,42 @@ def load_manifest():
     return out
 
 
-def index_zip(zf):
-    """normalised stem -> [zip entry], skipping the "1" alternate shots.
+def index_zips(zip_paths):
+    """normalised stem -> [(zipfile, entry)] across every source zip.
 
-    Several products ship a second image with a "1" suffix (a back or angled
-    view). The plain name is the one the client's single request wants.
+    Entries are matched on basename alone, so nested rips ("Collection General
+    Gen IV-VII/Tins and Elite Boxes/xy10elitetrainerbox.png") need no special
+    handling. Collisions across zips are kept, not merged, so they surface as
+    ambiguities instead of an arbitrary winner.
     """
     index = {}
-    for entry in zf.namelist():
-        if entry.endswith("/"):
-            continue
-        base = os.path.basename(entry)
-        stem, ext = os.path.splitext(base)
-        if ext.lower() not in (".png", ".jpg", ".jpeg"):
-            continue
-        index.setdefault(norm(stem), []).append(entry)
+    for path in zip_paths:
+        zf = zipfile.ZipFile(path)
+        for entry in zf.namelist():
+            if entry.endswith("/"):
+                continue
+            base = os.path.basename(entry)
+            stem, ext = os.path.splitext(base)
+            if ext.lower() not in (".png", ".jpg", ".jpeg"):
+                continue
+            index.setdefault(norm(stem), []).append((zf, entry))
     return index
 
 
 def main(argv):
-    if not argv:
+    zip_paths = [a for a in argv if not a.startswith("--")]
+    if not zip_paths:
         sys.exit(__doc__.strip())
-    zip_path = argv[0]
     apply_changes = "--apply" in argv
 
-    zf = zipfile.ZipFile(zip_path)
-    index = index_zip(zf)
+    index = index_zips(zip_paths)
     manifest = load_manifest()
 
-    matched, ambiguous, unmatched = [], [], []
+    already, matched, ambiguous, unmatched = 0, [], [], []
     for request, filename in manifest:
+        if os.path.exists(os.path.join(LOOSE_ART, filename)):
+            already += 1
+            continue
         # "AvatarItems/packs/AvatarCharizardPack" -> "AvatarCharizardPack"
         leaf = request.split("/")[-1]
         hits = index.get(norm(leaf))
@@ -90,15 +114,15 @@ def main(argv):
         else:
             matched.append((request, filename, hits[0]))
 
-    print("%d missing assets, %d matched in the rip, %d ambiguous, %d not there"
-          % (len(manifest), len(matched), len(ambiguous), len(unmatched)))
-    for request, hits in ambiguous[:5]:
-        print("  ambiguous: %s -> %s" % (request, [os.path.basename(h) for h in hits]))
+    print("%d manifest rows: %d already in LooseArt, %d matched in the rip, "
+          "%d ambiguous, %d not there"
+          % (len(manifest), already, len(matched), len(ambiguous),
+             len(unmatched)))
+    for request, hits in ambiguous:
+        print("  ambiguous: %s -> %s" % (request, [e for _, e in hits]))
     print()
-    for request, filename, entry in matched[:8]:
-        print("  %-46s <- %s" % (request, os.path.basename(entry)))
-    if len(matched) > 8:
-        print("  ... and %d more" % (len(matched) - 8))
+    for request, filename, (_, entry) in matched:
+        print("  %-46s <- %s" % (request, entry))
 
     if not apply_changes:
         print("\n(dry run - pass --apply to install)")
@@ -106,7 +130,7 @@ def main(argv):
 
     os.makedirs(LOOSE_ART, exist_ok=True)
     written = 0
-    for request, filename, entry in matched:
+    for request, filename, (zf, entry) in matched:
         out = os.path.join(LOOSE_ART, filename)
         tmp = out + ".part"
         with open(tmp, "wb") as fh:

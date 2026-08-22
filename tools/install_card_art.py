@@ -24,6 +24,7 @@ Usage:
 import collections
 import hashlib
 import io
+import json
 import os
 import re
 import sys
@@ -48,14 +49,41 @@ PROMO_RE = re.compile(r"^promo_([a-z0-9]+)$")
 NUM_RE = re.compile(r"^[a-z0-9]+$")
 
 
+_set_keys = None
+
+
+def canonical_set_keys():
+    """lowercased set key -> the exact casing the client uses.
+
+    Taken from carddata, because the client's casing is not derivable: most
+    keys are all-caps but TwentiethAnn is not. Windows filesystems are
+    case-insensitive, so an upper()-derived TWENTIETHANN_001.png silently
+    overwrites TwentiethAnn_001.png while an `in os.listdir()` check happily
+    reports the file as absent.
+    """
+    global _set_keys
+    if _set_keys is None:
+        _set_keys = {}
+        card_dir = os.path.join(HERE, "carddata")
+        for fn in os.listdir(card_dir):
+            if not fn.endswith(".json"):
+                continue
+            with io.open(os.path.join(card_dir, fn), encoding="utf-8") as fh:
+                key = (json.load(fh).get("set") or fn[:-5])
+            _set_keys[key.lower()] = key
+    return _set_keys
+
+
 def set_prefix(folder):
     """Rip folder name -> the prefix the client uses, or None if not a set."""
     m = PROMO_RE.match(folder)
-    if m:
-        return "Promo_" + m.group(1).upper()
-    if SET_RE.match(folder):
-        return folder.upper()
-    return None
+    guess = ("Promo_" + m.group(1).upper()) if m else (
+        folder.upper() if SET_RE.match(folder) else None)
+    if guess is None:
+        return None
+    # Prefer the client's own spelling; fall back to the guess for rip folders
+    # that carddata has no set for (those get filtered out downstream anyway).
+    return canonical_set_keys().get(guess.lower(), guess)
 
 
 def load_wanted():

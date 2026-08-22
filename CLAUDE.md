@@ -216,7 +216,7 @@ Useful attribute keys: `200580` set code, `200630` name, `200550` rarity,
 
 ## The installer is only a baseline
 
-Card data through SM4, localization through SM6, four set icons. Everything
+Card data through SM4, localization through **SM5**, four set icons. Everything
 else came over the wire on first login and was cached under
 
     %USERPROFILE%\AppData\LocalLow\The Pokémon Company International\
@@ -240,6 +240,29 @@ what the code supports. Check the binaries before ruling something out.
 Scarlet & Violet genuinely never existed here: PTCGO's last content was Crown
 Zenith, January 2023, matching the build date.
 
+### The installer adds nothing — settled
+
+`PokemonInstaller.msi` (v2.95.0, MSI stream dated 2023-01-12) **is** the client
+already installed, not a newer one. All 589 unique payload files hash-match a
+file already on disk; 0 are absent. Its card-data seed under
+`StreamingAssets\tcgo-gateway.direwolfdigital.com\` holds exactly the same 62
+sets - set-for-set identical, nothing extra - and it ships no `AttributeDB.db`
+and no `archetypes\`. Do not re-investigate this hoping for SM5+; the answer is
+no, and it is a hash comparison rather than an opinion.
+
+Two things worth keeping from that dig:
+
+- **Localization runs one set ahead of the archetypes.** The shipped
+  `LocalizationDB-UTF16.db` carries **446 rules-text entries for `sm5`** -
+  more than any other set (sm2 390, sm1 351, sm4 311): attack titles, gametext,
+  abilities. So if SM5 archetypes are ever synthesized, the English card text
+  is already local and needs no reconstruction. The rip also supplies all 173
+  SM5 card faces. The missing piece is only the archetype records.
+- **`keys.bin` is load-bearing.** It is a set->MD5 map the client validates the
+  seed files against, so any fabricated set payload dropped in that directory
+  would need a matching entry. The live patcher (`Refresher\`) shipped content
+  as binary **vcdiff deltas** against these seed files, not as whole files.
+
 ## Card art
 
 Only **5 of 62 sets** ship art locally (XY12 + the four energy sets). The rest,
@@ -252,8 +275,28 @@ request with `/` replaced by `_`. See `patch/README.md`. It is a sourcing
 problem now, not a technical one.
 
 All 4,532 cards now have art, fetched by `tools/fetch_all_art.py` in 40 minutes
-from api.pokemontcg.io (734x1024, the exact texture height, so no upscaling).
-It is resumable through `tools/art_state.json` and safe to interrupt.
+from api.pokemontcg.io. It is resumable through `tools/art_state.json` and safe
+to interrupt.
+
+### Texture geometry — the card is stretched
+
+A PTCGO card texture is 1024x1024 with the card occupying exactly **803x1024**:
+centred, full height, ~110px of white padding each side. The card is therefore
+*stretched horizontally* against its true 63:88 paper ratio, and the client
+undoes that when it maps the texture onto the card quad. Verified across bw1,
+xy1, xy12, sm8, hgss1, rsp and tk6a - it holds for every era.
+
+The original fetch composited at 734x1024, the true paper ratio, on the
+reasonable-looking assumption that matching the texture *height* was enough.
+It is not: every fetched card rendered ~9% too narrow. Anything that composites
+a card face must target 803x1024, not the real card aspect.
+
+`tools/fix_card_geometry.py` repairs an existing file in place (crop the known
+centred span, LANCZOS to 803x1024, repaste at x=110). It is **not idempotent**,
+so it classifies by requiring the content to actually reach both expected edges
+and refuses anything else. That guard earned itself immediately: the SM_Energy
+composites are 724 wide (cols 150..873), not 734, and a looser check would have
+baked a white sliver into all nine.
 
 Three things that bit during that run, all worth remembering:
 
