@@ -923,11 +923,20 @@ class GameSession:
     def on_ReconnectSession(self, value, request_id):
         self.on_RequestSession(value, request_id)
 
+    # Do NOT advertise "DeviceID" here. It is the guest path: a device login
+    # makes the client mark the account as one, which is exactly what drives
+    # the "Make Your Free Account Today!" upsell, the "Have Fun!" decline
+    # dialog and the upgrade-account button. The client reports that flag to
+    # analytics under the name "DeviceIDAcct", which is how it was identified.
+    #
+    # Offering only sha1 makes the client use the username/password form, and
+    # a full account has none of that. Accounts here are auto-created and the
+    # password is pinned on first use, so any username and password work.
+    AUTH_TYPES = ["sha1"]
+
     def on_RequestLogin(self, value, request_id):
-        # The client offers a device-ID auto-login as well as the username /
-        # password form, so advertise both.
         self.send("RequestedAuthType",
-                  {"validAuthTypes": ["sha1", "DeviceID"]}, request_id)
+                  {"validAuthTypes": self.AUTH_TYPES}, request_id)
 
     # -- post-login data -------------------------------------------------
 
