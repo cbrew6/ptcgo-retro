@@ -1011,6 +1011,20 @@ class GameSession:
             "validationResults": deck_validation(deck_id),
         }), request_id)
 
+    def on_ValidateDecks(self, value, request_id):
+        # Sent before testing or playing a deck. DecksValidated carries the
+        # same DeckValidationResult[] the save reply uses, and the handler
+        # just hands them to DeckValidationManager.updateValidations, so one
+        # valid result per format per deck is all it needs.
+        decks = (value or {}).get("decks") or []
+        results = []
+        for deck in decks:
+            results.extend(deck_validation(deck.get("deckID") or ZERO_GUID))
+        log.info("[game %s] -> DecksValidated (%d deck(s), %d results)",
+                 self.peer, len(decks), len(results))
+        write_frame(self.sock, msg("DecksValidated", {"results": results}),
+                    request_id)
+
     def on_CakeDeleteDeck(self, value, request_id):
         deck_id = (value or {}).get("deckID")
         with _decks_lock:
