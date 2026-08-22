@@ -352,6 +352,43 @@ def build_all_archetypes():
 
 CARD_CHECKSUM = "ptcgo-local-1"
 
+AVATARS_PATH = os.path.join(HERE, "avatars.json")
+_avatar_archetypes_body = None
+
+
+def build_avatar_archetypes():
+    """dwd.Protobuf.cake.item.AllAvatarArchetypesFound: 1=archetypes 2=checksum.
+
+    Identical field layout to AllArchetypesFound, so pb_archetype encodes it
+    unchanged - only the message type name differs.
+
+    Avatar wardrobe items arrive through this message and nowhere else; the
+    AvatarItems *set* carries only the two shop pack products. Answering with an
+    empty body (which is what this did for a long time) leaves the wardrobe
+    empty, and the client then never requests a single avatar asset - so the
+    symptom looks like missing art when it is really a missing reply.
+
+    avatars.json is reconstructed by tools/build_avatar_catalog.py. If it is
+    absent we fall back to the old empty reply, which is also the kill switch:
+    rename the file and restart if the client ever chokes on the catalog.
+    """
+    global _avatar_archetypes_body
+    if _avatar_archetypes_body is None:
+        body, count = b"", 0
+        if os.path.exists(AVATARS_PATH):
+            with open(AVATARS_PATH, encoding="utf-8") as fh:
+                data = json.load(fh)
+            for a in data.get("archetypes") or []:
+                body += _len_field(1, pb_archetype(a))
+                count += 1
+        else:
+            log.warning("no avatars.json - avatar wardrobe will be empty")
+        body += _len_field(2, CARD_CHECKSUM.encode())
+        _avatar_archetypes_body = body
+        log.info("built AllAvatarArchetypesFound payload: %d archetypes, %d bytes",
+                 count, len(body))
+    return _avatar_archetypes_body
+
 # How many of each card to grant. 4 is the deck-building limit for most cards.
 CARDS_PER_ARCHETYPE = 4
 
@@ -1203,7 +1240,7 @@ class GameSession:
 
     def on_GetProtobufAllAvatarArchetypesList(self, value, request_id):
         self.send_protobuf("dwd.Protobuf.cake.item.AllAvatarArchetypesFound",
-                           request_id=request_id)
+                           build_avatar_archetypes(), request_id)
 
     def on_GetProtobufAllArchetypesList(self, value, request_id):
         # If the client's on-disk cache is the one build_cache.py wrote, just

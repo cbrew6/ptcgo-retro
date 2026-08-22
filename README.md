@@ -37,7 +37,7 @@ cosmetics and card art. The collection holds 4 of every card.
 | Card art | Working for every set the client shipped; 366 Trainer Kit / promo cards blank |
 | Backgrounds | Working via loose-art patch (one file) |
 | Foil / holo | Authentic for XY12 only; masks elsewhere absent |
-| Avatar items | **Not recoverable** — definitions never shipped |
+| Avatar items | Definitions absent but reconstructible; server stub returned an empty list |
 | Matches / gameplay | Not implemented |
 
 ### What is genuinely gone
@@ -49,10 +49,16 @@ ship art locally (XY12 plus the four energy sets).
 The [loose-art patch](patch/) works around this: the client will display ordinary PNGs,
 so art can come from any source. It is a sourcing problem now, not a technical one.
 
-**Avatar items are the exception — they cannot be restored.** The wardrobe *art*
-survives (4,653 assets across 18 bundles), but only 2 of the 9,940 archetypes reference
-avatar art and both are pack products. The item definitions lived server-side. An empty
-avatar collection is the correct rendering of the data that exists.
+**Avatar items are a special case.** The wardrobe *art* survives (4,653 assets across 18
+bundles), but only 2 of the 9,940 archetypes reference avatar art and both are pack
+products, so the item definitions really did live server-side.
+
+They are reconstructible, though, and an empty wardrobe was never "correct rendering":
+the server answered `GetProtobufAllAvatarArchetypesList` with an empty body, so the
+client built an empty list and never requested any avatar asset. Names come from
+`LocalizationDB`, sprites from the bundles, and the wardrobe slot from the asset
+suffix. See CLAUDE.md for the five attributes required - `200215` is load-bearing and
+its absence throws at startup.
 
 ---
 

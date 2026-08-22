@@ -278,25 +278,36 @@ All 4,532 cards now have art, fetched by `tools/fetch_all_art.py` in 40 minutes
 from api.pokemontcg.io. It is resumable through `tools/art_state.json` and safe
 to interrupt.
 
-### Texture geometry — the card is stretched
+### Texture geometry — the 803 box is card PLUS bleed
 
-A PTCGO card texture is 1024x1024 with the card occupying exactly **803x1024**:
-centred, full height, ~110px of white padding each side. The card is therefore
-*stretched horizontally* against its true 63:88 paper ratio, and the client
-undoes that when it maps the texture onto the card quad. Verified across bw1,
-xy1, xy12, sm8, hgss1, rsp and tk6a - it holds for every era.
+Settled by decoding the shipped DXT1 textures with `tools/bundle_textures.py`,
+not by inference. Two numbers, and conflating them costs you every card:
 
-The original fetch composited at 734x1024, the true paper ratio, on the
-reasonable-looking assumption that matching the texture *height* was enough.
-It is not: every fetched card rendered ~9% too narrow. Anything that composites
-a card face must target 803x1024, not the real card aspect.
+    card    x=145..877, 733x1024  -> 733/1024 = 0.71582 vs 63:88 = 0.71591
+    box     x=110..912, 803x1024  -> card, plus a 35px horizontal BLEED of the
+                                     card's own edge column on each side
 
-`tools/fix_card_geometry.py` repairs an existing file in place (crop the known
-centred span, LANCZOS to 803x1024, repaste at x=110). It is **not idempotent**,
-so it classifies by requiring the content to actually reach both expected edges
-and refuses anything else. That guard earned itself immediately: the SM_Energy
-composites are 724 wide (cols 150..873), not 734, and a looser check would have
-baked a white sliver into all nine.
+**The card is never stretched.** It sits at true paper aspect and the game
+fills the outer band by smearing the edge pixel outward. On Free_Energy the
+band is black instead of bled; everywhere else it tracks the edge row by row.
+Proof that settles it: the round type symbol in the energy bundles measures
+**50x50, a perfect circle**, and the same eye glyph is 1.3929 w/h in the BW and
+XY bundles against 1.3913 on true-aspect paper art.
+
+I got this wrong once, expensively. Measuring the *outer* extent of a rip
+texture gives 803, which invites the conclusion that the card is 803 wide and
+that art composited at the true 734 is "9% too narrow". It is not - it is
+missing its bleed. Stretching ~5,000 cards to fill the box made every one of
+them 9.4% too wide, and the tell was energies: a horizontal stretch turns their
+round symbol into an obvious ellipse where card art hides it.
+
+So: to author a card face, place it at its NATIVE aspect with the card box at
+x=145, then bleed the edge column out to 110..912. Never resample to 803.
+`tools/fetch_art.py` had this right in a comment all along and was overridden.
+
+`tools/bundle_textures.py` parses these bundles generically off their embedded
+type trees (`list` / `dump` / `span`). One trap: for serialized version < 16 an
+object's `typeID` **is** the class ID, not an index into the type table.
 
 Three things that bit during that run, all worth remembering:
 
@@ -361,13 +372,16 @@ only the cards actually encountered. It name-checks every download against
 priority over bundles, so fetching those would replace authentic art).
 
 **Card texture geometry** - measured from the shipped XY12 DXT1 textures, not
-assumed. The card does NOT fill the square: the game's own art spans
-x=110..912 (~0.78 aspect) over full 1024 height with white padding, and the
-quad crops to that column. Getting this wrong looks like "stretched wide".
-Correct authoring is: 1024x1024 canvas, card scaled to full height at its
-NATIVE aspect, centred, white padding. Do not stretch to fill, and do not
-stretch to 0.78 either - the source is ~0.719 and stretching it is ~9% too
-wide.
+assumed. The card does NOT fill the square: the quad crops to x=110..912
+(~0.78) over full 1024 height. Correct authoring is a 1024x1024 canvas with the
+card at its NATIVE ~0.719 aspect, full height, centred. Do not stretch to fill,
+and do not stretch to 0.78 either - stretching a 0.719 source into the 0.78
+column renders every card ~9% too wide.
+
+The one thing this paragraph originally missed is what fills the rest of the
+column: not padding but a **bleed** of the card's edge pixel. See "the 803 box
+is card PLUS bleed" below - and note that the missing bleed is exactly what
+made 803 look like the card width and prompted a wrong 5,000-file stretch.
 
 **Foil masks.** `_wp_std` / `_wp_ph` / `_wp_pcd` are foil MASKS, not alternate
 printings (`wp_ph` = reverse holo). Real ones are 512x512 DXT5, ~40% coverage,
@@ -375,10 +389,36 @@ hand-authored per card. With none bound the shader samples stale reflection
 state and smears a sheen across the card, so `fetch_art.py` writes neutral
 transparent masks alongside each card. XY12 has 108 authentic masks locally.
 
-**Avatar items cannot be restored.** 4,653 avatar art assets exist across 18
-bundles, but only 2 of the 9,940 archetypes reference avatar art and both are
-pack products. The item definitions were server-side. An empty avatar
-collection is the correct rendering of the data that exists.
+**Avatar items: the definitions are gone, but they are reconstructible.**
+4,653 avatar art assets exist across 18 bundles, and only 2 of the 9,940
+archetypes reference avatar art - both pack products. The item definitions were
+server-side, so they are genuinely absent.
+
+What was wrong here was the conclusion, not the observation. An empty wardrobe
+is *not* "the correct rendering of the data": wardrobe items arrive exclusively
+through `AllAvatarArchetypesFound`, and `on_GetProtobufAllAvatarArchetypesList`
+was answering with an empty body, so the client built an empty list and then
+never requested a single avatar asset. That is why nothing shows and why
+`output_log.txt` contains no avatar requests at all.
+
+The inputs to rebuild the catalog all survive client-side: `LocalizationDB`
+holds ~1,395 item names, the bundles enumerate 1,719 `_thumb` sprites and 2,278
+body stems, and the wardrobe slot is derivable from the asset suffix
+(`_hair`, `_hat`, `_jacketll`, ...), gender from the leading `f`/`m`.
+
+Attributes the client needs per avatar archetype - **`200215` is load-bearing**:
+`CreateAvatarRenderers` does an unconditional `.get_Value().Value` on it, so
+omitting it throws at startup.
+
+    200215  int              male/female pairing key - MUST be present
+    200930  LocalizableText  sprite base; request is avatar_thumbs/<v>_thumb
+    200890  enum Group       Eyes=0 ... Hair=6, Hat=7, Jacket=8, Trousers=9
+    10540   enum ProductType must be "AvatarItems" to take the avatar branch
+    10220   enum Gender      Female=0, Male=1
+
+Enums travel as **strings**, not ints. `AllAvatarArchetypesFound` has the same
+field layout as `AllArchetypesFound`, so `pb_archetype` encodes it unchanged -
+only the type name differs.
 
 `asset_server.py` serves `.unity3d` over HTTP at
 `/bundles/pc/{locale}/{locale}_{name}_{version}.unity3d`, so any recovered
