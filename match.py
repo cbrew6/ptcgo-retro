@@ -81,6 +81,14 @@ PROMPT_SETUP_ACTIVE = (
     "com.direwolfdigital.cake.rules.states.startgame.selectstartingpokemon")
 PROMPT_SETUP_BENCH = "playmat.gamestart.promptbenchpokemon.new"
 
+# The action offer deliberately uses a prompt the client SUPPRESSES.
+# PiePromptListener.suppressedKeys holds eight ids it refuses to draw a banner
+# for, this among them, and the original server used it for exactly that
+# reason: during your own turn the board is the prompt. HasId compares
+# case-insensitively, so the mixed case here matches the all-lowercase DB.
+PROMPT_CHOOSE_ACTION = (
+    "com.direwolfdigital.cake.rules.states.ActionPhase.SelectAction")
+
 # engine Choice.prompt is a stable id for the renderer to key off, not text.
 # Each maps to a real key from the client's shipped DB - a key that does not
 # exist is not an error client-side, it is displayed verbatim, so every one of
@@ -484,7 +492,10 @@ class Match:
         around it just changes a number.
         """
         out = []
-        for change in changes:
+        for change in self._grouped(changes):
+            if isinstance(change, tuple):     # an already-built sequence item
+                out.append(change)
+                continue
             handler = getattr(self, "_change_" + change.kind, None)
             if handler is None:
                 continue
@@ -492,6 +503,44 @@ class Match:
                 # Handlers mostly return plain (name, body); only the few that
                 # need choreography return a full ("seq", ...) item.
                 out.append(item if len(item) == 3 else ("msg",) + tuple(item))
+        return out
+
+    def _grouped(self, changes):
+        """Changes, with runs that deserve one named sequence folded into it.
+
+        Prizes are the case that matters. They are dealt once both boards are
+        set up, so they arrive as six ordinary moves per player - and six loose
+        EntityMoveds are six separate card flights, which is what "the prizes
+        come out one at a time" looked like. DealInitialPrizeCards exists for
+        exactly this: it overrides its GroupedMove children's stagger to 0.1s
+        and turns the prize-count badges on afterwards.
+        """
+        out, run = [], []
+
+        def flush():
+            if not run:
+                return
+            moves = []
+            for change in run:
+                destination = self.pile.get((change.player, ZONE_PRIZES))
+                if destination is None or change.card is None:
+                    continue
+                moves.append(("msg",) + self._move_msg(change.card, destination,
+                                                       duration=0))
+            del run[:]
+            if moves:
+                out.append(("seq", "DealInitialPrizeCards",
+                            [("seq", "GroupedMove", moves)]))
+
+        for change in changes:
+            if (change.kind == engine.CHANGE_MOVE
+                    and change.to_zone == ZONE_PRIZES
+                    and change.from_zone == ZONE_DECK):
+                run.append(change)
+                continue
+            flush()
+            out.append(change)
+        flush()
         return out
 
     def _destination(self, change):
@@ -740,26 +789,38 @@ class Match:
                 if slot.stack]
 
     def _offer_group(self, rows, decode, entity, action_id, description,
-                     selection_type, by_target, prompt=None):
+                     selection_type, by_target, prompt=None, selected=True):
         """One offered move, and how to read the answer back.
 
         by_target maps a target entity id to the engine Action that choosing it
-        means. When it holds one entry the target is forced, so it is sent
-        unselected and the click resolves in one step; when it holds several
-        the client runs its target picker and echoes the choice back.
-
-        The whole point of keying on the target is that one (entity, action)
+        means. The point of keying on the target is that one (entity, action)
         pair can stand for several Actions - attaching an Energy to any of six
-        Pokemon is one row with six targets, not six rows. Dropping the target
-        and applying an arbitrary one of them is how "attach energy" used to
-        put it on whichever Pokemon the engine happened to list first.
+        Pokemon is one row with six targets, not six rows.
+
+        `selected` decides whether the target list becomes a selection NODE,
+        and it is not cosmetic. ActionsNode only builds a TargetInfoNode from
+        TargetInformations with Selected == true; an unselected one is copied
+        into predictedEntityTargetMap for hinting and the action is mapped to a
+        NULL node. Picking up such a card then runs
+        SelectAndAdvanceIfNotAbility, which advances onto the ActionsNode, sees
+        NodeToAdvanceTo() is not an IEntityListSelection, and calls
+        CancelToStart() - the card snaps back and nothing happens.
+
+        That is exactly what "attaching moves the card but doesn't react to
+        the Active" was: this used to send selected=False whenever there was
+        only one target, so with a lone Active in play attaching had no node
+        to drop onto at all.
+
+        Attacks are the one case that genuinely wants selected=False: the
+        defender is forced, the attack is chosen from a button rather than a
+        drag, and a node there would make the player click the defender too.
         """
         targets = [t for t in by_target if t]
         if not targets:
             return
         rows.append(self._action_row(
             entity, action_id, description, selection_type,
-            [self._target_info(targets, prompt, selected=len(targets) > 1)]))
+            [self._target_info(targets, prompt, selected=selected)]))
         decode[(entity, action_id)] = dict(by_target)
 
     def setup_selection(self, player, counter):
@@ -1095,10 +1156,18 @@ class Match:
                               "Evolve", "Ability", by_target,
                               "playmat.prompt.selectapokemontoevolve")
         for card, action in play.items():
-            # Benching needs no target, but a row with no target at all has no
-            # click to resolve, so the bench itself stands in as a forced one.
+            # Benching names no target, but a row with no targets builds no
+            # node and cannot be dropped on at all. The drop lands on whatever
+            # is under the cursor - the bench area when it is empty, one of the
+            # benched Pokemon when it is not - so every one of those resolves
+            # to the same action, and so does the card itself, which is what
+            # dragEnded falls back to selecting.
+            spots = {bench_pile: action, self.eid(card): action}
+            for entity in self.own_pokemon_entities(player):
+                if entity:
+                    spots[entity] = action
             self._offer_group(rows, decode, self.eid(card), ACTION_PLAY_BASIC,
-                              "PlayBasic", "Ability", {bench_pile: action})
+                              "PlayBasic", "Ability", spots)
         for target, action in retreat.items():
             self._offer_group(rows, decode, target, ACTION_RETREAT,
                               "BaseRetreat", "Ability", {target: action})
@@ -1134,7 +1203,8 @@ class Match:
                 self._offer_group(
                     rows, decode, active_entity, action.ability_id,
                     _loc_key(attack.title) if attack else action.ability_id,
-                    "AbilitySelection", {opp_active: action})
+                    "AbilitySelection", {opp_active: action},
+                    selected=False)
 
         # A promotion is owed, not chosen: the turn cannot continue around it,
         # so the client must not be given an end-turn button to escape with.
@@ -1142,7 +1212,7 @@ class Match:
         return {
             "counter": counter,
             "prompt": ("playmat.prompt.dragbenchtoactive" if forced
-                       else "playmat.prompt.chooseaction"),
+                       else PROMPT_CHOOSE_ACTION),
             "offerLength": 0,                 # no client-side auto-pass
             "startingTimestamp": 0,
             "forced": forced,                 # false lets Next end the turn
@@ -1244,14 +1314,11 @@ class Match:
         if reveal:
             items.append(("seq", "IntroduceInitialPokemon", reveal))
 
-        prizes = []
-        for index, player in enumerate(self.state.players):
-            moves = [("msg",) + self._move_msg(cid, self.pile[(index, ZONE_PRIZES)])
-                     for cid in player.prizes]
-            if moves:
-                prizes.append(("seq", "GroupedMove", moves))
-        if prizes:
-            items.append(("seq", "DealInitialPrizeCards", prizes))
+        # No prizes here. The engine deals them only once BOTH boards are set
+        # up - which is the real rule, since a card placed during setup can
+        # never become a prize - so at this point every prize pile is empty.
+        # They arrive later as ordinary move Changes and are grouped into
+        # DealInitialPrizeCards by animation_for.
         return items
 
     def _introduce_msg(self, cid, slot=None):

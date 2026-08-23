@@ -358,10 +358,14 @@ class Harness:
                 self.result = value
                 return
             if name == "SelectionWithTargetsRequired":
-                # Setup and every effect Choice share this message; the setup
-                # one is the only one that sends two TargetInformations.
+                # Setup and every effect Choice share this message. Tell them
+                # apart by the node NAME, not by how many nodes there are: a
+                # setup offer legitimately has only one when the hand holds a
+                # single Basic, and counting by length reported "0 setup
+                # selections" for a game that had just done one.
                 infos = next(iter((value.get("targetMap") or {}).values()), [])
-                if len(infos) > 1:
+                if any((i or {}).get("name") == "ActivePokemonTargetInformation"
+                       for i in infos):
                     self.setups += 1
                 else:
                     self.choices += 1

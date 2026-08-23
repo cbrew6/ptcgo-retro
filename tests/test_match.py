@@ -465,7 +465,11 @@ class LocalizationKeyTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         import server
-        cls.keys = {e["key"] for e in server.load_localization()}
+        # Lowercased, because the shipped DB is entirely lowercase and both
+        # L.LT and LocalizableText.HasId compare case-insensitively. Some ids
+        # must be sent in their original mixed case regardless - the client
+        # matches PiePromptListener.suppressedKeys against the id it was given.
+        cls.keys = {e["key"].lower() for e in server.load_localization()}
         if not cls.keys:
             raise unittest.SkipTest("no localization DB on this machine")
 
@@ -491,7 +495,7 @@ class LocalizationKeyTests(unittest.TestCase):
     def test_every_prompt_key_we_send_really_exists(self):
         sent = self._sent_keys()
         self.assertTrue(sent, "found no prompt keys to check - regex stale?")
-        missing = sorted(k for k in sent if k not in self.keys)
+        missing = sorted(k for k in sent if k.lower() not in self.keys)
         self.assertFalse(
             missing,
             "these render as raw text in the UI: %s" % ", ".join(missing))
