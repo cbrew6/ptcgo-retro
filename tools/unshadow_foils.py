@@ -37,9 +37,21 @@ LOOSE_ART = os.path.join(
 SHADOWED = os.path.join(os.path.dirname(HERE), "_looseart_shadowed_foils")
 
 # en_US_COL_wp_pcd_Foil2_CR116_2 -> COL_wp_pcd_Foil2
-# The CR token is a content release, not a version, so it is stripped along
-# with the trailing build number to get the namespace the client requests.
-BUNDLE_RE = re.compile(r"^(?:en_US_)?(.+?)(?:_CRR?\d+)?(?:_\d+)?$")
+# The trailing number is a build version and the _CR token is a content
+# release; neither is part of the namespace the client requests.
+#
+# The CR token is NOT always numeric - SM-era releases are _CRSM4, _CRSM6,
+# _CRR65p1. A pattern that only matched _CR<digits> left those bundles
+# looking like a namespace of their own, so their LooseArt blanks were never
+# recognised as shadowing and every SM foil stayed flat.
+VERSION_RE = re.compile(r"_\d+$")
+RELEASE_RE = re.compile(r"_CRR?[A-Za-z0-9]*$")
+
+
+def namespace_of(bundle):
+    name = bundle[6:] if bundle.startswith("en_US_") else bundle
+    name = VERSION_RE.sub("", name)
+    return RELEASE_RE.sub("", name)
 
 
 def bundle_namespaces():
@@ -48,10 +60,7 @@ def bundle_namespaces():
         bundles = json.load(fh)
     served = {}
     for name, assets in bundles.items():
-        m = BUNDLE_RE.match(name)
-        if not m:
-            continue
-        served.setdefault(m.group(1), set()).update(assets)
+        served.setdefault(namespace_of(name), set()).update(assets)
     return served
 
 
