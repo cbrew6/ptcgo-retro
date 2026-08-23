@@ -217,6 +217,157 @@ class CardImageTests(unittest.TestCase):
         self.assertTrue(any(not c.card_image.isdigit() for c in variants))
 
 
+class OfferTests(unittest.TestCase):
+    """Every legal move must be offered, and the reply must decode back.
+
+    The client holds no rules and invents nothing, so an action missing from
+    the offer is simply unplayable. For a long time only AttachEnergy and
+    Attack were offered: a hand of Basics could not be benched, nothing
+    evolved, nobody retreated, and a player whose Active was knocked out was
+    sent no offer at all and sat there forever.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.db = engine.CardDB.from_directory(CARD_DIR)
+
+    def _match(self, basics=30, energies=30, want_bench=2):
+        """A set-up match with a populated bench and Energy still in hand.
+
+        The seed is searched for rather than fixed. A fixed one drew a hand
+        with a single Basic, which left the bench empty and quietly turned two
+        of these tests into assertions about nothing - the fixture has to
+        guarantee the shape the test needs, or the test is only testing the
+        shuffle.
+        """
+        basic = next(c for c in self.db
+                     if c.is_pokemon and c.stage == "Basic" and c.attacks
+                     and c.retreat_cost)
+        energy = next(c for c in self.db
+                      if c.is_basic_energy and c.energy_options)
+        deck = [basic.guid] * basics + [energy.guid] * energies
+        for seed in range(200):
+            m = match.Match("game-4", ["acct-a", "acct-b"], self.db,
+                            [deck, list(deck)], seed=seed)
+            m.serialized_state(predeal=True)  # mints the entity/pile ids
+            m.auto_setup()
+            me = m.state.players[0]
+            has_energy = any(m.state.card(c).is_energy for c in me.hand)
+            if me.active is not None and len(me.bench) >= want_bench \
+                    and has_energy:
+                return m
+        raise AssertionError("no seed produced a bench of %d with Energy in "
+                             "hand" % want_bench)
+
+    def _offer_kinds(self, m):
+        _body, decode = m.build_offer(0, 1)
+        return {type(next(iter(by_target.values()))).__name__
+                for by_target in decode.values()}
+
+    def test_offer_covers_the_legal_actions(self):
+        """Anything legal that is not offered is unreachable in the client."""
+        m = self._match()
+        legal = {type(a).__name__ for a in engine.legal_actions(m.state, 0)}
+        legal.discard("Pass")                 # the Next button, not a row
+        legal.discard("SetupDone")
+        offered = self._offer_kinds(m)
+        missing = legal - offered
+        self.assertFalse(missing,
+                         "legal but never offered: %s" % ", ".join(sorted(missing)))
+
+    def test_a_reply_decodes_back_to_the_action_it_named(self):
+        """The reply is [[entityID, abilityID], [TargetResponse, ...]]."""
+        m = self._match()
+        body, decode = m.build_offer(0, 1)
+        self.assertTrue(body["targetMap"], "nothing offered at all")
+        for row in body["targetMap"]:
+            entity = row["entityID"]
+            action_id = row["selectableAction"]["actionID"]
+            targets = [t for info in row["targetInfoLst"]
+                       for t in info["validTargets"]]
+            for target in targets:
+                reply = [[entity, action_id],
+                         [{"entityList": [target],
+                           "name": "EntityListTargetResponse"}]]
+                decoded = match.Match.decode_reply(reply, decode)
+                self.assertIsNotNone(
+                    decoded, "row %s/%s target %s decoded to nothing"
+                    % (entity, action_id, target))
+                self.assertIs(decoded, decode[(entity, action_id)][target])
+
+    def test_the_chosen_target_is_honoured(self):
+        """One row can stand for several Actions differing only by target.
+
+        Attaching an Energy to any of six Pokemon is one row with six targets.
+        Ignoring the target and applying an arbitrary one of them is how this
+        used to put the Energy on whichever Pokemon the engine listed first.
+        """
+        m = self._match()
+        _body, decode = m.build_offer(0, 1)
+        multi = [(key, by_target) for key, by_target in decode.items()
+                 if len(by_target) > 1]
+        self.assertTrue(multi, "no multi-target row to test with")
+        (entity, action_id), by_target = multi[0]
+        for target, expected in by_target.items():
+            reply = [[entity, action_id],
+                     [{"entityList": [target], "name": "EntityListTargetResponse"}]]
+            self.assertIs(match.Match.decode_reply(reply, decode), expected)
+
+    def test_an_unknown_reply_is_refused_rather_than_guessed(self):
+        m = self._match()
+        _body, decode = m.build_offer(0, 1)
+        self.assertIsNone(match.Match.decode_reply(None, decode))
+        self.assertIsNone(match.Match.decode_reply(
+            [["no-such-entity", "no-such-action"], []], decode))
+        # Malformed input must not raise: it comes from off-machine, and an
+        # exception here takes the match down where a refusal just re-offers.
+        for junk in ([], [[]], "x", [[None, None], None], [[1]], {}):
+            self.assertIsNone(match.Match.decode_reply(junk, decode))
+
+    def test_rows_for_one_entity_share_a_selection_type(self):
+        """An entity whose rows mix "Ability" and "AbilitySelection" lands in a
+        client fallback that draws no UI at all."""
+        m = self._match()
+        body, _decode = m.build_offer(0, 1)
+        kinds = {}
+        for row in body["targetMap"]:
+            kinds.setdefault(row["entityID"], set()).add(
+                row["selectableAction"]["selectionType"])
+        for entity, seen in kinds.items():
+            self.assertEqual(len(seen), 1,
+                             "entity %s mixes %s" % (entity, sorted(seen)))
+
+    def test_a_promotion_is_forced_and_still_offered(self):
+        """With no Active the engine offers only Promote. Suppressing that
+        offer - which the server used to do - hangs the match for good."""
+        m = self._match()
+        me = m.state.players[0]
+        self.assertTrue(me.bench, "fixture put nothing on the bench")
+        # As a knockout leaves it. Clearing active alone is not enough: the
+        # engine records the debt in pending_promotions, and that is what
+        # makes Promote the only legal move.
+        me.active = None
+        m.state.pending_promotions.append(0)
+        self.assertEqual(engine.players_to_act(m.state), [0])
+        body, decode = m.build_offer(0, 1)
+        kinds = {type(next(iter(v.values()))).__name__ for v in decode.values()}
+        self.assertEqual(kinds, {"Promote"})
+        self.assertTrue(body["forced"],
+                        "an unforced offer gives an end-turn button that "
+                        "escapes a promotion the rules say is owed")
+        self.assertTrue(body["targetMap"])
+
+    def test_no_offer_row_carries_a_null_target_list(self):
+        """validTargets has .Length read on it directly."""
+        m = self._match()
+        body, _decode = m.build_offer(0, 1)
+        for row in body["targetMap"]:
+            self.assertIsInstance(row["targetInfoLst"], list)
+            for info in row["targetInfoLst"]:
+                self.assertIsInstance(info["validTargets"], list)
+                self.assertTrue(info["validTargets"])
+
+
 class SerializedStateTests(unittest.TestCase):
     """Structural rules the client's Entities.initialize depends on."""
 

@@ -1747,11 +1747,31 @@ class GameSession:
     def offer_actions(self):
         """Send the player their legal moves.
 
-        Never offered to a player with an empty Active slot: the client's
-        end-turn check dereferences the active's first child unguarded.
+        An empty Active slot used to suppress the offer entirely, on the
+        grounds that the client's end-turn check dereferences the active's
+        first child unguarded. That was the right instinct and the wrong call
+        site: every unguarded `ActivePokemon().Children.get_Item(0)` in the
+        client is in ability-selection UI, not in ending a turn -
+
+            pie.cs:117050  the ability-selection command's constructor
+            pie.cs:141197  the attack/target animation sequence
+            pie.cs:199292  the bonus-ability menu
+
+        - and none of them is reached by an offer that contains no
+        AbilitySelection rows. When the Active is empty the engine offers
+        nothing but Promote, so the offer is exactly that shape.
+
+        Suppressing it was also not safe, only quiet: the player owes a
+        promotion, the client is told nothing, and the match hangs there for
+        good. A hang is worse than the crash it was avoiding, and this avoids
+        both.
         """
-        if self.match.state.players[0].active is None:
-            return
+        state = self.match.state
+        if state.players[0].active is None:
+            owed = [a for a in engine.legal_actions(state, 0)
+                    if isinstance(a, engine.Promote)]
+            if not owed:
+                return
         self.selection_counter += 1
         body, decode = self.match.build_offer(0, self.selection_counter)
         self.action_decode = decode

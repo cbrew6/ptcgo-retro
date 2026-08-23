@@ -205,6 +205,7 @@ class Harness:
         self.board = None
         self.problems = []
         self.revealed = 0
+        self.actions_taken = 0
         self.revealed_pokemon = 0
         self.result = None
         self.turns = 0
@@ -353,15 +354,35 @@ class Harness:
     def _select(self, target_map):
         """Choose one offered action, or pass when there is nothing.
 
+        The reply shape is not ours to invent - core's
+        Outgoing.SelectionWithTargetsAndActions builds
+
+            [[entityID, abilityID], [TargetResponse, ...]]
+
+        with each TargetResponse {"entityList": [id, ...], "name": ...}, and
+        the server decodes exactly that. An earlier version of this method sent
+        a flat {"targetID", "actionID"} dict and read fields ("targetID",
+        "actions") that appear nowhere in the offer, so it found no choices,
+        answered null every time, and every "clean" soak game was really the
+        harness passing its way to a loss without exercising a single action.
+
         The harness is not trying to play well - it is trying to drive the
         server through as much of its own code as possible. With an rng it
         picks at random, which is what makes a soak explore more than the one
-        path a fixed policy walks; without one it is deterministic so a
+        path a fixed policy walks; without one it is deterministic, so a
         failure can be re-run.
         """
-        choices = [(entry.get("targetID"), action.get("actionID"))
-                   for entry in target_map
-                   for action in ((entry or {}).get("actions") or [])]
+        choices = []
+        for row in target_map or []:
+            action = (row or {}).get("selectableAction") or {}
+            action_id = action.get("actionID")
+            entity_id = row.get("entityID")
+            if not action_id or not entity_id:
+                continue
+            targets = []
+            for info in row.get("targetInfoLst") or []:
+                targets.extend((info or {}).get("validTargets") or [])
+            choices.append((entity_id, action_id, targets))
         if not choices:
             return None
         if self.rng is not None:
@@ -369,10 +390,18 @@ class Harness:
             # in the pool rather than being unreachable.
             if self.rng.random() < 0.1:
                 return None
-            target, action = self.rng.choice(choices)
+            entity_id, action_id, targets = self.rng.choice(choices)
+            target = self.rng.choice(targets) if targets else None
         else:
-            target, action = choices[0]
-        return {"targetID": target, "actionID": action}
+            entity_id, action_id, targets = choices[0]
+            target = targets[0] if targets else None
+
+        self.actions_taken += 1
+        responses = []
+        if target is not None:
+            responses.append({"entityList": [target],
+                              "name": "EntityListTargetResponse"})
+        return [[entity_id, action_id], responses]
 
     def close(self):
         if self.sock:
@@ -435,7 +464,14 @@ def report(h):
         check("result carries GameResult", "GameResult" in params,
               "the summary dialog indexes it unguarded")
         print("        result: %s" % json.dumps(params)[:200])
-    print("\n   %d player decisions taken" % h.turns)
+    # Without this the soak can pass while proving nothing: an earlier version
+    # read field names the offer does not contain, found no choices, and
+    # answered null to every offer. Every game was "clean" and no action was
+    # ever exercised.
+    check("the harness actually played", h.actions_taken > 0,
+          "%d of %d offers answered with an action" % (h.actions_taken, h.turns))
+    print("\n   %d offers, %d answered with an action"
+          % (h.turns, h.actions_taken))
     return ok
 
 

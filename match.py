@@ -67,10 +67,33 @@ ACTION_ATTACH = "1e7c0b00-0000-4000-8000-000000000001"
 ACTION_PLAY_BASIC = "1e7c0b00-0000-4000-8000-000000000002"
 ACTION_RETREAT = "1e7c0b00-0000-4000-8000-000000000003"
 ACTION_EVOLVE = "1e7c0b00-0000-4000-8000-000000000004"
+ACTION_PROMOTE = "1e7c0b00-0000-4000-8000-000000000005"
 
 
 def _loc(text):
     return {"id": text}
+
+
+def _target_entities(selection):
+    """Every entity id the client named in its target responses, in order.
+
+    Shape is [[entityID, abilityID], [{"entityList": [...], "name": ...}, ...]].
+    Written defensively because it is parsing input from outside the server and
+    a malformed reply must not take the game down - an unrecognised answer is
+    re-offered, which is recoverable, while an exception here is not.
+    """
+    try:
+        responses = selection[1]
+    except (IndexError, TypeError, KeyError):
+        return []
+    out = []
+    for response in responses or []:
+        if isinstance(response, dict):
+            for entity in response.get("entityList") or []:
+                out.append(entity)
+        elif isinstance(response, str):
+            out.append(response)
+    return out
 
 
 def _entity(eid, parent, owner, name, attrs, children=None):
@@ -523,42 +546,127 @@ class Match:
                 for slot, _pile, _active in self.slot_entities(player)
                 if slot.stack]
 
+    def _offer_group(self, rows, decode, entity, action_id, description,
+                     selection_type, by_target, prompt=None):
+        """One offered move, and how to read the answer back.
+
+        by_target maps a target entity id to the engine Action that choosing it
+        means. When it holds one entry the target is forced, so it is sent
+        unselected and the click resolves in one step; when it holds several
+        the client runs its target picker and echoes the choice back.
+
+        The whole point of keying on the target is that one (entity, action)
+        pair can stand for several Actions - attaching an Energy to any of six
+        Pokemon is one row with six targets, not six rows. Dropping the target
+        and applying an arbitrary one of them is how "attach energy" used to
+        put it on whichever Pokemon the engine happened to list first.
+        """
+        targets = [t for t in by_target if t]
+        if not targets:
+            return
+        rows.append(self._action_row(
+            entity, action_id, description, selection_type,
+            [self._target_info(targets, prompt, selected=len(targets) > 1)]))
+        decode[(entity, action_id)] = dict(by_target)
+
     def build_offer(self, player, counter):
         """A SelectionWithTargetsAndActionsRequired body, plus a decode map.
 
-        The map is how the reply is turned back into an engine Action: the
-        client echoes (entityID, actionID), which is exactly what keys it.
+        Every legal move has to appear here, because the client holds no rules
+        and will not invent one. Anything missing is simply not playable: for a
+        long time only AttachEnergy and Attack were offered, so a hand of Basic
+        Pokemon could not be benched, nothing evolved, nobody retreated, and a
+        player whose Active was knocked out was offered nothing at all.
+
+        Rows are grouped by entity and each entity keeps ONE selectionType,
+        which decides how they are laid out:
+
+          hand cards    "Ability"           play, evolve, attach
+          bench Pokemon "Ability"           retreat into, promote
+          the Active    "AbilitySelection"  its attacks
+
+        That split is not cosmetic. "AbilitySelection" draws a button per
+        ability and only draws it when the action id really appears in that
+        card's ability list, so attacks must carry their true abilityID and
+        nothing else may share the Active's rows. "Ability" auto-advances to
+        target selection and never looks the id up, which is what makes it
+        right for moves that are not printed on the card. An entity whose rows
+        mix the two lands in a fallback with no UI at all.
         """
         rows, decode = [], {}
+        me = self.state.players[player]
         opponent = 1 - player
         opp_active = None
         if self.state.players[opponent].active is not None:
             opp_active = self.entity_of_slot(self.state.players[opponent].active)
-        mine = [e for e in self.own_pokemon_entities(player) if e]
+        bench_pile = self.pile.get((player, ZONE_BENCH))
 
+        # Gather first, emit second: several Actions can collapse into one row
+        # that differs only by target, and that is only visible once they are
+        # all in hand.
+        attach, evolve, play, retreat, promote = {}, {}, {}, {}, {}
+        attacks = []
         for action in engine.legal_actions(self.state, player):
             if isinstance(action, engine.AttachEnergy):
-                entity = self.eid(action.card)
-                rows.append(self._action_row(
-                    entity, ACTION_ATTACH, "PlayEnergy", "Ability",
-                    [self._target_info(mine, "playmat.prompt.attachenergy")]))
-                decode[(entity, ACTION_ATTACH)] = ("attach", action)
-            elif isinstance(action, engine.Attack) and opp_active:
-                slot = self.state.players[player].active
-                entity = self.entity_of_slot(slot)
-                rows.append(self._action_row(
-                    entity, action.ability_id, action.ability_id,
-                    "AbilitySelection",
-                    # A single forced target needs no player choice, so it is
-                    # sent unselected: the click resolves immediately.
-                    [self._target_info([opp_active], None, selected=False)]))
-                decode[(entity, action.ability_id)] = ("attack", action)
+                target = self.entity_of_slot(self.resolve_slot(action.slot))
+                attach.setdefault(action.card, {})[target] = action
+            elif isinstance(action, engine.Evolve):
+                target = self.entity_of_slot(self.resolve_slot(action.slot))
+                evolve.setdefault(action.card, {})[target] = action
+            elif isinstance(action, engine.PlayBasic):
+                play[action.card] = action
+            elif isinstance(action, engine.Retreat):
+                # Retreat names the Pokemon coming IN, so the row hangs off the
+                # bench Pokemon being switched to rather than off the Active.
+                # That also keeps it away from the Active's attack rows.
+                target = self.entity_of_slot(self.resolve_slot(action.slot))
+                retreat[target] = action
+            elif isinstance(action, engine.Promote):
+                target = self.entity_of_slot(self.resolve_slot(action.slot))
+                promote[target] = action
+            elif isinstance(action, engine.Attack):
+                attacks.append(action)
+
+        for card, by_target in attach.items():
+            self._offer_group(rows, decode, self.eid(card), ACTION_ATTACH,
+                              "PlayEnergy", "Ability", by_target,
+                              "playmat.prompt.attachenergy")
+        for card, by_target in evolve.items():
+            self._offer_group(rows, decode, self.eid(card), ACTION_EVOLVE,
+                              "Evolve", "Ability", by_target,
+                              "playmat.prompt.chooseaction")
+        for card, action in play.items():
+            # Benching needs no target, but a row with no target at all has no
+            # click to resolve, so the bench itself stands in as a forced one.
+            self._offer_group(rows, decode, self.eid(card), ACTION_PLAY_BASIC,
+                              "PlayBasic", "Ability", {bench_pile: action})
+        for target, action in retreat.items():
+            self._offer_group(rows, decode, target, ACTION_RETREAT,
+                              "Retreat", "Ability", {target: action})
+        for target, action in promote.items():
+            self._offer_group(rows, decode, target, ACTION_PROMOTE,
+                              "Promote", "Ability", {target: action})
+
+        if opp_active:
+            active_entity = self.entity_of_slot(me.active) if me.active else None
+            for action in attacks:
+                if not active_entity:
+                    continue
+                self._offer_group(
+                    rows, decode, active_entity, action.ability_id,
+                    action.ability_id, "AbilitySelection",
+                    {opp_active: action})
+
+        # A promotion is owed, not chosen: the turn cannot continue around it,
+        # so the client must not be given an end-turn button to escape with.
+        forced = me.active is None and bool(promote)
         return {
             "counter": counter,
-            "prompt": "playmat.prompt.chooseaction",
+            "prompt": ("playmat.prompt.selectnewactivepokemon" if forced
+                       else "playmat.prompt.chooseaction"),
             "offerLength": 0,                 # no client-side auto-pass
             "startingTimestamp": 0,
-            "forced": False,                  # so the Next button can end turn
+            "forced": forced,                 # false lets Next end the turn
             "targetType": "",                 # never null: looked up as a key
             "optimalPlayMap": [],             # never null: iterated unguarded
             "selectionParams": {},
@@ -567,7 +675,17 @@ class Match:
 
     @staticmethod
     def decode_reply(selection, decode):
-        """(entityID, actionID) from the client's echo -> the engine Action.
+        """The client's echo -> the engine Action.
+
+        The reply is built by core's Outgoing.SelectionWithTargetsAndActions as
+
+            [[entityID, abilityID], [TargetResponse, ...]]
+
+        where each TargetResponse is {"entityList": [id, ...], "name": ...}.
+        The first pair identifies the row; the target list says which of that
+        row's targets was picked, and picking is the whole difference between
+        attaching an Energy to the Pokemon the player clicked and attaching it
+        to an arbitrary one.
 
         A null selection is the player passing, which is also how the Next
         button ends a turn.
@@ -578,8 +696,19 @@ class Match:
             entity_id, action_id = selection[0][0], selection[0][1]
         except (IndexError, TypeError, KeyError):
             return None
-        found = decode.get((entity_id, action_id))
-        return found[1] if found else None
+        by_target = decode.get((entity_id, action_id))
+        if not by_target:
+            return None
+
+        for response in _target_entities(selection):
+            if response in by_target:
+                return by_target[response]
+        # A forced single target is sent unselected, so the client may answer
+        # with no target at all. With one candidate that is unambiguous; with
+        # several it is not, and guessing would silently play the wrong move.
+        if len(by_target) == 1:
+            return next(iter(by_target.values()))
+        return None
 
     # -- the opening animation --------------------------------------------
 
