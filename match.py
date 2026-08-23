@@ -118,6 +118,8 @@ PROMPT_CALL_FLIP = "playmat.gamestart.prompt.coinflipchoice"
 # borrowing an unrelated suppressed key to get there.
 PROMPT_NONE = ""
 PROMPT_NEW_ACTIVE = "playmat.prompt.dragbenchtoactive"
+PROMPT_LOOK_AT_HAND = "playmat.prompt.lookatopponenthand"
+PROMPT_HAND_TITLE = "playmat.tooltip.opponenthand"
 BUTTON_HEADS = "com.direwolfdigital.cake.rules.states.startgame.heads"
 BUTTON_TAILS = "com.direwolfdigital.cake.rules.states.startgame.tails"
 # The original server's own mulligan prompt, still in the shipped DB: "Your
@@ -652,9 +654,12 @@ class Match:
 
         draws = []
 
+        draws_seen = [()]
+
         def flush_draws():
             if not draws:
                 return
+            draws_seen[0] = tuple(draws)
             items = []
             for change in draws:
                 destination = self.pile.get((change.player, ZONE_HAND))
@@ -664,9 +669,21 @@ class Match:
                     items.append(("msg",) + self._introduce_msg(change.card))
                 items.append(("msg",) + self._move_msg(change.card, destination))
             del draws[:]
-            if items:
-                # Draw buckets its children by card type for the draw fan.
-                out.append(("seq", "Draw", items))
+            if not items:
+                return
+            # GroupedMove, not Draw, for more than one card.
+            #
+            # Draw runs ExecuteParallel over every EntityMoved first and only
+            # then staggers the flight paths, so all the cards reparent into
+            # the hand at once - the hand opens up its full width of empty
+            # slots and the cards trickle in to fill them. GroupedMove staggers
+            # the whole move instead, so each card arrives and the hand grows
+            # by one, which is what a hand doing this should look like.
+            #
+            # A single card has nothing to stagger, so it keeps Draw and its
+            # type-bucketed fan.
+            out.append(("seq", "Draw" if len(draws_seen[0]) == 1 else "GroupedMove",
+                        items))
 
         # Which player currently owes a knockout run, so the moves that follow
         # a knockout are gathered and anything else closes it.
@@ -985,28 +1002,36 @@ class Match:
         cards = (change.detail or {}).get("cards") or []
         if not cards:
             return []
-        # The cards have to exist client-side and carry attributes before any
-        # of them can be turned face up, so the introductions go first and
-        # outside the parallel run.
+        # ONE dialog holding every card, not one flight per card.
+        #
+        # ParallelSequence looked like the way to show them together and is
+        # broken: its `private IList<Command> A` is declared and never
+        # assigned, so executeSequence's `foreach (Command item in A)` throws a
+        # NullReferenceException every time - out of the sequence, out of the
+        # message pump, and the game stops. It is dead code in this build.
+        #
+        # RevealCardsToAllEffect is the real answer. It opens the reveal area
+        # with all the cards at once, and it is safe: the command only builds
+        # the dialog when playerPrompt names the local account and otherwise
+        # completes immediately, and the dialog clears model.c when it is
+        # dismissed - the same handshake the mulligan carousel already uses.
         items = [("msg",) + self._introduce_msg(cid) for cid in cards]
-        reveals = [("msg", "EffectPlayed", {
+        prompt = _loc(PROMPT_LOOK_AT_HAND)
+        items.append(("msg", "EffectPlayed", {
             "gameID": self.game_id,
             "effectMessage": {
-                "name": "RevealCardToAllEffect",
+                "name": "RevealCardsToAllEffect",
                 "value": {
-                    "entityID": self.eid(cid),
-                    "Return": True,
-                    "alwaysReveal": True,
+                    "entityID": [self.eid(cid) for cid in cards],
+                    # A player missing from this map is shown nothing at all,
+                    # so both accounts are listed.
+                    "playerPrompt": {account: prompt for account in self.accounts},
+                    "revealTitle": _loc(PROMPT_HAND_TITLE),
+                    "revealSource": None,
+                    "prompt": prompt,
                 },
             },
-        }) for cid in cards]
-        # ParallelSequence, not AlwaysReveal: a revealed HAND should appear as
-        # a hand. AlwaysReveal is a plain serial runner, so each card flew out,
-        # waited its half second and came back before the next one started -
-        # a seven-card hand took four seconds to show. ParallelSequence starts
-        # every child at once and waits for all of them, and the cards land in
-        # multiPresentArea, which exists to hold several.
-        items.append(("seq", "ParallelSequence", reveals))
+        }))
         return [("seq", "AlwaysReveal", items)]
 
     def _change_prize(self, change):

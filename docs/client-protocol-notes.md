@@ -623,8 +623,16 @@ The ones worth knowing (all VERIFIED by reading `executeSequence`):
 | `Evolve` | `pie_d.cs:141630` | needs `From` and `Into` data effects (§1.6) |
 | `ParallelSequence` / `SerialSequence` | `pie_d.cs:200677` / `200733` | generic run-all-at-once / run-in-order |
 
-`ParallelSequence` and `SerialSequence` are the closest thing to a generic
-timing primitive the protocol offers.
+`SerialSequence` is a generic run-in-order primitive.
+
+**`ParallelSequence` IS BROKEN — never send it.** Its
+`private IList<Command> A` is declared and never assigned (the constructor
+passes `sequence` to the base and nothing sets `A`), so `executeSequence`'s
+`foreach (Command item in A)` throws a `NullReferenceException` every single
+time. The throw escapes the sequence and kills the message pump, ending the
+game. Verified against a live client: a reveal wrapped in one stopped play
+dead, with `r.M+m.MoveNext` at the top of the stack. There is no generic
+"run these at once" sequence in this build.
 
 ### 3.3 Effect messages — full inventory, and which ones are DEAD
 

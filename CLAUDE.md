@@ -802,6 +802,11 @@ Bench" is one offer answered in one message.
   fan-out, `Attack`, `Knockout`, `Draw`, `Mulligan`, ...). A message sent
   outside one gets no choreography. `match.animation_for()` keeps that
   structure; `messages_for()` flattens it.
+- **`ParallelSequence` always throws.** Its backing list is declared and never
+  assigned, so it raises a NullReferenceException out of the message pump and
+  ends the game. There is no generic "run these at once" sequence. To show
+  several cards together use a message that takes a LIST -
+  `RevealCardsToAllEffect` for a reveal - not a sequence.
 - **~40 effect classes have no consumer at all** and are silently dropped -
   `AnimationDelayEffect`, `BlinkEffect`, `PromptMessage`, `GameLogMessage`,
   `SelectionFinished`. Check `docs/client-protocol-notes.md` before sending one.
