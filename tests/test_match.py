@@ -414,16 +414,68 @@ class OfferTests(unittest.TestCase):
         # needs no entry in attribute 200740.
         self.assertEqual(row["selectableAction"]["selectionType"],
                          "AbilitySelection")
+        # Pay the cost, then choose who comes in - in that order, because the
+        # second TargetInformation becomes a CHILD of the first.
         self.assertEqual([i["name"] for i in row["targetInfoLst"]],
-                         ["RetreatNewActiveTargetInformation"])
+                         ["RetreatCostEntityListTargetInformation",
+                          "RetreatNewActiveTargetInformation"])
+        tray = row["targetInfoLst"][0]
+        # valueToSelect is the cost in Energy SYMBOLS - the node tallies
+        # get_EnergyProvidedCount(), so a card count here would let a Double
+        # Colorless underpay a two-cost retreat.
+        self.assertEqual(tray["valueToSelect"], cost)
+        self.assertTrue(tray["forced"],
+                        "an unforced tray is satisfied by selecting nothing, "
+                        "which retreats without paying")
+        self.assertEqual(sorted(tray["validTargets"]),
+                         sorted(m.eid(c) for c in me.active.energy))
         # The destinations are the benched Pokemon, which is what the player
         # picks - retreat names the Pokemon coming IN.
         bench = {m.entity_of_slot(sl) for sl in me.bench if sl.stack}
-        offered = set(row["targetInfoLst"][0]["validTargets"])
+        offered = set(row["targetInfoLst"][1]["validTargets"])
         self.assertTrue(offered, "retreat offered with nowhere to go")
         self.assertTrue(offered <= bench,
                         "retreat targets something that is not a benched "
                         "Pokemon: %s" % sorted(offered - bench))
+
+    def test_the_energy_the_player_picks_is_what_gets_discarded(self):
+        """The pip tray must not be theatre.
+
+        The offer holds one legal Retreat per destination with a payment the
+        server chose, so a reply that ignored the tray would still be legal -
+        and would discard Energy the player did not pick. _do_retreat
+        validates the payment, so honouring the choice is safe: a bad one is
+        refused and re-offered rather than quietly applied.
+        """
+        m = self._match()
+        me = m.state.players[0]
+        cost = engine.retreat_cost(m.state, me.active)
+        # Two different Energy attached, so "which one" is a real question.
+        # Off the deck, not the hand: the fixture's hand holds too few to
+        # leave a spare, and a spare is the whole point of the test.
+        moved = [c for c in list(me.deck) if m.state.card(c).is_energy][:cost + 1]
+        self.assertGreater(len(moved), cost, "need a spare Energy to choose")
+        for cid in moved:
+            me.deck.remove(cid)
+            me.active.energy.append(cid)
+
+        body, decode = m.build_offer(0, 1)
+        row = next(r for r in body["targetMap"]
+                   if r["selectableAction"]["description"] == "BaseRetreat")
+        destination = row["targetInfoLst"][1]["validTargets"][0]
+        chosen = moved[-1:]                      # the LAST one, deliberately
+        reply = [[row["entityID"], row["selectableAction"]["actionID"]],
+                 [{"entityList": [m.eid(c) for c in chosen],
+                   "name": "EntityListTargetResponse"},
+                  {"entityList": [destination],
+                   "name": "EntityListTargetResponse"}]]
+        action = match.Match.decode_reply(reply, decode)
+        self.assertIsInstance(action, engine.Retreat)
+        self.assertEqual(list(action.energy), chosen,
+                         "the tray's answer was ignored")
+        # And the engine accepts it, which is what makes it a real payment.
+        state, _changes = engine.apply(m.state, action)
+        self.assertNotIn(chosen[0], state.players[0].active.energy)
 
     def test_a_promotion_uses_its_own_selection_not_an_action_offer(self):
         """CheckShouldEndTurn (pie_d.cs:31489) dereferences the Active's first

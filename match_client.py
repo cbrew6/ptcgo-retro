@@ -497,10 +497,22 @@ class Harness:
             entity_id = row.get("entityID")
             if not action_id or not entity_id:
                 continue
-            targets = []
-            for info in row.get("targetInfoLst") or []:
-                targets.extend((info or {}).get("validTargets") or [])
-            choices.append((entity_id, action_id, targets,
+            # One entry per NODE, not one flat list. A row can carry several
+            # TargetInformations - retreat carries the cost tray and then the
+            # destination - and the real client answers each with its own
+            # TargetResponse, in order. Flattening them into a single response
+            # still got retreats accepted, because the server falls back to the
+            # only legal candidate, so the tray was never actually exercised.
+            nodes = [(info or {}).get("validTargets") or []
+                     for info in row.get("targetInfoLst") or []]
+            # valueToSelect is a count of Energy SYMBOLS. The harness cannot
+            # see energy_units from here, so it assumes one symbol per card -
+            # true for the basic Energy build_decks uses. An underpayment is
+            # refused by the engine and re-offered, which is visible as a
+            # rejected action rather than a silent pass.
+            counts = [max(1, (info or {}).get("valueToSelect") or 1)
+                      for info in row.get("targetInfoLst") or []]
+            choices.append((entity_id, action_id, nodes, counts,
                             action.get("description")))
         if not choices:
             return None
@@ -509,18 +521,20 @@ class Harness:
             # in the pool rather than being unreachable.
             if self.rng.random() < 0.1:
                 return None
-            entity_id, action_id, targets, desc = self.rng.choice(choices)
-            target = self.rng.choice(targets) if targets else None
+            entity_id, action_id, nodes, counts, desc = self.rng.choice(choices)
+            pick = lambda pool, n: self.rng.sample(pool, min(n, len(pool)))
         else:
-            entity_id, action_id, targets, desc = choices[0]
-            target = targets[0] if targets else None
+            entity_id, action_id, nodes, counts, desc = choices[0]
+            pick = lambda pool, n: pool[:n]
 
         self.actions_taken += 1
         if desc == "BaseRetreat":
             self.retreats += 1
         responses = []
-        if target is not None:
-            responses.append({"entityList": [target],
+        for pool, count in zip(nodes, counts):
+            if not pool:
+                continue
+            responses.append({"entityList": pick(pool, count),
                               "name": "EntityListTargetResponse"})
         return [[entity_id, action_id], responses]
 

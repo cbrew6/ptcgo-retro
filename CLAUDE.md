@@ -158,7 +158,7 @@ Gameplay, added later and deliberately layered:
   selection messages, the 61 named animation sequences, which effect classes
   are live and which are dead, end-of-game parameters. Claims are marked
   VERIFIED / INFERRED / UNKNOWN; trust that marking.
-- `tests/` — `python -m unittest discover -s tests`, 240 tests. The engine is
+- `tests/` — `python -m unittest discover -s tests`, 241 tests. The engine is
   testable without the game, which is the entire point of the split.
 
 ## Protocol essentials
@@ -772,6 +772,52 @@ it wants no entry in attribute 200740 and is drawn from its own prefab
 During SETUP the Active carries no attacks, so a "done benching" row there is
 safe, and that is where it goes.
 
+### A sequence runs its children WHILE it animates
+
+So a sequence is a container for one beat, never for "everything that happened
+next". Setup made this vivid: the placements were animated as
+`IntroduceInitialPokemon`, and because `SetupDone` was applied in the same
+`engine.apply` loop, the prize deal, the turn banner and the first draw were
+all folded into that one sequence. The prizes laid themselves out on top of the
+Pokemon still being placed, the banner fired over the top, and the board only
+settled afterwards. Apply the placements, emit them as the sequence, then
+apply `SetupDone` and emit ITS changes at top level.
+
+The same rule killed the coin flip. An empty `ActivePlayerSet` sequence is a
+real "put the coin away" primitive - but it does its work BEFORE running its
+children, so queueing one directly behind the flip cut the flip's own animation
+short and the hand dealt itself over the top. Nothing needs to lower the coin
+there: `DealInitialHands` does it, one beat later, after the flip has been
+seen. Mulligans are already ordered after the deal for the same reason.
+
+### Retreat: the button, the tray, the destination
+
+Three nodes in the order the player performs them, all on the Active:
+
+```
+"BaseRetreat" / "AbilitySelection"      the retreat button
+  RetreatCostEntityListTargetInformation  the pip tray - pay the cost
+    RetreatNewActiveTargetInformation     who comes in
+```
+
+`valueToSelect` on the tray is the cost in Energy **symbols**, not a card
+count - `Tally()` sums `get_EnergyProvidedCount()` over what is selected, so a
+Double Colorless pays two by itself. It must be `forced: true`: `get_satisfied`
+lets an unforced tray be satisfied by selecting *nothing*, which retreats
+without paying. The tray only renders when every selectable Energy is a child
+of a Pokemon (`isPipTrayRetreatSelection`); ours always are, because Energy
+attachment is structural.
+
+Honour what the tray returns. The offer already carries a legal Retreat per
+destination with a server-chosen payment, so ignoring the reply is still legal
+and discards Energy the player did not pick. `_do_retreat` validates properly -
+attached to the Active, covers the cost, does not over-discard - so a bad
+selection is refused and re-offered.
+
+Both prompt keys are the original server's own:
+`com.direwolfdigital.cake.rules.actions.cake.retreat.prompt1` and
+`playmat.prompt.selectenergytodiscard.<N>`.
+
 ### Do not chain InitialBenchedTargetInformation
 
 The real setup screen chains it after `ActivePokemonTargetInformation`, and
@@ -955,13 +1001,12 @@ Known gaps, in rough order of value:
   the server can only guarantee the cases where nothing is legal. If it stops
   appearing, look at `buttonIsActive` in the playmat action-button component
   (`pie_d.cs:137899`) before changing message shapes.
-- **Retreat does not ask which Energy pays.** The row carries only
-  `RetreatNewActiveTargetInformation` (where to retreat to), and the server
-  picks the payment discarding the fewest cards. That is only visible when a
-  Pokemon holds genuinely different Energy - `_retreat_payments` already
-  collapses interchangeable ones. The authentic flow chains
-  `RetreatCostEntityListTargetInformation`, the pip tray, which carries
-  `valueToSelect` and is registered behind `isPipTrayRetreatSelection`.
+- **A Pokemon with no legal move cannot be clicked.** Rows are only sent for
+  legal actions, so an Active with too little Energy to attack or retreat has
+  no node and clicking it does nothing - it "just sits there". The real client
+  showed the card and greyed the buttons. Attacks cannot be offered unusably
+  (`AbilityButtonRenderer.Render` has no affordability path), so this needs a
+  different mechanism than the action offer.
 
 ## How this has gone wrong before
 

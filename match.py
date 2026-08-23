@@ -22,6 +22,7 @@ Two client behaviours shape the design and are easy to get wrong:
     EntityMoved onto the Pokemon.
 """
 
+import dataclasses
 import uuid
 
 import engine
@@ -84,6 +85,13 @@ OPEN_ZONES = (ZONE_HAND, ZONE_ACTIVE, ZONE_BENCH, ZONE_DISCARD)
 ACTION_ATTACH = "1e7c0b00-0000-4000-8000-000000000001"
 ACTION_PLAY_BASIC = "1e7c0b00-0000-4000-8000-000000000002"
 ACTION_RETREAT = "1e7c0b00-0000-4000-8000-000000000003"
+# Both are the ORIGINAL server's own keys, straight out of the client's
+# LocalizationDB - the .N variants read "Select the Energy to discard
+# (N Energy required)", which is the retreat tray verbatim.
+PROMPT_RETREAT_TO = "com.direwolfdigital.cake.rules.actions.cake.retreat.prompt1"
+PROMPT_RETREAT_COST = "playmat.prompt.selectenergytodiscard"
+# A key in the decode map, not an (entity, action) pair, so it cannot collide.
+RETREAT_ENERGY = "retreat-energy"
 ACTION_EVOLVE = "1e7c0b00-0000-4000-8000-000000000004"
 ACTION_PROMOTE = "1e7c0b00-0000-4000-8000-000000000005"
 ACTION_SETUP_ACTIVE = "1e7c0b00-0000-4000-8000-000000000006"
@@ -249,6 +257,29 @@ def _target_entities(selection):
         elif isinstance(response, str):
             out.append(response)
     return out
+
+
+def _with_chosen_energy(action, named, decode):
+    """Repay a Retreat with the Energy the player put in the pip tray.
+
+    The row carries a cost node and a destination node, so the reply names
+    both: some Energy entities and one benched Pokemon. The offer already
+    holds a legal Retreat per destination - the server picks the payment that
+    discards fewest - and this replaces that payment with the player's own
+    when they made one.
+
+    Anything unusable is left alone rather than guessed at. _do_retreat
+    validates the payment properly (attached to the Active, covers the cost,
+    does not over-discard), so a bad selection is refused and re-offered
+    instead of quietly discarding the wrong Energy.
+    """
+    energy_map = decode.get(RETREAT_ENERGY)
+    if not energy_map or not isinstance(action, engine.Retreat):
+        return action
+    picked = tuple(energy_map[e] for e in named if e in energy_map)
+    if not picked:
+        return action
+    return dataclasses.replace(action, energy=picked)
 
 
 def _flatten(items):
@@ -1105,6 +1136,39 @@ class Match:
             "hintTargetMap": {},              # never null: iterated unguarded
         }
 
+    def _retreat_cost_info(self, valid, cost):
+        """The pip tray that pays a retreat cost.
+
+        `valueToSelect` is the cost in Energy SYMBOLS, not a number of cards -
+        the node tallies get_EnergyProvidedCount() over what is selected, so a
+        Double Colorless pays two of a two-cost retreat by itself. That is the
+        same arithmetic engine.retreat_cost and Card.energy_units already do.
+
+        The tray only renders when EVERY selectable Energy is a child of a
+        Pokemon (isPipTrayRetreatSelection); ours always are, because Energy
+        attachment is structural. If that ever stopped holding the node falls
+        to NullSelectionCommand and draws nothing at all.
+        """
+        # The .N variants of this key exist for 1-4 and read "(N Energy
+        # required)"; beyond that the bare key is the honest fallback.
+        prompt = PROMPT_RETREAT_COST
+        if 1 <= cost <= 4:
+            prompt = "%s.%d" % (PROMPT_RETREAT_COST, cost)
+        return {
+            "name": "RetreatCostEntityListTargetInformation",
+            "selected": True,
+            "accountID": None,
+            "targetPrompt": prompt,
+            "validTargets": list(valid),
+            "numberToSelect": len(valid),     # MaxToSelect, a card count
+            "valueToSelect": cost,            # AmountToSelect, in symbols
+            "minimumToSelect": 1,
+            # get_satisfied lets an UNforced tray be satisfied by selecting
+            # nothing at all, which would retreat without paying.
+            "forced": True,
+            "hintTargetMap": {},
+        }
+
     def _action_row(self, entity_id, action_id, description, selection_type,
                     targets, hint="Optimal"):
         return {
@@ -1687,11 +1751,28 @@ class Match:
         # There was simply no way to retreat. Attacks and retreat are both
         # "AbilitySelection", so this mixes nothing.
         if active_entity and retreat:
-            self._offer_group(
-                rows, decode, active_entity, ACTION_RETREAT, "BaseRetreat",
-                "AbilitySelection", retreat,
-                "playmat.prompt.selectapokemon",
-                target_kind="RetreatNewActiveTargetInformation")
+            destinations = [t for t in retreat if t]
+            # Two nodes, in the order the player performs them: pay the cost,
+            # then choose who comes in. The SECOND TargetInformation becomes a
+            # CHILD of the first, so this is one row answered in one reply.
+            infos, energy_map = [], {}
+            cost = engine.retreat_cost(self.state, me.active)
+            if cost > 0:
+                energy_map = {self.eid(cid): cid for cid in me.active.energy}
+                if energy_map:
+                    infos.append(self._retreat_cost_info(
+                        sorted(energy_map), cost))
+            infos.append(self._target_info(
+                destinations, PROMPT_RETREAT_TO,
+                kind="RetreatNewActiveTargetInformation"))
+            if destinations:
+                rows.append(self._action_row(
+                    active_entity, ACTION_RETREAT, "BaseRetreat",
+                    "AbilitySelection", infos))
+                decode[(active_entity, ACTION_RETREAT)] = dict(retreat)
+                # Which Energy the player actually put in the tray. Without
+                # this the server picks the payment and the tray is theatre.
+                decode[RETREAT_ENERGY] = energy_map
 
         # NOTHING ELSE goes on the Active during a turn. An end-turn row
         # here hijacked the click that asks for the attack menu: with no Energy
@@ -1768,9 +1849,11 @@ class Match:
         if not by_target:
             return None
 
-        for response in _target_entities(selection):
+        named = _target_entities(selection)
+        for response in named:
             if response in by_target:
-                return by_target[response]
+                action = by_target[response]
+                return _with_chosen_energy(action, named, decode)
         # Fall through to the single-candidate case below, which also covers
         # an attack offered only to be refused.
         # A forced single target is sent unselected, so the client may answer

@@ -40,6 +40,7 @@ import os
 import socket
 import sqlite3
 import ssl
+import collections
 import random
 import struct
 import threading
@@ -1775,13 +1776,18 @@ class GameSession:
         # and those showed as cards flying out of the deck and back in.
         log.info("[game %s] %s goes first",
                  self.peer, "player" if player_first else "opponent")
-        # Put the coin away before anything else happens. Only two things in
-        # the client ever lower InitialUp: DealInitialHands, and the
-        # ActivePlayerSet SEQUENCE - note the sequence, not the message, which
-        # touches no coin at all. An empty one does its work before running
-        # children, so zero children is exactly "hide the coin and its dialog"
-        # and nothing else.
-        self.emit_sequence("ActivePlayerSet", [])
+        # NOTHING lowers the coin here, deliberately. An empty ActivePlayerSet
+        # sequence does lower it - that is a real primitive and it is why one
+        # used to sit on this line - but it does its work BEFORE running its
+        # children, so queueing it directly behind the flip cut the flip's own
+        # animation short: the coin was raised, the result was barely visible,
+        # and the hand dealt itself over the top. That is "my hand gets drawn
+        # before the coin flip is even finished".
+        #
+        # DealInitialHands lowers both coins on its own, and the deal is the
+        # very next thing to run, so the coin still goes away - one beat later,
+        # after the flip has been seen. Mulligans are already sequenced after
+        # the deal for the same reason.
         self.emit_items(self.match.opening_animation())
         # No ActivePlayerSet here. It plays the "YOUR TURN" banner and
         # increments the client's own turn counter, and at this point nobody
@@ -1911,8 +1917,18 @@ class GameSession:
         body, decode = self.match.build_offer(0, self.selection_counter)
         self.action_decode = decode
         self.pending_selection = "Actions"
-        log.info("[game %s] -> offer (%d actions, counter %d)",
-                 self.peer, len(body["targetMap"]), self.selection_counter)
+        # Log what was offered, not just how many. "6 actions" cannot answer
+        # "why was there no retreat button", which is exactly the question a
+        # report of a missing move raises - and the descriptions are the same
+        # strings the client matches on ("BaseRetreat").
+        kinds = collections.Counter(
+            (r.get("selectableAction") or {}).get("description")
+            for r in body["targetMap"])
+        log.info("[game %s] -> offer (%d actions, counter %d) %s",
+                 self.peer, len(body["targetMap"]), self.selection_counter,
+                 ", ".join("%s x%d" % (k, n)
+                           for k, n in sorted(kinds.items(),
+                                              key=lambda kv: str(kv[0]))))
         self.send_game("SelectionWithTargetsAndActionsRequired", body)
 
     def offer_choice(self):
@@ -2076,13 +2092,22 @@ class GameSession:
         log.info("[game %s] <- setup: active + %d benched",
                  self.peer, len(bench))
 
-        changes = []
+        # SetupDone is applied SEPARATELY from the placements, and the split
+        # is the whole point. Finishing setup is what deals the prizes, starts
+        # the first turn and draws for it, so folding it in here put all of
+        # that inside the IntroduceInitialPokemon sequence below - and a
+        # sequence runs its children while it is still animating. The prizes
+        # laid themselves out on top of the Pokemon that was still being
+        # placed, the turn banner fired over the top, and the board only
+        # settled afterwards.
+        placements, started = [], []
         try:
             for action in ([engine.SetupPlaceActive(0, active)]
-                           + [engine.SetupPlaceBench(0, c) for c in bench]
-                           + [engine.SetupDone(0)]):
+                           + [engine.SetupPlaceBench(0, c) for c in bench]):
                 self.match.state, made = engine.apply(self.match.state, action)
-                changes.extend(made)
+                placements.extend(made)
+            self.match.state, started = engine.apply(self.match.state,
+                                                     engine.SetupDone(0))
         except engine.IllegalAction as exc:
             log.warning("[game %s] illegal setup (%s); re-offering",
                         self.peer, exc)
@@ -2091,7 +2116,11 @@ class GameSession:
         # The client only lights up the drop zones - it never moves the card
         # itself - so the placements still have to be animated from here.
         self.emit_sequence("IntroduceInitialPokemon",
-                           self.match.animation_for(changes))
+                           self.match.animation_for(placements))
+        # A separate beat, at top level: animation_for folds the prize moves
+        # into DealInitialPrizeCards and the turn start into its own messages.
+        if started:
+            self.emit_items(self.match.animation_for(started))
         self.advance_match()
 
     def on_SelectionWithTargetsAndActions(self, value, request_id):
