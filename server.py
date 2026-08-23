@@ -1277,6 +1277,8 @@ class GameSession:
         self.account = None
         self.game_id = None
         self.game_state = None
+        self.selection_counter = 0
+        self.pending_selection = None
         self.authenticated = False
 
     def send(self, name, value=None, request_id=0, flags=0):
@@ -1584,6 +1586,70 @@ class GameSession:
         log.info("[game %s] -> SerializedGameState (%d top-level entities)",
                  self.peer, len(entities["children"]))
         self.send("SerializedGameState", self.game_state, request_id)
+
+        # Whose turn it is. Sent bare, NOT wrapped in a SequenceMessage: the
+        # sequence parser throws if a SequenceMessage with a non-empty
+        # sequenceID arrives outside an open sequence, and that exception kills
+        # the client's message-pump coroutine for the rest of the game.
+        #
+        # Safe to send here because its one precondition is already met: it
+        # dereferences a component that configurePlayerEntities attaches, and
+        # that runs only while applying SerializedGameState. A player entity
+        # introduced later would never have it.
+        self.send_game("ActivePlayerSet", {"accountID": self.account_id()})
+
+        # First real round trip. GoFirstChoice is deliberately the one we try
+        # first: its node kind is registered, so it cannot land in the
+        # no-UI-and-no-fallback case that stalls forever; it needs no entity
+        # references, so it cannot fault on an entity lookup; and on a fresh
+        # board the client renders it on the prompt bar, which iterates the
+        # button list rather than indexing [0] and [1].
+        self.offer_go_first()
+
+    # -- selections ------------------------------------------------------
+
+    def account_id(self):
+        return (self.account or {}).get("accountID") or ZERO_GUID
+
+    def send_game(self, name, body):
+        """A game message. Every one carries gameID or the client throws."""
+        payload = dict(body)
+        payload["gameID"] = self.game_id
+        self.send(name, payload)
+
+    def offer_go_first(self):
+        self.selection_counter += 1
+        self.pending_selection = "GoFirst"
+        self.send_game("GoFirstChoiceRequired", {
+            "counter": self.selection_counter,
+            "prompt": "playmat.prompt.startingcoinflip.playerchoose",
+            "offerLength": 30,
+            "startingTimestamp": int(time.time() * 1000),
+            "sortType": "",
+            # Exactly two: one UI path indexes [0] and [1] directly.
+            "buttons": ["playmat.gofirst.first", "playmat.gofirst.second"],
+            "sourceEntity": None,
+        })
+        log.info("[game %s] -> GoFirstChoiceRequired (counter %d)",
+                 self.peer, self.selection_counter)
+
+    def on_GameCustomChoice(self, value, request_id):
+        """Reply to a button prompt; `selection` indexes the button list."""
+        req = value or {}
+        choice = req.get("selection")
+        counter = req.get("counter")
+        log.info("[game %s] <- GameCustomChoice selection=%r counter=%r (%s)",
+                 self.peer, choice, counter, self.pending_selection)
+        if self.pending_selection != "GoFirst":
+            return
+        self.pending_selection = None
+        if choice == -1:                      # cancelled; re-offer rather than
+            self.offer_go_first()             # leave the client with no prompt
+            return
+        first = self.account_id() if choice == 0 else AI_ACCOUNT_ID
+        log.info("[game %s] %s goes first", self.peer,
+                 "player" if choice == 0 else "opponent")
+        self.send_game("ActivePlayerSet", {"accountID": first})
 
     def on_GetNotifications(self, value, request_id):
         self.send("NotificationsRequested", {"notificationList": []}, request_id)
