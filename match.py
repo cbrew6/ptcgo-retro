@@ -801,19 +801,29 @@ class Match:
             "forced": True,
             "hintTargetMap": {},
         }
-        bench_info = {
-            "name": "InitialBenchedTargetInformation",
-            "selected": True,
-            "accountID": None,
-            "targetPrompt": PROMPT_SETUP_BENCH,
-            "validTargets": list(entities),
-            "numberToSelect": min(5, free),
-            # Benching is optional and the Done button is always shown for this
-            # node, so a player may finish with an empty bench.
-            "minimumToSelect": 0,
-            "forced": False,
-            "hintTargetMap": {},
-        }
+        infos = [active_info]
+        # One of the Basics is about to become the Active, so only the REST can
+        # be benched. With a single Basic in hand there is nothing left, and
+        # offering the step anyway is a dead end: the bench lights up, its only
+        # candidate is the card that just became Active, and the player is
+        # stuck looking at a hand with no Pokemon in it. Omitting the node
+        # instead completes the selection the moment the Active is chosen,
+        # because a chain with nothing after it advances straight to the reply.
+        benchable = min(free, len(basics) - 1)
+        if benchable > 0:
+            infos.append({
+                "name": "InitialBenchedTargetInformation",
+                "selected": True,
+                "accountID": None,
+                "targetPrompt": PROMPT_SETUP_BENCH,
+                "validTargets": list(entities),
+                "numberToSelect": benchable,
+                # Benching is optional and the Done button is always shown for
+                # this node, so a player may finish with an empty bench.
+                "minimumToSelect": 0,
+                "forced": False,
+                "hintTargetMap": {},
+            })
         body = {
             "counter": counter,
             "prompt": PROMPT_SETUP_ACTIVE,
@@ -825,7 +835,7 @@ class Match:
             "optimalPlayMap": [],
             "selectionParams": {},
             "sourceID": None,
-            "targetMap": {owner: [active_info, bench_info]},
+            "targetMap": {owner: infos},
         }
         return body, basics
 

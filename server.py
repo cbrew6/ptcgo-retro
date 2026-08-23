@@ -1707,8 +1707,12 @@ class GameSession:
             "msg": {"name": "SerializedGameState", "value": board},
         })
         self.emit_items(self.match.opening_animation())
-        self.send_game("ActivePlayerSet", {
-            "accountID": self.match.account(self.match.state.to_move)})
+        # No ActivePlayerSet here. It plays the "YOUR TURN" banner and
+        # increments the client's own turn counter, and at this point nobody
+        # has chosen an Active yet - the turn has not started. The engine emits
+        # its own turnStart the moment setup finishes, which _change_turnStart
+        # renders as exactly this message, so sending one now was both early
+        # and a duplicate.
         self.advance_match()
 
     def _in_sequence(self, sequence_id, name, value):

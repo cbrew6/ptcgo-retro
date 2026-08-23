@@ -369,6 +369,89 @@ class OfferTests(unittest.TestCase):
                 self.assertTrue(info["validTargets"])
 
 
+class SetupSelectionTests(unittest.TestCase):
+    """The setup screen has to stay answerable with any legal opening hand."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.db = engine.CardDB.from_directory(CARD_DIR)
+
+    def _match_with_basics(self, wanted):
+        """A dealt match whose opening hand holds exactly `wanted` Basics."""
+        basic = next(c for c in self.db
+                     if c.is_pokemon and c.stage == "Basic" and c.attacks)
+        energy = next(c for c in self.db
+                      if c.is_basic_energy and c.energy_options)
+        # Few Basics in the list makes a one-Basic hand common; the engine
+        # mulligans until there is at least one, so zero cannot occur.
+        deck = [basic.guid] * 6 + [energy.guid] * 54
+        for seed in range(400):
+            m = match.Match("game-5", ["acct-a", "acct-b"], self.db,
+                            [deck, list(deck)], seed=seed)
+            m.serialized_state(predeal=True)
+            hand = m.state.players[0].hand
+            if sum(1 for c in hand if m.card(c).is_basic_pokemon) == wanted:
+                return m
+        raise AssertionError("no seed dealt exactly %d Basics" % wanted)
+
+    def test_one_basic_offers_no_bench_step(self):
+        """The bug the player hit.
+
+        With a single Basic in hand, that card becomes the Active and there is
+        nothing left to bench. Offering the bench step anyway is a dead end:
+        it lights up, its only candidate is the card that just became Active,
+        and the hand has no Pokemon in it. A chain with nothing after it
+        advances straight to the reply instead.
+        """
+        m = self._match_with_basics(1)
+        body, basics = m.setup_selection(0, 1)
+        self.assertEqual(len(basics), 1)
+        infos = next(iter(body["targetMap"].values()))
+        self.assertEqual([i["name"] for i in infos],
+                         ["ActivePokemonTargetInformation"])
+
+    def test_two_basics_offers_a_bench_step_sized_to_what_is_left(self):
+        m = self._match_with_basics(2)
+        body, basics = m.setup_selection(0, 1)
+        infos = next(iter(body["targetMap"].values()))
+        self.assertEqual([i["name"] for i in infos],
+                         ["ActivePokemonTargetInformation",
+                          "InitialBenchedTargetInformation"])
+        # One of the two is about to be the Active, so at most one is benchable.
+        self.assertEqual(infos[1]["numberToSelect"], len(basics) - 1)
+
+    def test_exactly_one_target_map_key_always(self):
+        """ignoreFirst makes the client throw on anything but one key."""
+        for wanted in (1, 2, 3):
+            m = self._match_with_basics(wanted)
+            body, _ = m.setup_selection(0, 1)
+            self.assertEqual(len(body["targetMap"]), 1)
+            self.assertTrue(body["ignoreFirst"])
+
+    def test_a_one_node_reply_still_decodes(self):
+        m = self._match_with_basics(1)
+        _body, basics = m.setup_selection(0, 1)
+        reply = {"entityID": "whatever", "targetResponses": [
+            {"name": "EntityListTargetResponse",
+             "entityList": [m.eid(basics[0])]}]}
+        active, bench = m.decode_setup_reply(reply, basics)
+        self.assertEqual(active, basics[0])
+        self.assertEqual(bench, [])
+
+    def test_the_active_is_never_also_benched(self):
+        """The client has been seen echoing the Active back in the bench list."""
+        m = self._match_with_basics(2)
+        _body, basics = m.setup_selection(0, 1)
+        reply = {"entityID": "whatever", "targetResponses": [
+            {"name": "EntityListTargetResponse",
+             "entityList": [m.eid(basics[0])]},
+            {"name": "EntityListTargetResponse",
+             "entityList": [m.eid(basics[0]), m.eid(basics[1])]}]}
+        active, bench = m.decode_setup_reply(reply, basics)
+        self.assertEqual(active, basics[0])
+        self.assertEqual(bench, [basics[1]])
+
+
 class LocalizationKeyTests(unittest.TestCase):
     """Every key we send must exist in the client's shipped string DB.
 
