@@ -355,6 +355,80 @@ CARD_CHECKSUM = "ptcgo-local-1"
 AVATARS_PATH = os.path.join(HERE, "avatars.json")
 _avatar_archetypes_body = None
 
+# The equipped avatar. 201310 is what AddDecks() looks for when deciding which
+# deck becomes DefaultAvatarDeck; 201300 marks the deck as an avatar one.
+AVATAR_DECK_ID = "a5f0d0c2-1111-4a00-9000-0000000000a1"
+ATTR_AVATAR_IS_DEFAULT, ATTR_AVATAR_IS_AVATAR = 201310, 201300
+ATTR_GROUP, ATTR_GENDER, ATTR_DEFAULT_ITEM = 200890, 10220, 200940
+AVATAR_PILE = "AvatarPile"
+AVATAR_GENDER = "Female"
+_avatar_deck = None
+
+
+def _archetype_guid(a):
+    """The exported lo/hi halves back into the GUID string decks use.
+
+    Validated against a client-written deck in decks.json: its pile entries
+    decode to BW9 #67 Absol and a Free Darkness Energy, which is what that
+    deck actually contains.
+    """
+    return str(uuid.UUID(bytes=a["hi"].to_bytes(8, "big")
+                         + a["lo"].to_bytes(8, "big")))
+
+
+def build_avatar_deck():
+    """One equipped avatar, without which the wardrobe screen cannot open.
+
+    AddDecks() records DefaultAvatarDeck only for a deck carrying 201310, and
+    AvatarBuilderController.Awake() then calls AvatarUtil.Gender() on it
+    unguarded. Replying with no decks therefore throws in Awake, so Start()
+    never runs, so everything Start would have initialised - CurrentAvatarModel
+    included - stays null. That is why the screen rendered nothing AND why
+    clicking a category raised a second, unrelated-looking NullReference: one
+    cause, two symptoms.
+
+    The pile carries one item per wardrobe slot, all of a single gender. The
+    first entry's gender becomes CurrentItemGender and the category filter then
+    shows only items matching it, so a mixed-gender deck would hide half the
+    wardrobe. Items are chosen by attribute 200940, the catalogue's own
+    per-slot default, rather than by picking arbitrarily.
+    """
+    global _avatar_deck
+    if _avatar_deck is None:
+        if not os.path.exists(AVATARS_PATH):
+            log.warning("no avatars.json - avatar builder will not open")
+            return None
+        with open(AVATARS_PATH, encoding="utf-8") as fh:
+            archetypes = json.load(fh).get("archetypes") or []
+        chosen, fallback = {}, {}
+        for a in archetypes:
+            at = dict((x["n"], (x.get("v") or {})) for x in a["attrs"])
+            if at.get(ATTR_GENDER, {}).get("s") != AVATAR_GENDER:
+                continue
+            group = at.get(ATTR_GROUP, {}).get("s")
+            if not group:
+                continue
+            fallback.setdefault(group, a)
+            if at.get(ATTR_DEFAULT_ITEM, {}).get("b"):
+                chosen.setdefault(group, a)
+        for group, a in fallback.items():
+            chosen.setdefault(group, a)
+        pile = [_archetype_guid(a) for a in chosen.values()]
+        _avatar_deck = {
+            "deckID": AVATAR_DECK_ID,
+            "deckName": "Avatar",
+            "attributes": [
+                {"name": ATTR_AVATAR_IS_DEFAULT, "value": True,
+                 "originalValue": True},
+                {"name": ATTR_AVATAR_IS_AVATAR, "value": True,
+                 "originalValue": True},
+            ],
+            "piles": {AVATAR_PILE: pile},
+        }
+        log.info("built avatar deck: %d items across %s",
+                 len(pile), ", ".join(sorted(chosen)))
+    return _avatar_deck
+
 
 def build_avatar_archetypes():
     """dwd.Protobuf.cake.item.AllAvatarArchetypesFound: 1=archetypes 2=checksum.
@@ -1175,7 +1249,9 @@ class GameSession:
         self.send("DeckDeleted", {"deckID": deck_id}, request_id)
 
     def on_GetAvatarDeckList(self, value, request_id):
-        self.send("OnlineAvatarDecksFound", {"decks": []}, request_id)
+        deck = build_avatar_deck()
+        self.send("OnlineAvatarDecksFound",
+                  {"decks": [deck] if deck else []}, request_id)
 
     def on_GetNotifications(self, value, request_id):
         self.send("NotificationsRequested", {"notificationList": []}, request_id)
