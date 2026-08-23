@@ -42,7 +42,7 @@ PORT = 8081
 #    added one real one). Invented names matter: DoesAssetExistInManifest is
 #    what makes the client commit to a request, so a name no bundle can serve
 #    sends it down a branch with no fallback.
-MANIFEST_VERSION = 6
+MANIFEST_VERSION = 7
 
 log = logging.getLogger("assets")
 

@@ -497,6 +497,12 @@ Two request namespaces, easily confused: `<SET>_wp_<kind>/<num>` is the stamp
 layer, `<SET>_wp_<kind>_Foil<N>/<num>` is the foil mask. Bundle assets are keyed
 by bare collector number ("107").
 
+**BW foils are in, from a second donated cache.** The note below was written
+when BW1-BW11 had no masks at all and only "another donor from the right era"
+could close it. That donor arrived: `tools/import_bundle_cache.py` took 869
+bundles out of their `bundleCache` and BW went from 94.4% flat to 0.4%.
+Foil coverage overall is 99.9% - 5,315 of 5,322 - with seven BW cards left.
+
 **Holo WAS recovered, from a donated cache.** An earlier note here said it
 could never extend beyond XY12. That was right about what was reproducible and
 wrong about what was recoverable - a friend's `LocalLow` cache from an account
@@ -903,8 +909,8 @@ Energy, retreats, uses Abilities, plays Trainers, attacks with real hit
 effects and damage numbers, promotes after a knockout, takes prizes, and wins
 or loses.
 
-Assets: **1,818 bundles / 45,649 indexed asset names** after importing 1,585
-from a donated cache. Foils resolve for every era except BW.
+Assets: **2,484 bundles / 79,003 indexed asset names** after importing from
+two donated caches. Foils resolve for every era, 99.9% of cards.
 
 Verify any change with `python match_client.py` - a headless client that plays
 a whole match over the real socket and asserts on what it receives. `--games N
@@ -926,8 +932,8 @@ Known gaps, in rough order of value:
   whose text does not match a known pattern stays inert rather than guessing.
 - **Choice shapes are a flat list.** Reordering (Pokedex), face-up prizes
   (Town Map) and Devolution Spray need shapes the renderer does not have.
-- **BW-era foil masks** - 1,528 cards render flat. No `BW*_wp_*` bundle exists
-  in any of the 1,818 we have; only a donor who played 2011-2013 closes it.
+- **Seven BW cards** still render flat out of 5,322 foils. Everything else
+  resolves to a real mask.
 - **SM5-SM12 and SWSH art** is imported but unusable: no card definitions
   exist for those sets, and the donated `AttributeDB` is a search index (GUID,
   name, abilities) rather than full attributes.
