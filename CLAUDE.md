@@ -384,10 +384,35 @@ is card PLUS bleed" below - and note that the missing bleed is exactly what
 made 803 look like the card width and prompted a wrong 5,000-file stretch.
 
 **Foil masks.** `_wp_std` / `_wp_ph` / `_wp_pcd` are foil MASKS, not alternate
-printings (`wp_ph` = reverse holo). Real ones are 512x512 DXT5, ~40% coverage,
-hand-authored per card. With none bound the shader samples stale reflection
-state and smears a sheen across the card, so `fetch_art.py` writes neutral
-transparent masks alongside each card. XY12 has 108 authentic masks locally.
+printings (`wp_ph` = reverse holo). Real ones are 512x512 DXT5, 12-26% alpha
+coverage, hand-authored per card. With none bound the shader samples stale
+reflection state and smears a sheen across the card, so `fetch_art.py` writes
+neutral transparent masks alongside each card. XY12 has 108 authentic masks
+locally.
+
+Two request namespaces, easily confused: `<SET>_wp_<kind>/<num>` is the stamp
+layer, `<SET>_wp_<kind>_Foil<N>/<num>` is the foil mask. Bundle assets are keyed
+by bare collector number ("107").
+
+**Holo cannot be extended beyond XY12, and this is settled.** A real mask traces
+the card's artwork silhouette - the Pokemon's outline, the text boxes, the EX
+banner, the foil lettering - so it is derived from the original layered art and
+cannot be synthesised from a flat card scan. Do not try to generate them from
+the card face; the result would be invented art, and a wrong mask is worse than
+none (that is what the neutral masks exist to prevent).
+
+Sources checked and exhausted:
+
+  - Shipped bundles carry foil masks for **XY12 only** (3 bundles: wp_std,
+    wp_ph, wp_pcd). Nothing else ships any.
+  - The entire sprite-rip collection carries holo layers for exactly **two**
+    sets: `sm8/holo` (174) and `xy12/h` (134). SM8 is Lost Thunder, which this
+    client's 62 sets do not include, so it is unusable; XY12's bundles are
+    already more complete than its rip.
+  - LooseArt holds 18,372 neutral `_Foil` masks across 40 sets and **none for
+    XY12** - verified, so nothing shadows the authentic ones. Keep it that way:
+    a transparent LooseArt mask would override a real bundle mask and silently
+    turn XY12's foils off.
 
 **Avatar items: the definitions are gone, but they are reconstructible.**
 4,653 avatar art assets exist across 18 bundles, and only 2 of the 9,940
