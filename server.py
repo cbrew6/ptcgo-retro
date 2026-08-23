@@ -512,6 +512,10 @@ HIDE_OPPONENT_CARDS = False
 AI_ACCOUNT_ID = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
 DEFAULT_AI_NAME = "Otis"
 
+# Legal outside a sequence: the parser's mismatch check short-circuits on
+# Guid.Empty, so the message goes straight to the queue and runs exactly once.
+EMPTY_SEQUENCE_ID = "00000000-0000-0000-0000-000000000000"
+
 
 _card_by_guid = None
 
@@ -1623,7 +1627,10 @@ class GameSession:
         entities = self.game_state["entities"]
         log.info("[game %s] -> SerializedGameState (%d top-level entities)",
                  self.peer, len(entities["children"]))
-        self.send("SerializedGameState", self.game_state, request_id)
+        self.send("SequenceMessage", {
+            "sequenceID": EMPTY_SEQUENCE_ID,
+            "msg": {"name": "SerializedGameState", "value": self.game_state},
+        }, request_id)
         self.game_started = time.time()
 
         # Everything starts face down in the decks; deal it out so the game
@@ -1658,11 +1665,39 @@ class GameSession:
     def account_id(self):
         return (self.account or {}).get("accountID") or ZERO_GUID
 
-    def send_game(self, name, body):
-        """A game message. Every one carries gameID or the client throws."""
+    def send_game(self, name, body, bare=False):
+        """A game message, wrapped in an empty-id SequenceMessage by default.
+
+        This wrapper is not cosmetic - sending game messages bare corrupts the
+        client. A bare GameMessage is handled TWICE: once as a command in
+        SessionProvider.Update, and again after GameQueueManager enqueues it
+        and the Sequences consumer replays it. For most messages that is merely
+        wrong (ActivePlayerSet double-counted the turn and replayed its
+        banner). For SerializedGameState it is fatal: the replay throws
+        "Serialized game state can't be loaded while a game is in progress",
+        the exception escapes ConsumeQueuedMessages, and Unity kills that
+        coroutine for good. Nothing then drains the queue, so every later
+        message accumulates unprocessed - which is why conceding hung with no
+        error at all: the end-of-game command waits for a queue that can no
+        longer empty.
+
+        An all-zero sequenceID is explicitly legal outside a sequence: the
+        parser's mismatch check short-circuits on Guid.Empty, so the message
+        falls straight through to the queue and is executed exactly once, in
+        order. No StartSequence/StopSequence pair is needed.
+
+        GameCompletedMessage is the one exception and must stay bare - see
+        end_game.
+        """
         payload = dict(body)
         payload["gameID"] = self.game_id
-        self.send(name, payload)
+        if bare:
+            self.send(name, payload)
+        else:
+            self.send("SequenceMessage", {
+                "sequenceID": EMPTY_SEQUENCE_ID,
+                "msg": {"name": name, "value": payload},
+            })
 
     # -- sequences -------------------------------------------------------
     #
@@ -1819,7 +1854,7 @@ class GameSession:
                 # double.Parse is culture-sensitive - integer string only.
                 "GameDuration": str(elapsed),
             },
-        })
+        }, bare=True)
         # Drop the board so the next match is not refused: applying a second
         # SerializedGameState while one is loaded throws.
         self.game_id = None
