@@ -8,8 +8,15 @@ is knowledge that cost real time to recover and is not obvious from the code.
 A local server for the **Pokémon Trading Card Game Online** client
 (v2.95.0.5815), which lost its servers on 2023-06-05. Everything was
 reverse-engineered from the client binaries on this machine. Goal: play
-offline. Currently reaches the main menu and deck builder with a full card
-collection; no gameplay yet.
+offline.
+
+Working: login, collection, deck building, card art, foils, the avatar
+wardrobe, pack opening, and **matches** - a game starts, deals, offers legal
+moves, and an AI opponent plays back. The rules live in `engine.py`; the client
+holds none.
+
+**The user does not intend to share this and does not want to conflict with
+TPCI.** Nothing here should be published or redistributed.
 
 ## Environment
 
@@ -38,6 +45,34 @@ normally. Everything is logged — inbound frames, outbound frames, and
 `no handler for '<Name>'` for anything unimplemented.
 
 `test_client.py` replays the handshake without the game.
+
+**"Error loading preload data" always means the server is down.** The client
+fetches its config over HTTP before anything else; with no config there is no
+`AssetBundleManager` and preload throws. It is never an art or data problem.
+
+### Restarting it correctly — this wasted an hour
+
+A scheduled task `PTCGO Local Server` runs it hidden via
+`run-server-hidden.vbs` (window style 0; S4U would need admin). **Stopping the
+task is not enough:** it kills the `cmd.exe` wrapper and leaves the `python`
+child holding 39389/39390/8081, so the next start silently fails to bind and
+exits, and the *old build keeps serving*. Two rounds of fixes were tested
+against code that was never running.
+
+```powershell
+Stop-ScheduledTask -TaskName "PTCGO Local Server"
+Get-CimInstance Win32_Process -Filter "Name='python.exe'" |
+  Where-Object { $_.CommandLine -like '*server.py*' } |
+  ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
+Start-ScheduledTask -TaskName "PTCGO Local Server"
+```
+
+Then confirm from the log that a *new* `gateway listening` line appeared.
+Comparing its timestamp against the traffic it is serving is the check that
+catches this.
+
+Launching the server from a tool-session shell does not work either — it is
+reaped when that shell is torn down.
 
 ## First-time setup (after a fresh clone)
 
@@ -79,9 +114,30 @@ normally. Everything is logged — inbound frames, outbound frames, and
 - `tools/fix_missing_art.py` — variant printings + Trainer Kit reprints.
 - `tools/fetch_art.py` — single-card fetcher (`--from-log`), kept for one-offs.
 - `tools/find_cache.ps1` — scans all drives for a donor `bundleCache`.
+- `tools/bundle_textures.py` — decodes Texture2D out of the **UnityWeb**
+  bundles the client shipped with. It cannot read the donated **UnityFS** ones;
+  `bundle_index.py` can.
+- `tools/unshadow_foils.py` — moves aside LooseArt masks that a real bundle can
+  now serve. See "Foil masks" below; running this wrongly is silent.
 - `build_cache.py` — writes an on-disk archetype cache. **Currently dead
   code**: it targets `WargArchetypesSource`, which nothing in this build
-  constructs. Kept only as a reference for the file format.
+  constructs. Kept only as a reference for the file format. Note it is what
+  created `persistentDataPath\archetypes\` - the *client* never writes that
+  directory, so do not expect a donor cache to contain one.
+
+Gameplay, added later and deliberately layered:
+
+- `engine.py` — the rules. Pure Python, no sockets, no protocol, no client
+  knowledge. `new_game`, `legal_actions`, `apply` returning `(state, changes)`.
+  Every rules assumption is a named field on `Rules`. 83 tests.
+- `match.py` — the only place the engine and the client meet. Engine card id →
+  entity GUID, engine state → `SerializedGameState` tree, engine `Change` →
+  mutation messages.
+- `ai.py` — the opponent. `choose(state, player, rng)` returns one legal
+  action, re-checks its own answer against `legal_actions`, and falls back to
+  `Pass` rather than ever raising inside a live match. 19 tests.
+- `tests/` — `python -m unittest discover -s tests`, 102 tests. The engine is
+  testable without the game, which is the entire point of the split.
 
 ## Protocol essentials
 
@@ -265,14 +321,19 @@ Two things worth keeping from that dig:
 
 ## Card art
 
-Only **5 of 62 sets** ship art locally (XY12 + the four energy sets). The rest,
-along with foil masks and menu backgrounds, was CDN-hosted; `bundleCache/` was
-never populated and the CDN is dead.
+Only **5 of 62 sets** shipped art locally (XY12 + the four energy sets). The
+rest, along with foil masks and menu backgrounds, was CDN-hosted, and the CDN is
+dead. A donated cache later supplied 1,585 more bundles - see "Holo WAS
+recovered" below - but the sourcing problem is the same shape.
 
 **This is solved mechanically** by the loose-art patch in `patch/`: the client
 now displays ordinary PNGs from `<game>_Data/LooseArt/`, named after the asset
 request with `/` replaced by `_`. See `patch/README.md`. It is a sourcing
 problem now, not a technical one.
+
+LooseArt is an **override layer, checked before the bundles**. That is what
+makes it work, and also why a stale placeholder there silently beats real
+bundle art - the failure mode that hid every foil twice.
 
 All 4,532 cards now have art, fetched by `tools/fetch_all_art.py` in 40 minutes
 from api.pokemontcg.io. It is resumable through `tools/art_state.json` and safe
@@ -339,6 +400,18 @@ both of which bit:
 - The real asset name is `attr 10020 or "%03d" % number`, never just the
   number. 335 of 9,135 asset requests use an override.
 
+**And when 10020 contains a "/" it is ABSOLUTE, not relative to the set.**
+`packs/BW1BlackWhite` names the shared `packs` bundle, so the file is
+`packs_BW1BlackWhite.png` - not `BW1_packs_BW1BlackWhite.png`. Gluing the set
+key on the front produced 60 pack images sitting under names nothing ever
+requests, and "pack art is missing" was the symptom. Deck boxes are the same
+story under `pcdBoxes`. `bundle_index.json` is the authority on which
+namespaces exist, since the client gates every request on it.
+
+Note `pcdBoxes` (angled product render) and `deckboxFlats` (the flat UV wrap
+pasted onto the 3D box model) share leaf names but are different pictures - do
+not write one where the other belongs.
+
 The client's miss log is the fastest way to find this class of bug: it prints
 the exact string it wanted, and `XY4/065xy` explains itself immediately where
 staring at card data does not.
@@ -394,25 +467,37 @@ Two request namespaces, easily confused: `<SET>_wp_<kind>/<num>` is the stamp
 layer, `<SET>_wp_<kind>_Foil<N>/<num>` is the foil mask. Bundle assets are keyed
 by bare collector number ("107").
 
-**Holo cannot be extended beyond XY12, and this is settled.** A real mask traces
-the card's artwork silhouette - the Pokemon's outline, the text boxes, the EX
-banner, the foil lettering - so it is derived from the original layered art and
-cannot be synthesised from a flat card scan. Do not try to generate them from
-the card face; the result would be invented art, and a wrong mask is worse than
-none (that is what the neutral masks exist to prevent).
+**Holo WAS recovered, from a donated cache.** An earlier note here said it
+could never extend beyond XY12. That was right about what was reproducible and
+wrong about what was recoverable - a friend's `LocalLow` cache from an account
+that actually played supplied 444 foil bundle payloads. 45 of the 62 sets now
+have real masks; **BW1-BW11 still have none** (that donor played the SM/SWSH
+era). Only another donor from the right era can close that.
 
-Sources checked and exhausted:
+What remains true: a mask traces the card's artwork silhouette, so it is
+derived from the original layered art and **cannot be synthesised** from a flat
+card scan. Do not generate them; a wrong mask is worse than none, which is what
+the neutral masks exist to prevent. Note also that most cards never had a holo
+printing at all - broad `wp_ph` coverage with sparse `wp_std` is correct, not a
+gap.
 
-  - Shipped bundles carry foil masks for **XY12 only** (3 bundles: wp_std,
-    wp_ph, wp_pcd). Nothing else ships any.
-  - The entire sprite-rip collection carries holo layers for exactly **two**
-    sets: `sm8/holo` (174) and `xy12/h` (134). SM8 is Lost Thunder, which this
-    client's 62 sets do not include, so it is unusable; XY12's bundles are
-    already more complete than its rip.
-  - LooseArt holds 18,372 neutral `_Foil` masks across 40 sets and **none for
-    XY12** - verified, so nothing shadows the authentic ones. Keep it that way:
-    a transparent LooseArt mask would override a real bundle mask and silently
-    turn XY12's foils off.
+**LooseArt shadows bundles, and that failure is silent.** LooseArt is checked
+*before* the bundle system, so a neutral placeholder beats a real mask and the
+card renders flat with nothing logged. `tools/unshadow_foils.py` moves aside
+exactly the placeholders a bundle can serve, and leaves the rest - a set with
+no donated mask still needs its blank.
+
+Deriving the namespace is where this went wrong twice. Bundle names end in a
+content-release token of **at least three shapes** - `_CR105`, `_CRR65p1`,
+`_CRSM4`, and a bare set code `_SM3` - so matching the *release* is guesswork.
+Match the namespace instead: everything up to and including
+`_wp_<kind>[_Foil<n>]`. Two rounds of "fixed" foils were really one set being
+freed and another silently left behind.
+
+**Verify coverage against what the client actually requests**, i.e. the
+`[LooseArt] <ns>/<num>` lines in `output_log.txt` - not against a namespace we
+derived. A coverage table built on the broken rule reported 100% while nothing
+rendered, and that number was used to explain away a real bug twice.
 
 **Avatar items: the definitions are gone, but they are reconstructible.**
 4,653 avatar art assets exist across 18 bundles, and only 2 of the 9,940
@@ -450,15 +535,155 @@ only the type name differs.
 bundles dropped into `StreamingAssets\en_US\` work with no code change - rerun
 `bundle_index.py` and bump `MANIFEST_VERSION`.
 
+## Gameplay
+
+The client is a renderer and an input device. It holds **no rules at all** - it
+cannot know that you may attach one Energy per turn, so the server must send a
+menu of legal moves and the client only draws it. That is why a rules engine
+was unavoidable.
+
+### Match flow
+
+```
+RequestQueueMatch  -> MatchFound
+   (client drives VersusScreen -> Playmat unaided; no server part)
+PlayerReady        -> GoFirstChoiceRequired
+GameCustomChoice   -> SerializedGameState, the deal, ActivePlayerSet
+                   -> SelectionWithTargetsAndActionsRequired
+SelectionWithTargetsAndActions  (null selection = pass = end turn)
+ResignGame         -> GameEnded + GameCompletedMessage
+```
+
+`SerializedGameState` carries the whole board as one recursive entity tree and
+may only be sent **once** - a second throws. Send it with every card still in
+its owner's deck, then animate the deal, or the game appears rather than
+starts.
+
+### Wrap game messages, do not send them bare
+
+A bare `GameMessage` is processed **twice**: once as a command in
+`SessionProvider.Update`, and again when the `Sequences` consumer replays it
+off the queue. For most messages the replay is merely wrong (`ActivePlayerSet`
+double-counted the turn). For `SerializedGameState` the replay **throws**, the
+exception escapes `ConsumeQueuedMessages`, and Unity kills that coroutine
+permanently - after which nothing drains the queue and every later message is
+silently ignored. That one bug presented as "concede does nothing", "the deal
+never animates" and "the turn counter starts at 2".
+
+Wrap in a `SequenceMessage` with an **all-zero** `sequenceID`: legal outside a
+sequence (the parser's mismatch check short-circuits on `Guid.Empty`), executes
+exactly once, in order, no Start/Stop pair needed.
+
+**`GameCompletedMessage` is the one exception and must stay bare** -
+`MessageCommands` only unwraps `EffectPlayed`, and the `Sequences` loop tests
+for it before `SequenceMessage`.
+
+### Sequences
+
+Only needed for the named animations (`DealInitialHands`,
+`IntroduceInitialPokemon`, `DealInitialPrizeCards`, `GroupedMove`, ...). Named
+sequences run their nested `GroupedMove`s **in parallel** with a stagger, which
+is what makes a hand fan out instead of trickling one card at a time.
+
+Mis-bracketing throws out of the same never-restarted coroutine, so always emit
+through one helper that closes what it opens. Nested messages use the same
+`{"name":..., "value":...}` envelope and **`name` must be the first key**.
+
+Derive the deal from the **final state**, never by replaying the engine's
+change log - that log contains every mulligan redraw, which renders as cards
+flying out of the deck and back into it.
+
+### Entities the client will not tolerate
+
+| requirement | what happens otherwise |
+| --- | --- |
+| card attribute **10140** (name key) | `HandSort`'s comparator NREs, `List.Sort` throws, and `EntityChildRenderer` has already cleared the layout - the hand empties every frame and cards park unparented at the world origin |
+| bench attribute **201920** = 5 | `BenchLayout` divides by it; 0 gives Infinity/NaN transforms and endless collider warnings |
+| playmat + `outOfPlay`/`activeStadium`/`activeTrainer` have **no owner** | `IntroduceEntity` routes by `owningPlayerID`; owned by a player they are never bound to their layouts and one dereferences an unassigned field |
+| `children` never null | `Entities.initialize` reads `.Length` |
+| exact zone names in 10140 | `k.P.introduce` throws on anything unrecognised |
+| both players present in the initial state | `configurePlayerEntities` runs only there; `ActivePlayerSet` NREs otherwise |
+
+"Face down" is not a flag - it is `attributes: null`. Revealing a card is an
+`EntityIntroduced`. Energy attachment is **structural**: the energy entity
+becomes a child of the Pokemon. Damage needs no message: HP carries current in
+`value` and max in `originalValue`, and the client subtracts.
+
+### Offers
+
+`selectionType` decides the UI and is the most load-bearing string.
+`"Ability"` auto-advances to target selection and never looks the action id up
+on the card - right for moves that are not a printed ability. `"AbilitySelection"`
+draws a button per ability and only if the action id really appears in that
+card's attribute-200740 list - so attacks must carry their true `abilityID`.
+One entity must never mix the two.
+
+`MulliganChoiceRequired` must **never** be sent: its node kind is the empty
+string, which has no UI and no fallback, so the game stalls forever. PTCGO's
+mulligans were animation plus a summary, never a prompt.
+
+### Deck legality
+
+Checked entirely client-side before `RequestQueueMatch` is even sent. Two
+things bite: the collection grants **4 of each card**, and ownership is
+enforced - so 40 copies of a printed Basic Energy is an illegal deck.
+**`Free_Energy` is exempt from the ownership check**; build decks from it and
+cap real cards at 4.
+
+Validation results are keyed by **format GUID**, and the client hard-codes the
+six (`F.L`): Modified `6402e830-...`, ThemeDeck `1414fd67-...`, TrainerChallenge
+`6a1dec5a-...136`, Unlimited `6a1dec5a-...135`, Expanded `98c83df9-...`, Legacy
+`6b33d420-...`. Decks must also be served with attribute **10860** (the format
+name list) or `ValidateDecksData` bails and nothing is legal.
+
 ## Status / next
 
-Working: login (DeviceID + sha1), full load to main menu and deck builder,
-27,550 localized strings, 62 sets, 9,940 cards, 4 of each in the collection,
-233 asset bundles with 18,857 indexed asset names, cosmetics, backgrounds and
-card art (all 4,532 cards, 3.7 GB).
+Working: login, main menu, deck builder and deck save/load, 62 sets, 9,940
+cards with 4 of each in the collection, card art for every card, pack opening,
+the avatar wardrobe (1,333 reconstructed items), and matches - board, deal,
+go-first, action offers, an AI opponent, concede and the end-of-game screen.
 
-Absent, not broken: card art/foil masks for 57 sets (source per card), and
-avatar items (definitions never shipped).
+Assets: **1,818 bundles / 49,467 indexed asset names** after importing 1,585
+from a donated cache. Foils on 45 of 62 sets.
 
-Next: more card art as encountered, then deck saving/loading, then gameplay
-(the match engine - much larger; `dwd.core.match` namespaces).
+Known gaps, in rough order of value:
+
+- **Setup selection.** The server auto-places the Active
+  (`Match.auto_setup`); the player should choose it, and the bench, from hand.
+  Messages are specified: `SelectionWithTargetsRequired` with
+  `ActivePokemonTargetInformation` then `InitialBenchedTargetInformation`,
+  `forced: true`, `ignoreFirst: true`, exactly one `targetMap` key.
+- **Per-card attack effects.** Attacks deal base damage only. Weakness,
+  resistance, retreat, knockouts, prizes and win conditions are all real. The
+  hook is `Rules.attack_effects`, `abilityID -> callable(state, ctx, changes)`,
+  called in `_do_attack` right after damage.
+- **Trainers and abilities** - deliberately absent from the engine, not
+  half-implemented. Adding them needs a `PlayTrainer` action, a Supporter
+  flag, a Stadium zone, and a trigger model for abilities.
+- **BW-era foil masks** - need a donor who played 2011-2013.
+- **SM5-SM12 and SWSH art** is imported but unusable: no card definitions
+  exist for those sets, and the donated `AttributeDB` is a search index (GUID,
+  name, abilities) rather than full attributes.
+- An **"Avatar" deck leaks into the deck manager** - the avatar loadout shares
+  the card-deck model. Cosmetic.
+
+## How this has gone wrong before
+
+Patterns worth internalising, each of which cost a test cycle or several:
+
+1. **The client dereferences unguarded, constantly.** A missing dictionary key
+   or attribute throws rather than degrading, usually inside a coroutine, and
+   the symptom surfaces somewhere unrelated. When something "does nothing",
+   look for a throw, not for a missing feature.
+2. **Localization misses are silent.** `LocalizationLookup` returns the key
+   verbatim, so an invented key renders as raw text with nothing logged. Check
+   every key against `LocalizationDB-UTF16.db` before sending it.
+3. **Measure against what the client requests**, not against a name you
+   derived. Two separate bugs survived rounds of "fixes" because a coverage
+   check used the same wrong assumption as the code it was checking.
+4. **Verify the fix is actually running.** Compare the server's startup
+   timestamp against the traffic it served.
+5. **Read the assemblies rather than inferring.** Nearly every real answer here
+   came from IL; nearly every wrong turn came from a plausible guess. The
+   obfuscator collapses distinct fields onto identical decompiled names, so
+   resolve attribute ids from IL (`scratchpad/pfmap.json`) and not from source.
