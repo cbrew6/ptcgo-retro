@@ -1919,7 +1919,7 @@ class Match:
             }))
         return [("seq", "Mulligan", items)] if items else []
 
-    def opening_animation(self):
+    def opening_animation(self, opponent_chose=False):
         """A clean deal derived from the final board, not from the change log.
 
         Replaying the engine's opening Changes looked wrong for three separate
@@ -1944,11 +1944,28 @@ class Match:
         Returns items for emit_sequence: ("seq", name, [...]) or ("msg", ...).
         """
         items = []
-        for index in range(len(self.state.players)):
-            items.append(("msg", "Shuffled", {
-                "gameID": self.game_id,
-                "entityID": self.pile[(index, ZONE_DECK)],
-            }))
+        shuffles = [("msg", "Shuffled", {
+            "gameID": self.game_id,
+            "entityID": self.pile[(index, ZONE_DECK)],
+        }) for index in range(len(self.state.players))]
+        if opponent_chose:
+            # "Your opponent will go first". OpponentChoosingToGoFirst sets
+            # OpponentPicksWhoGoesFirst on the coin dialog - but ONLY if the
+            # sequence has at least one CHILD, and only when none of them is a
+            # b.O (ObserverCustomChoiceOfferMessage, which is spectator-only
+            # and which we never send). An empty one is silently nothing, so
+            # the notice needs a body.
+            #
+            # The two deck shuffles are that body, and they belong here for a
+            # second reason: sent bare they animated both decks - top left and
+            # bottom right - on top of the coin that was still flipping.
+            # Inside the sequence they are the "opponent is deciding" beat
+            # instead of racing it.
+            items.append(("seq", "OpponentChoosingToGoFirst", shuffles))
+        else:
+            # The player won and was asked, so the client has already shown
+            # its own YouPickWhoGoesFirst state.
+            items.extend(shuffles)
 
         hands = []
         for index, player in enumerate(self.state.players):

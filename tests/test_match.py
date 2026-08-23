@@ -899,3 +899,55 @@ class SerializedStateTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DeckCosmeticsTests(unittest.TestCase):
+    """Sleeve, coin and deck box reach a match only through gameOptions.
+
+    They are not attributes on any entity and not part of the board. N.d reads
+    them out of MatchFound.gameOptions keyed by ACCOUNT, and getSettingArchetype
+    drops any value that is not exactly 36 characters. With none present the
+    client falls through to "_default_sleeve" without logging anything, which
+    is why a chosen sleeve never appeared on the playmat.
+    """
+
+    ACCOUNT = "48b7b3bc-c270-4a78-a3f7-9d735f4104ae"
+    DECK = {
+        "deckID": "d0fba67a-d11a-459f-90f9-b94c643d922b",
+        "attributes": [
+            {"name": 200670, "value": "b9a697c4-949e-11e1-890f-efb676c7909c"},
+            {"name": 200690, "value": "e2cae5a3-f184-4040-a364-766355305072"},
+            {"name": 200680, "value": "0aabe654-9377-4d69-bd9b-f875fcb1bb21"},
+            {"name": 10860, "value": ["Standard", "Modified"]},
+        ],
+    }
+
+    def test_the_three_cosmetics_are_sent_keyed_by_account(self):
+        import server
+        extras = server.game_extras(self.ACCOUNT, self.DECK)
+        self.assertEqual(extras, {
+            "gameExtrasSleeve_%s" % self.ACCOUNT:
+                "0aabe654-9377-4d69-bd9b-f875fcb1bb21",
+            "gameExtrasCoin_%s" % self.ACCOUNT:
+                "b9a697c4-949e-11e1-890f-efb676c7909c",
+            "gameExtrasDeckBox_%s" % self.ACCOUNT:
+                "e2cae5a3-f184-4040-a364-766355305072",
+        })
+
+    def test_every_value_is_a_bare_36_character_guid(self):
+        """getSettingArchetype tests `value.Length == 36` and drops anything
+        else, so a quoted or braced GUID is silently no sleeve at all."""
+        import server
+        for key, value in server.game_extras(self.ACCOUNT, self.DECK).items():
+            self.assertEqual(len(value), 36, key)
+            self.assertNotIn('"', value)
+            self.assertNotIn("{", value)
+
+    def test_a_deck_without_cosmetics_sends_nothing_rather_than_junk(self):
+        import server
+        self.assertEqual(server.game_extras(self.ACCOUNT, {}), {})
+        self.assertEqual(server.game_extras(None, self.DECK), {})
+        # A non-GUID value is dropped here rather than by the client.
+        odd = {"attributes": [{"name": 200680, "value": "not-a-guid"},
+                              {"name": 200670, "value": None}]}
+        self.assertEqual(server.game_extras(self.ACCOUNT, odd), {})

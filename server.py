@@ -896,6 +896,38 @@ DECK_FORMAT_ATTRIBUTE = ["Standard", "Modified", "Expanded", "Legacy",
                          "Unlimited"]
 
 
+# The playmat's cosmetics live in MatchFound.gameOptions, not in the board and
+# not on any entity. N.d reads them per ACCOUNT, with the account id built into
+# the key, and getSettingArchetype ignores any value that is not exactly 36
+# characters - a bare hyphenated GUID, which is how decks already store them.
+#
+# With none of these present getSleevePaths falls straight through to
+# "_default_sleeve" and its siblings do the same, so a chosen sleeve, coin and
+# deck box never reached a match at all - nothing carried them. The client
+# never sends them either: its clientOptions are just {"Timers": "false"}.
+DECK_COSMETICS = (
+    (200680, "gameExtrasSleeve_%s"),
+    (200670, "gameExtrasCoin_%s"),
+    (200690, "gameExtrasDeckBox_%s"),
+)
+
+
+def game_extras(account, deck):
+    """The gameOptions entries that dress a player's side of the playmat."""
+    if not account or not deck:
+        return {}
+    attributes = {a.get("name"): a.get("value")
+                  for a in (deck.get("attributes") or [])}
+    out = {}
+    for ident, template in DECK_COSMETICS:
+        value = attributes.get(ident)
+        # Exactly the client's own test. A value of any other length is
+        # dropped there, silently, so drop it here where it can be seen.
+        if isinstance(value, str) and len(value) == 36:
+            out[template % account] = value
+    return out
+
+
 def deck_attribute(deck, name):
     for attr in (deck or {}).get("attributes") or []:
         if attr.get("name") == name:
@@ -1669,6 +1701,11 @@ class GameSession:
             options.setdefault("difficulty", "intermediate")
             options.pop("GameMode", None)
             options.pop("SubMode", None)
+            # The sleeve, coin and deck box the player actually chose. The AI
+            # is deliberately left on the defaults - it has no deck of its own
+            # to take cosmetics from, and borrowing the player's would put the
+            # same sleeve on both sides of the table.
+            options.update(game_extras(account, deck))
             self.send("MatchFound", {
                 "gameID": self.game_id,
                 "players": [account, AI_ACCOUNT_ID],
@@ -1776,19 +1813,33 @@ class GameSession:
         # and those showed as cards flying out of the deck and back in.
         log.info("[game %s] %s goes first",
                  self.peer, "player" if player_first else "opponent")
-        # NOTHING lowers the coin here, deliberately. An empty ActivePlayerSet
-        # sequence does lower it - that is a real primitive and it is why one
-        # used to sit on this line - but it does its work BEFORE running its
-        # children, so queueing it directly behind the flip cut the flip's own
-        # animation short: the coin was raised, the result was barely visible,
-        # and the hand dealt itself over the top. That is "my hand gets drawn
-        # before the coin flip is even finished".
+        # The deal FIRST, and the coin put away AFTER it. Ordering these two
+        # the other way round is wrong in both directions, which is why this
+        # comment is long.
         #
-        # DealInitialHands lowers both coins on its own, and the deal is the
-        # very next thing to run, so the coin still goes away - one beat later,
-        # after the flip has been seen. Mulligans are already sequenced after
-        # the deal for the same reason.
-        self.emit_items(self.match.opening_animation())
+        # An empty ActivePlayerSet sequence does four things, not one:
+        #
+        #     initialCoinFlipAnimator  DonePicking = true, Hidden = true
+        #     promptListener           OverrideShowPrompt = false, OverrideText = null
+        #     player1Coin/player2Coin  InitialUp = false, up = false
+        #
+        # It does all of that BEFORE running its children, so sending it
+        # directly behind the flip cut the flip's own animation short - the
+        # result was barely visible and the hand dealt over the top.
+        #
+        # But DealInitialHands only lowers the four COIN bools. It never
+        # touches the dialog or the prompt override. So dropping the sequence
+        # entirely left initialCoinFlipAnimator unhidden and
+        # OverrideShowPrompt stuck true: a full-screen banner over the setup
+        # screen that swallowed every click behind it. Nothing else in the
+        # client ever clears that flag.
+        #
+        # After the deal is the one position that satisfies both.
+        # player_won_flip is who CHOSE, which is not the same question as
+        # who goes first - the notice is about the choice.
+        self.emit_items(self.match.opening_animation(
+            opponent_chose=not self.player_won_flip))
+        self.emit_sequence("ActivePlayerSet", [])
         # No ActivePlayerSet here. It plays the "YOUR TURN" banner and
         # increments the client's own turn counter, and at this point nobody
         # has chosen an Active yet - the turn has not started. The engine emits

@@ -158,7 +158,7 @@ Gameplay, added later and deliberately layered:
   selection messages, the 61 named animation sequences, which effect classes
   are live and which are dead, end-of-game parameters. Claims are marked
   VERIFIED / INFERRED / UNKNOWN; trust that marking.
-- `tests/` — `python -m unittest discover -s tests`, 241 tests. The engine is
+- `tests/` — `python -m unittest discover -s tests`, 244 tests. The engine is
   testable without the game, which is the entire point of the split.
 
 ## Protocol essentials
@@ -772,6 +772,24 @@ it wants no entry in attribute 200740 and is drawn from its own prefab
 During SETUP the Active carries no attacks, so a "done benching" row there is
 safe, and that is where it goes.
 
+### Sleeve, coin and deck box travel in gameOptions
+
+Not as attributes, not on any entity, not in the board. `N.d` reads them out of
+`MatchFound.gameOptions` keyed by **account**:
+
+    gameExtrasSleeve_<accountID>     gameExtrasDeckImage_<accountID>
+    gameExtrasCoin_<accountID>       gameExtrasSecondaryDeckImage_<accountID>
+    gameExtrasDeckBox_<accountID>    gameExtrasImageURL_<accountID>
+    gameExtrasDeckID_<accountID>     gameExtrasDeckColor<N>_<accountID>
+    avatarProfile_<accountID>        avatarProfile_name_<accountID>
+
+`getSettingArchetype` drops any value whose length is not **exactly 36** - a
+bare hyphenated GUID - so a quoted or braced one is silently no sleeve at all.
+With the keys absent `getSleevePaths` returns `_default_sleeve`, which is what
+every match used, because the client's own `clientOptions` are only
+`{"Timers": "false"}` and we forwarded them unchanged. The values are already
+on the deck as attributes 200680 / 200670 / 200690.
+
 ### A sequence runs its children WHILE it animates
 
 So a sequence is a container for one beat, never for "everything that happened
@@ -783,12 +801,27 @@ Pokemon still being placed, the banner fired over the top, and the board only
 settled afterwards. Apply the placements, emit them as the sequence, then
 apply `SetupDone` and emit ITS changes at top level.
 
-The same rule killed the coin flip. An empty `ActivePlayerSet` sequence is a
-real "put the coin away" primitive - but it does its work BEFORE running its
-children, so queueing one directly behind the flip cut the flip's own animation
-short and the hand dealt itself over the top. Nothing needs to lower the coin
-there: `DealInitialHands` does it, one beat later, after the flip has been
-seen. Mulligans are already ordered after the deal for the same reason.
+The same rule killed the coin flip, and the fix has a trap on BOTH sides. An
+empty `ActivePlayerSet` sequence does four things, before running any children:
+
+    initialCoinFlipAnimator   DonePicking = true, Hidden = true
+    promptListener            OverrideShowPrompt = false, OverrideText = null
+    player1Coin / player2Coin InitialUp = false, up = false
+
+Sent directly behind the flip it cuts the flip's own animation short and the
+hand deals over the top. But `DealInitialHands` lowers only the four COIN
+bools - it never hides the dialog and never clears the prompt override - so
+removing the sequence instead left a full-screen banner over the setup screen
+that swallowed every click behind it, and **nothing else in the client ever
+clears `OverrideShowPrompt`**. It belongs AFTER the deal, which is the one
+position that satisfies both.
+
+`OpponentChoosingToGoFirst` is the "your opponent will go first" notice, and it
+fires only when the sequence has **at least one child** and none of them is a
+`b.O` (`ObserverCustomChoiceOfferMessage`, spectator-only, which we never send).
+An empty one is silently nothing. The two deck `Shuffled` messages are its
+body - sent bare they animated both decks, top left and bottom right, over a
+coin that was still flipping.
 
 ### Retreat: the button, the tray, the destination
 
