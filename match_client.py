@@ -307,14 +307,26 @@ class Harness:
         _n, ok = self.wait_for(["AuthenticationSuccessful"])
         return ok["account"]["accountID"]
 
-    def pick_deck(self):
+    def pick_deck(self, name=None):
+        """A deck to queue with.
+
+        Defaults to the one with the most distinct cards rather than the first
+        60-card list, because the first one was a single species plus Energy -
+        a deck that cannot evolve, cannot bench a second attacker, and so
+        drives almost none of the offer code.
+        """
         self.send("GetDeckList")
         _n, value = self.wait_for(["OnlineDecksFound"])
-        for deck in value.get("decks") or []:
-            pile = (deck.get("piles") or {}).get("CakePile") or []
-            if len(pile) >= 60:
-                return deck
-        raise ProtocolError("no 60-card deck to queue with")
+        decks = [d for d in (value.get("decks") or [])
+                 if len((d.get("piles") or {}).get("CakePile") or []) >= 60]
+        if not decks:
+            raise ProtocolError("no 60-card deck to queue with")
+        if name:
+            for deck in decks:
+                if deck.get("deckName") == name:
+                    return deck
+            raise ProtocolError("no deck named %r" % name)
+        return max(decks, key=lambda d: len(set(d["piles"]["CakePile"])))
 
     def queue(self, deck):
         self.send("RequestQueueMatch", {
@@ -413,11 +425,11 @@ class Harness:
 
 # --------------------------------------------------------------------------
 
-def run_one(verbose=False, dump=None, rng=None, go_first=True):
+def run_one(verbose=False, dump=None, rng=None, go_first=True, deck_name=None):
     h = Harness(verbose=verbose, rng=rng)
     try:
         h.login()
-        deck = h.pick_deck()
+        deck = h.pick_deck(deck_name)
         h.queue(deck)
         h.play(go_first=go_first)
     finally:
@@ -483,6 +495,7 @@ def main(argv=None):
     ap.add_argument("--seed", type=int,
                     help="play randomly from this seed instead of always "
                          "taking the first offered action")
+    ap.add_argument("--deck", help="queue with this deck by name")
     ap.add_argument("--quiet", action="store_true",
                     help="only report failures (for soaking)")
     args = ap.parse_args(argv)
@@ -495,7 +508,7 @@ def main(argv=None):
             print("\n=== game %d/%d ===" % (i + 1, args.games))
         try:
             h = run_one(verbose=args.verbose, dump=args.dump, rng=rng,
-                        go_first=(i % 2 == 0))
+                        go_first=(i % 2 == 0), deck_name=args.deck)
         except (ProtocolError, OSError) as exc:
             print("   game %d ERROR: %s" % (i + 1, exc))
             failures += 1
