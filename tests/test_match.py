@@ -416,10 +416,13 @@ class OfferTests(unittest.TestCase):
                          "AbilitySelection")
         # Pay the cost, then choose who comes in - in that order, because the
         # second TargetInformation becomes a CHILD of the first.
+        # Destination first, cost tray LAST: only the final node in a chain
+        # has NodeToAdvanceTo() == null, and only that node's confirm button
+        # is ever active.
         self.assertEqual([i["name"] for i in row["targetInfoLst"]],
-                         ["RetreatCostEntityListTargetInformation",
-                          "RetreatNewActiveTargetInformation"])
-        tray = row["targetInfoLst"][0]
+                         ["RetreatNewActiveTargetInformation",
+                          "RetreatCostEntityListTargetInformation"])
+        tray = row["targetInfoLst"][1]
         # valueToSelect is the cost in Energy SYMBOLS - the node tallies
         # get_EnergyProvidedCount(), so a card count here would let a Double
         # Colorless underpay a two-cost retreat.
@@ -432,7 +435,7 @@ class OfferTests(unittest.TestCase):
         # The destinations are the benched Pokemon, which is what the player
         # picks - retreat names the Pokemon coming IN.
         bench = {m.entity_of_slot(sl) for sl in me.bench if sl.stack}
-        offered = set(row["targetInfoLst"][1]["validTargets"])
+        offered = set(row["targetInfoLst"][0]["validTargets"])
         self.assertTrue(offered, "retreat offered with nowhere to go")
         self.assertTrue(offered <= bench,
                         "retreat targets something that is not a benched "
@@ -462,12 +465,12 @@ class OfferTests(unittest.TestCase):
         body, decode = m.build_offer(0, 1)
         row = next(r for r in body["targetMap"]
                    if r["selectableAction"]["description"] == "BaseRetreat")
-        destination = row["targetInfoLst"][1]["validTargets"][0]
+        destination = row["targetInfoLst"][0]["validTargets"][0]
         chosen = moved[-1:]                      # the LAST one, deliberately
         reply = [[row["entityID"], row["selectableAction"]["actionID"]],
-                 [{"entityList": [m.eid(c) for c in chosen],
+                 [{"entityList": [destination],
                    "name": "EntityListTargetResponse"},
-                  {"entityList": [destination],
+                  {"entityList": [m.eid(c) for c in chosen],
                    "name": "EntityListTargetResponse"}]]
         action = match.Match.decode_reply(reply, decode)
         self.assertIsInstance(action, engine.Retreat)
@@ -951,3 +954,58 @@ class DeckCosmeticsTests(unittest.TestCase):
         odd = {"attributes": [{"name": 200680, "value": "not-a-guid"},
                               {"name": 200670, "value": None}]}
         self.assertEqual(server.game_extras(self.ACCOUNT, odd), {})
+
+
+class ChangeCoverageTests(unittest.TestCase):
+    """Every engine Change kind is either animated or deliberately not.
+
+    animation_for does `getattr(self, "_change_" + kind, None)` and `continue`s
+    when there is none - no warning, nothing logged. So a change the client
+    needs to see is dropped in complete silence, the server's board stays
+    right, and every other test still passes. That is exactly how promote and
+    retreat both shipped: the engine swapped the Pokemon and the client was
+    never told, so a knocked-out Active was never replaced on screen and a
+    retreat paid its cost without anything moving.
+
+    The allow-list below is the point of this test. A new Change kind fails it
+    until someone decides which side it belongs on.
+    """
+
+    #: Kinds with no animation of their own, and why.
+    NOT_ANIMATED = {
+        "choice": "a question, asked through its own selection message",
+        "chose": "the answer to one; the effects it causes are their own changes",
+        "phase": "bookkeeping - no board state changes",
+        "turnEnd": "the client's own banner is driven by turnStart",
+        "gameOver": "sent as GameCompletedMessage, which must stay unwrapped",
+        "modifier": "continuous effects have no card movement to show",
+        "mulligan": "shown by mulligan_items as a MulliganRevealCardsEffect",
+        "shuffle": "the opening emits its own Shuffled messages",
+        "coinFlip": "in-effect flips ride along with the effect that caused them",
+        "evolve": "the card's own CHANGE_MOVE from hand to the slot animates it",
+    }
+
+    def test_every_change_kind_is_accounted_for(self):
+        kinds = {value for name, value in vars(engine).items()
+                 if name.startswith("CHANGE_") and isinstance(value, str)}
+        self.assertTrue(kinds, "found no CHANGE_ constants at all")
+        for kind in sorted(kinds):
+            handled = hasattr(match.Match, "_change_" + kind)
+            excused = kind in self.NOT_ANIMATED
+            self.assertTrue(
+                handled or excused,
+                "engine emits CHANGE_%s and match.py neither animates it nor "
+                "lists it in NOT_ANIMATED - animation_for will drop it "
+                "silently" % kind.upper())
+            self.assertFalse(
+                handled and excused,
+                "%r is both animated and listed as not animated" % kind)
+
+    def test_the_allow_list_has_not_gone_stale(self):
+        """A kind that stops existing should not linger as an excuse."""
+        kinds = {value for name, value in vars(engine).items()
+                 if name.startswith("CHANGE_") and isinstance(value, str)}
+        for kind in self.NOT_ANIMATED:
+            self.assertIn(kind, kinds,
+                          "NOT_ANIMATED lists %r, which the engine no longer "
+                          "emits" % kind)

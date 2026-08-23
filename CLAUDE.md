@@ -158,7 +158,7 @@ Gameplay, added later and deliberately layered:
   selection messages, the 61 named animation sequences, which effect classes
   are live and which are dead, end-of-game parameters. Claims are marked
   VERIFIED / INFERRED / UNKNOWN; trust that marking.
-- `tests/` — `python -m unittest discover -s tests`, 244 tests. The engine is
+- `tests/` — `python -m unittest discover -s tests`, 246 tests. The engine is
   testable without the game, which is the entire point of the split.
 
 ## Protocol essentials
@@ -771,6 +771,55 @@ it wants no entry in attribute 200740 and is drawn from its own prefab
 
 During SETUP the Active carries no attacks, so a "done benching" row there is
 safe, and that is where it goes.
+
+### An unhandled Change kind is dropped in SILENCE
+
+`animation_for` does `getattr(self, "_change_" + kind, None)` and `continue`s
+when there is none. Nothing is logged. The engine applies the change, the
+server's board is correct, every test passes, and the client is simply never
+told. Two shipped that way:
+
+- **promote** had no handler at all, so a knocked-out Active was never
+  replaced on screen - the bench Pokemon just sat there. Reported as "the
+  opponent doesn't promote"; it was both sides.
+- **retreat** emitted moves for the discarded Energy but the SWAP itself is
+  `CHANGE_RETREAT`, which had none - so a retreat paid its cost and nothing
+  moved.
+
+`tests/test_match.py:ChangeCoverageTests` now fails on any Change kind that is
+neither animated nor in an explicit `NOT_ANIMATED` allow-list, so a new kind
+forces the decision instead of vanishing.
+
+### The client is 32-bit, and LooseArt was the memory hog
+
+It dies around 3.4 GB of address space regardless of installed RAM. A
+collection scroll loaded **583** distinct LooseArt textures and crashed on an
+access violation inside a memcpy at a 3348 MB working set (the dump is under
+`%LOCALAPPDATA%\Temp\<Company>\<Product>\Crashes`, and it keeps the
+`output_log.txt` from the crashed run, which the live one has overwritten).
+
+`LoadImage()` decodes to **RGBA32** - 4 MB for a 1024x1024 card face, plus a
+second CPU-side copy because the texture stays readable. `Compress(false)`
+then `Apply(false, true)` takes that to DXT1/DXT5 with no readable copy, an
+8-16x reduction, and DXT is the format the real bundles ship so it is the
+authentic quality rather than a downgrade.
+
+Still outstanding: the patch writes `map[request] = tex` **directly**, which
+bypasses `AddTexture()`'s eviction entirely, so LooseArt entries are not
+subject to the LRU cap of 60 at all. Compression buys a lot of headroom but
+the collection is still unbounded.
+
+### The confirm button only exists on the LAST node of a chain
+
+`buttonIsActive` needs `haveZeroSelectionRelatedInterrupts`, and for a chained
+selection that comes from `flag6 = MayAdvance && NodeToAdvanceTo() == null`.
+Only the final TargetInformation in a row has nothing to advance to, so only
+it can own a confirm button. Retreat's cost tray was sent FIRST, with the
+destination chained after it, and could therefore never be confirmed - "it
+lets me select Energy but there is no confirm button". Destination first, tray
+last. The client's own label logic agrees: it flips the tray's button from
+Cancel to Done exactly when the tray is satisfied, which only means anything
+if the player is sitting in the tray with the button live.
 
 ### Sleeve, coin and deck box travel in gameOptions
 

@@ -114,6 +114,7 @@ public static class PtcgoLooseArt
             Texture2D tex = new Texture2D(2, 2, TextureFormat.RGBA32, false);
             tex.LoadImage(File.ReadAllBytes(file));
             tex.name = request;
+            Shrink(tex);
             map[request] = tex;
             // MUST happen for every texture that enters imageCache; see the
             // class comment. Without it the cache's own eviction throws and
@@ -126,6 +127,40 @@ public static class PtcgoLooseArt
             // Never let this break the caller: a throw here would take out the
             // texture path for every asset in the game.
             Debug.LogWarning("[LooseArt] " + request + ": " + e.Message);
+        }
+    }
+
+    /// <summary>DXT-compress the decoded PNG and drop its CPU-side copy.
+    ///
+    /// This is a crash fix, not an optimisation. The client is a 32-bit
+    /// process, so it dies at roughly 3.4 GB of address space no matter how
+    /// much RAM the machine has. LoadImage() decodes to RGBA32, which is
+    /// 4 MB for a 1024x1024 card face and keeps a second 4 MB copy on the CPU
+    /// side because the texture stays readable. Scrolling the collection
+    /// loaded 583 distinct textures in one session and the process died on an
+    /// access violation inside a memcpy at a 3348 MB working set.
+    ///
+    /// Compress() takes that to DXT1 (opaque, 512 KB) or DXT5 (alpha, 1 MB) -
+    /// which is exactly the format the real bundles ship, so it is the
+    /// authentic quality rather than a downgrade - and Apply(..., true) frees
+    /// the readable copy. Together that is an 8-16x reduction.
+    ///
+    /// Compression needs both dimensions to be a multiple of 4. Card art and
+    /// masks are powers of two, but a stray file need not be, so a failure
+    /// here leaves the texture usable and merely large.</summary>
+    private static void Shrink(Texture2D tex)
+    {
+        try
+        {
+            if ((tex.width & 3) == 0 && (tex.height & 3) == 0)
+                tex.Compress(false);
+            // Uploads and releases the CPU copy. Nothing reads these back.
+            tex.Apply(false, true);
+        }
+        catch (Exception e)
+        {
+            Debug.LogWarning("[LooseArt] could not compress " + tex.name +
+                             ": " + e.Message);
         }
     }
 

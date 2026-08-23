@@ -1760,6 +1760,14 @@ class GameSession:
             "sequenceID": EMPTY_SEQUENCE_ID,
             "msg": {"name": "SerializedGameState", "value": board},
         })
+        # Shuffle here, with the board freshly on screen and the coin still
+        # lying down. These animate BOTH decks - top left and bottom right -
+        # and anywhere later in the opening they play over something: behind
+        # the flip they were the "puddles" either side of a coin still in the
+        # air, and behind the go-first answer they did it again. Before the
+        # coin is the one place nothing else is moving, and it is also the
+        # real order: you shuffle, then you flip, then you deal.
+        self.emit_items(self.match.shuffle_animation())
 
         self.offer_call_flip()
 

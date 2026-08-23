@@ -1097,6 +1097,50 @@ class Match:
     def _change_knockout(self, change):
         return []            # the engine also emits the moves to the discard
 
+    def _change_retreat(self, change):
+        """The Active and a benched Pokemon swap places.
+
+        Only the discarded Energy had a handler, so a retreat used to pay its
+        cost and then leave both Pokemon exactly where they were - the same
+        silent skip as promote below.
+
+        The outgoing Pokemon leaves FIRST. The Active is a SingleCardArea laid
+        out by index, so moving the incoming one in while the outgoing one is
+        still sitting there puts two cards in a one-card slot.
+        """
+        detail = change.detail or {}
+        incoming = self.resolve_slot(detail.get("promoted"))
+        outgoing = self.resolve_slot(change.slot)
+        active_pile = self.pile.get((change.player, ZONE_ACTIVE))
+        bench_pile = self.pile.get((change.player, ZONE_BENCH))
+        msgs = []
+        if outgoing is not None and outgoing.stack and bench_pile:
+            msgs.append(self._move_msg(outgoing.top, bench_pile))
+        if incoming is not None and incoming.stack and active_pile:
+            msgs.append(self._move_msg(incoming.top, active_pile))
+        return msgs
+
+    def _change_promote(self, change):
+        """The benched Pokemon that replaces a knocked-out Active.
+
+        There was no handler at all, and animation_for SKIPS any change whose
+        kind it does not recognise - no warning, no log. So the engine
+        promoted, the server's board was right, every test passed, and the
+        client was simply never told: the Pokemon sat on the bench with an
+        empty Active in front of it. It showed up as the opponent never
+        promoting, but it was both sides.
+
+        A move is all that is needed. The Pokemon is already face up, and its
+        attached Energy are its CHILDREN in the entity tree, so they travel
+        with it rather than needing moves of their own.
+        """
+        if change.card is None:
+            return []
+        destination = self.pile.get((change.player, ZONE_ACTIVE))
+        if destination is None:
+            return []
+        return [self._move_msg(change.card, destination)]
+
     def _change_turnStart(self, change):
         return [("ActivePlayerSet", {
             "gameID": self.game_id,
@@ -1756,15 +1800,26 @@ class Match:
             # then choose who comes in. The SECOND TargetInformation becomes a
             # CHILD of the first, so this is one row answered in one reply.
             infos, energy_map = [], {}
+            infos.append(self._target_info(
+                destinations, PROMPT_RETREAT_TO,
+                kind="RetreatNewActiveTargetInformation"))
             cost = engine.retreat_cost(self.state, me.active)
             if cost > 0:
                 energy_map = {self.eid(cid): cid for cid in me.active.energy}
                 if energy_map:
+                    # The tray goes LAST, and that is not a preference. The
+                    # action button is only active when the current node has
+                    # NodeToAdvanceTo() == null (flag6 in the playmat button's
+                    # Update), which is true only of the final node in the
+                    # chain - so a tray with the destination chained after it
+                    # can never own a confirm button, which is exactly what
+                    # "it lets me select Energy but there is no confirm
+                    # button" was. The client agrees: its own label logic
+                    # flips the tray's button from Cancel to Done the moment
+                    # the tray is satisfied, which only means anything if the
+                    # player is sitting in the tray with the button live.
                     infos.append(self._retreat_cost_info(
                         sorted(energy_map), cost))
-            infos.append(self._target_info(
-                destinations, PROMPT_RETREAT_TO,
-                kind="RetreatNewActiveTargetInformation"))
             if destinations:
                 rows.append(self._action_row(
                     active_entity, ACTION_RETREAT, "BaseRetreat",
@@ -1919,6 +1974,22 @@ class Match:
             }))
         return [("seq", "Mulligan", items)] if items else []
 
+    def shuffle_animation(self):
+        """Both decks shuffling, sent before the coin is ever raised.
+
+        Its own method because placement is the whole point. These animate the
+        two deck piles - top left and bottom right - and every later position
+        in the opening has something else on screen for them to play over: run
+        behind the flip they were "puddles" either side of a coin still in the
+        air, and behind the go-first answer they did it again. Before the coin
+        nothing else is moving, and it is the real order anyway: shuffle,
+        flip, deal.
+        """
+        return [("msg", "Shuffled", {
+            "gameID": self.game_id,
+            "entityID": self.pile[(index, ZONE_DECK)],
+        }) for index in range(len(self.state.players))]
+
     def opening_animation(self, opponent_chose=False):
         """A clean deal derived from the final board, not from the change log.
 
@@ -1944,29 +2015,6 @@ class Match:
         Returns items for emit_sequence: ("seq", name, [...]) or ("msg", ...).
         """
         items = []
-        shuffles = [("msg", "Shuffled", {
-            "gameID": self.game_id,
-            "entityID": self.pile[(index, ZONE_DECK)],
-        }) for index in range(len(self.state.players))]
-        if opponent_chose:
-            # "Your opponent will go first". OpponentChoosingToGoFirst sets
-            # OpponentPicksWhoGoesFirst on the coin dialog - but ONLY if the
-            # sequence has at least one CHILD, and only when none of them is a
-            # b.O (ObserverCustomChoiceOfferMessage, which is spectator-only
-            # and which we never send). An empty one is silently nothing, so
-            # the notice needs a body.
-            #
-            # The two deck shuffles are that body, and they belong here for a
-            # second reason: sent bare they animated both decks - top left and
-            # bottom right - on top of the coin that was still flipping.
-            # Inside the sequence they are the "opponent is deciding" beat
-            # instead of racing it.
-            items.append(("seq", "OpponentChoosingToGoFirst", shuffles))
-        else:
-            # The player won and was asked, so the client has already shown
-            # its own YouPickWhoGoesFirst state.
-            items.extend(shuffles)
-
         hands = []
         for index, player in enumerate(self.state.players):
             moves = []
@@ -1978,7 +2026,22 @@ class Match:
             if moves:
                 hands.append(("seq", "GroupedMove", moves))
         if hands:
-            items.append(("seq", "DealInitialHands", hands))
+            deal = ("seq", "DealInitialHands", hands)
+            if opponent_chose:
+                # "Your opponent will go first". OpponentChoosingToGoFirst
+                # sets OpponentPicksWhoGoesFirst on the coin dialog - but ONLY
+                # if the sequence has at least one CHILD, and only when none
+                # of them is a b.O (ObserverCustomChoiceOfferMessage, which is
+                # spectator-only and which we never send). An empty one is
+                # silently nothing, so the notice needs a body, and the deal
+                # is the beat it belongs in front of.
+                #
+                # When the PLAYER won they were asked outright, so the client
+                # has already shown its own YouPickWhoGoesFirst state and this
+                # would be telling them something they just did.
+                items.append(("seq", "OpponentChoosingToGoFirst", [deal]))
+            else:
+                items.append(deal)
         # After the deal, deliberately. DealInitialHands is what lowers both
         # coins, so a reveal before it leaves the coin sitting on screen behind
         # the dialog - and the mulligans read as a summary of what happened
