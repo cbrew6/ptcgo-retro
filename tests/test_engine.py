@@ -622,11 +622,13 @@ class SetupTests(unittest.TestCase):
                 state, _ = engine.apply(state, engine.SetupDone(p))
             return state
 
-        skipped = played(engine.DEFAULT_RULES)
-        self.assertEqual(len(skipped.players[0].hand), 6)   # 7 - 1 placed
-
-        drew = played(engine.Rules(first_player_draws_on_first_turn=True))
+        # The first player DOES draw: the first-turn restriction is on
+        # attacking, evolving and Supporters, never on the draw.
+        drew = played(engine.DEFAULT_RULES)
         self.assertEqual(len(drew.players[0].hand), 7)      # 7 - 1 placed + 1
+
+        skipped = played(engine.Rules(first_player_draws_on_first_turn=False))
+        self.assertEqual(len(skipped.players[0].hand), 6)   # 7 - 1 placed
 
     def test_second_player_always_draws_on_their_first_turn(self):
         deck = [GUID["Pipsqueak"]] * 4 + [GUID["FireEnergy"]] * 26

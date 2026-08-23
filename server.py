@@ -2075,13 +2075,6 @@ class GameSession:
         self.pending_selection = None
         action = self.match.decode_reply(req.get("selection"),
                                          self.action_decode or {})
-        if action == match.UNAFFORDABLE:
-            # An attack the Pokemon cannot pay for. It is offered so the
-            # player can SEE it - the client only draws a button for an
-            # action the server offered - and refused here. Re-offering is the
-            # whole response: nothing about the board has changed.
-            log.info("[game %s] <- unaffordable attack; re-offering", self.peer)
-            return self.offer_actions()
         if action is None:
             # A null selection is the Next button. During a turn that means
             # "end it"; during setup it means "I have benched enough", and

@@ -236,9 +236,11 @@ class Rules:
     hand_size: int = 7
     prize_count: int = 6
 
-    # SM-era: the player going first does not draw on their first turn. Under
-    # BW/XY they did. This is the only thing the first player skips.
-    first_player_draws_on_first_turn: bool = False
+    # The player going first DOES draw on their first turn. What they may not
+    # do is attack, evolve, or play a Supporter - the draw was never part of
+    # the first-turn restriction, and having it off meant going first cost a
+    # card every game.
+    first_player_draws_on_first_turn: bool = True
 
     # Also SM-era: the first player may not attack on turn 1. They *may* play a
     # Supporter - the two restrictions arrived together in Sun & Moon and only

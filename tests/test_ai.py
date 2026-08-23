@@ -447,8 +447,11 @@ class SetupTests(unittest.TestCase):
             state, _ = engine.apply(state, action)
 
         self.assertEqual(state.players[0].owed_draws, 0)
-        # Relative: setting up already moved a Basic out of the hand.
-        self.assertEqual(len(state.players[0].hand), before + 2)
+        # Two compensation cards, plus the ordinary draw for the first turn -
+        # answering the last offer is what finishes setup and starts the game,
+        # and the player going first draws like anyone else.
+        self.assertEqual(len(state.players[0].hand), before + 3)
+        self.assertEqual(state.phase, engine.PHASE_MAIN)
 
     def test_leads_with_an_attacker_rather_than_a_filler(self):
         state, _ = engine.new_game(

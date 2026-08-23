@@ -72,9 +72,7 @@ ABILITY_TYPES = frozenset((
     "PlayAbility", "RetreatAbility",
 ))
 
-#: Returned by decode_reply for an attack the Pokemon cannot pay for. Not None,
-#: because None means "the player pressed Next" and would end the turn.
-UNAFFORDABLE = "unaffordable"
+
 
 # Zones whose contents the owner may see. Everything else stays face down.
 OPEN_ZONES = (ZONE_HAND, ZONE_ACTIVE, ZONE_BENCH, ZONE_DISCARD)
@@ -1483,23 +1481,26 @@ class Match:
         # client's own button, which does appear during a turn.
         active_entity = self.entity_of_slot(me.active) if me.active else None
         if opp_active and active_entity:
-            # EVERY attack the Active has, not only the ones it can pay for.
-            # The client builds one button per offered action id that also
-            # appears in the card's own ability list, so an attack left out of
-            # the offer is an attack the player cannot even see - and "why is
-            # there no attack button" is indistinguishable from "the game is
-            # broken". Unaffordable ones are marked Depleted rather than
-            # hidden, and refused if chosen.
-            payable = {a.ability_id: a for a in attacks}
-            for attack in self.card(me.active.stack[-1]).attacks:
-                action = payable.get(attack.ability_id)
+            # Only attacks that can actually be used.
+            #
+            # Offering the rest with actionHint "Depleted" was tried and is
+            # wrong for this client: AbilityButtonRenderer.Render picks its
+            # textures from the energy type and the GX/VSTAR flags and has no
+            # affordability path at all, so an unusable attack draws a button
+            # that looks identical to a usable one, does nothing when pressed,
+            # and leaves the selection half-advanced. A button that lies is
+            # worse than a button that is absent.
+            #
+            # The full attack list is still visible on the card itself - that
+            # is what attribute 200740 is for - so nothing is hidden from the
+            # player, only from the action menu.
+            for action in attacks:
+                attack = self.card(me.active.stack[-1]).attack(action.ability_id)
                 self._offer_group(
-                    rows, decode, active_entity, attack.ability_id,
-                    _loc_key(attack.title) or attack.ability_id,
-                    "AbilitySelection",
-                    {opp_active: action if action is not None else UNAFFORDABLE},
-                    selected=False,
-                    hint="Optimal" if action is not None else "Depleted")
+                    rows, decode, active_entity, action.ability_id,
+                    _loc_key(attack.title) if attack else action.ability_id,
+                    "AbilitySelection", {opp_active: action},
+                    selected=False)
 
         # A promotion is owed, not chosen: the turn cannot continue around it,
         # so the client must not be given an end-turn button to escape with.
