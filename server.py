@@ -456,6 +456,179 @@ def equipped_avatar_deck(gender=AVATAR_GENDER):
     return _avatar_decks[gender]
 
 
+# --------------------------------------------------------------------------
+# matches
+# --------------------------------------------------------------------------
+#
+# The client renders and reports clicks; it holds no rules at all. Every legal
+# move, every bit of state, lives here. That makes a full game a large project,
+# but it also means a *static board* needs no rules whatsoever - and the whole
+# board ships in one message:
+#
+#   RequestQueueMatch  ->  MatchFound
+#   (the client drives VersusScreen -> Playmat by itself, no server part)
+#   PlayerReady        ->  SerializedGameState
+#
+# Three things bite here, all learned from reading the client rather than from
+# experiment, and all cheap to get wrong:
+#
+#   - CakeDeckManagerButton_PlayDeck sets a `clicked` latch before sending and
+#     never resets it. Leave RequestQueueMatch unanswered and the Play Deck
+#     button is dead until the scene reloads. So this ALWAYS replies, even on
+#     an internal error, and the failure path is MatchQueueJoinFailed.
+#   - gameOptions must not be null: F.w.execute() asserts on it and silently
+#     yield-breaks, giving no scene, no error and no log line.
+#   - k.P.introduce() throws on any zone name it does not recognise, so the
+#     zone strings below are exact and are used as constants, never retyped.
+
+ENTITY_PLAYMAT = "com.direwolfdigital.cake.rules.entities.CakePlayMat"
+ENTITY_PLAYER = "com.direwolfdigital.cake.rules.entities.CakePlayerEntity"
+ENTITY_AREA = "com.direwolfdigital.game.core.PlayArea"
+ENTITY_SLOTTED = "com.direwolfdigital.cake.rules.entities.SlottedPlayArea"
+ENTITY_POKEMON = "com.direwolfdigital.cake.rules.entities.Pokemon"
+ENTITY_TRAINER = "com.direwolfdigital.cake.rules.entities.TrainerCard"
+ENTITY_ENERGY = "com.direwolfdigital.cake.rules.entities.Energy"
+
+ZONE_PLAYMAT = "playmat"
+ZONE_DECK, ZONE_HAND, ZONE_PRIZES = "deck", "hand", "prizePile"
+ZONE_ACTIVE, ZONE_BENCH = "activePokemonArea", "bench"
+ZONE_DISCARD, ZONE_LOST = "discard", "lostZone"
+PLAYMAT_ZONES = ("outOfPlay", "activeStadium", "activeTrainer")
+PLAYER_ZONES = (ZONE_DECK, ZONE_HAND, ZONE_PRIZES, ZONE_ACTIVE,
+                ZONE_BENCH, ZONE_DISCARD, ZONE_LOST)
+
+ATTR_ARCHETYPE_ID = 10000
+ATTR_ENERGY_A, ATTR_ENERGY_B = 200520, 201040   # either present => an Energy
+
+HAND_SIZE, PRIZE_COUNT = 7, 6
+
+# Introduce every card, including the opponent's hand. Face-down is believed to
+# be "attributes": null, but that is inferred and unverified - and a board that
+# renders wrongly is far easier to debug than one that does not render at all.
+HIDE_OPPONENT_CARDS = False
+
+# The AI opponent needs an account GUID distinct from the player's;
+# getPlayerEntities throws for any third account, so exactly these two.
+AI_ACCOUNT_ID = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+
+_card_by_guid = None
+
+
+def card_index():
+    """archetype GUID -> its attribute map, for dressing cards on the board."""
+    global _card_by_guid
+    if _card_by_guid is None:
+        _card_by_guid = {}
+        for a in load_cards():
+            _card_by_guid[_archetype_guid(a)] = dict(
+                (x["n"], (x.get("v") or {})) for x in a["attrs"])
+    return _card_by_guid
+
+
+def _loc(text):
+    """A LocalizableText on the wire is an object with an id."""
+    return {"id": text}
+
+
+def _entity(eid, parent, owner, name, attrs, children=None):
+    """One SerializedEntity.
+
+    children is never None: Entities.initialize reads .Length on it directly.
+    attrs None means "not introduced", which is how a hidden card is expressed.
+    """
+    return {
+        "entityID": eid,
+        "parentID": parent,
+        "owningPlayerID": owner,
+        "entityName": name,
+        "archetypeID": None,
+        "attributes": attrs,
+        "children": children if children is not None else [],
+    }
+
+
+def _card_entity(guid, parent, owner, introduced=True):
+    at = card_index().get(guid) or {}
+    if ATTR_ENERGY_A in at or ATTR_ENERGY_B in at:
+        kind = ENTITY_ENERGY
+    elif ATTR_STAGE in at:
+        kind = ENTITY_POKEMON
+    else:
+        kind = ENTITY_TRAINER
+    attrs = None
+    if introduced:
+        attrs = [{"name": ATTR_ARCHETYPE_ID, "value": guid}]
+        name_key = (at.get(ATTR_NAME_KEY, {}).get("s") or "").strip('"')
+        if name_key:
+            attrs.append({"name": ATTR_NAME_KEY,
+                          "value": _loc(name_key.strip("$"))})
+        for attr_id, key in ((ATTR_SET, "s"), (ATTR_CARD_NUM, "i"),
+                             (ATTR_CARD_NAME, "s")):
+            val = at.get(attr_id, {}).get(key)
+            if val is not None:
+                attrs.append({"name": attr_id, "value": val})
+    return _entity(str(uuid.uuid4()), parent, owner, kind, attrs)
+
+
+def _is_basic_pokemon(guid):
+    at = card_index().get(guid) or {}
+    return (at.get(ATTR_STAGE, {}).get("s") == "Basic"
+            and ATTR_ENERGY_A not in at and ATTR_ENERGY_B not in at)
+
+
+def build_game_state(game_id, local_account, opponent_account, pile):
+    """The whole board as one SerializedGameState body.
+
+    Deck order IS the shuffle - the client renders the array as given - so the
+    server decides it here and no Shuffled message is needed for a static board.
+    """
+    cards = list(pile)
+    random.shuffle(cards)
+
+    playmat_id = str(uuid.uuid4())
+    children = [_entity(str(uuid.uuid4()), playmat_id, local_account,
+                        ENTITY_AREA, [{"name": ATTR_NAME_KEY, "value": _loc(z)}])
+                for z in PLAYMAT_ZONES]
+
+    for owner, hidden in ((local_account, False),
+                          (opponent_account, HIDE_OPPONENT_CARDS)):
+        deck = list(cards)
+        random.shuffle(deck)
+        # An active Pokemon has to be a Basic; without one the board is a
+        # mulligan, which is a rule we are deliberately not implementing yet.
+        active = next((c for c in deck if _is_basic_pokemon(c)), None)
+        if active is not None:
+            deck.remove(active)
+        hand, deck = deck[:HAND_SIZE], deck[HAND_SIZE:]
+        prizes, deck = deck[:PRIZE_COUNT], deck[PRIZE_COUNT:]
+
+        player_id = str(uuid.uuid4())
+        piles = []
+        contents = {ZONE_DECK: deck, ZONE_HAND: hand, ZONE_PRIZES: prizes,
+                    ZONE_ACTIVE: [active] if active else []}
+        for zone in PLAYER_ZONES:
+            pile_id = str(uuid.uuid4())
+            kind = ENTITY_SLOTTED if zone == ZONE_BENCH else ENTITY_AREA
+            kids = [_card_entity(g, pile_id, owner, not hidden)
+                    for g in contents.get(zone, [])]
+            piles.append(_entity(pile_id, player_id, owner, kind,
+                                 [{"name": ATTR_NAME_KEY, "value": _loc(zone)}],
+                                 kids))
+        children.append(_entity(player_id, playmat_id, owner, ENTITY_PLAYER,
+                                [{"name": ATTR_NAME_KEY, "value": _loc(owner)}],
+                                piles))
+
+    playmat = _entity(playmat_id, None, local_account, ENTITY_PLAYMAT,
+                      [{"name": ATTR_NAME_KEY, "value": _loc(ZONE_PLAYMAT)}],
+                      children)
+    return {
+        "gameID": game_id,
+        "playerAccounts": [local_account, opponent_account],
+        "gameOptions": {"Timers": "false"},
+        "entities": playmat,
+    }
+
+
 def build_avatar_archetypes():
     """dwd.Protobuf.cake.item.AllAvatarArchetypesFound: 1=archetypes 2=checksum.
 
@@ -1051,6 +1224,8 @@ class GameSession:
         self.session_id = str(uuid.uuid4())
         self.username = None
         self.account = None
+        self.game_id = None
+        self.game_state = None
         self.authenticated = False
 
     def send(self, name, value=None, request_id=0, flags=0):
@@ -1299,6 +1474,55 @@ class GameSession:
         log.info("[game %s] -> RequestedRandomAvatarDeck (%s, %d items)",
                  self.peer, gender, len(deck["piles"][AVATAR_PILE]))
         self.send("RequestedRandomAvatarDeck", {"deck": deck}, request_id)
+
+    # -- matches ---------------------------------------------------------
+
+    def on_RequestQueueMatch(self, value, request_id):
+        """Always answers. See the `clicked` latch note above build_game_state.
+
+        On any internal failure we send MatchQueueJoinFailed rather than
+        nothing: that raises a dismissable dialog and leaves the button usable,
+        where silence kills it until the scene reloads.
+        """
+        req = value or {}
+        try:
+            deck = req.get("deck") or {}
+            pile = ((deck.get("piles") or {}).get("CakePile")) or []
+            if not pile:
+                raise ValueError("deck has no CakePile")
+            account = (self.account or {}).get("accountID") or ZERO_GUID
+            self.game_id = str(uuid.uuid4())
+            self.game_state = build_game_state(
+                self.game_id, account, AI_ACCOUNT_ID, pile)
+            log.info("[game %s] queue %r, deck %r (%d cards) -> game %s",
+                     self.peer, req.get("queueName"),
+                     deck.get("deckName"), len(pile), self.game_id)
+            self.send("MatchFound", {
+                "gameID": self.game_id,
+                "players": [account, AI_ACCOUNT_ID],
+                # Never GameMode without SubMode: configureOpponent indexes
+                # SubMode unguarded once GameMode is present.
+                "gameOptions": {},
+            }, request_id)
+        except Exception:
+            log.exception("[game %s] cannot start match", self.peer)
+            self.send("MatchQueueJoinFailed",
+                      {"failureType": {"id": "queue.failed"}}, request_id)
+
+    def on_PlayerReady(self, value, request_id):
+        """The Playmat scene is live, so the board can be applied.
+
+        PlayerReady is a hand-built dictionary rather than a DwdJsonMessage, so
+        it is matched on the literal name.
+        """
+        if not self.game_state:
+            log.warning("[game %s] PlayerReady with no game in progress",
+                        self.peer)
+            return
+        entities = self.game_state["entities"]
+        log.info("[game %s] -> SerializedGameState (%d top-level entities)",
+                 self.peer, len(entities["children"]))
+        self.send("SerializedGameState", self.game_state, request_id)
 
     def on_GetNotifications(self, value, request_id):
         self.send("NotificationsRequested", {"notificationList": []}, request_id)
