@@ -740,26 +740,43 @@ def build_avatar_archetypes():
 # How many of each card to grant. 4 is the deck-building limit for most cards.
 CARDS_PER_ARCHETYPE = 4
 
+# Basic Energy is not a card you collect. A deck may hold any number of it, so
+# the deck builder must not be able to run out - and the builder caps by what
+# you OWN, not by the copy rule, so granting four of these capped every deck at
+# four Energy no matter what the rules allowed. A deck is sixty cards, so sixty
+# is as many as any deck could want.
+FREE_ENERGY_SET = "Free_Energy"
+FREE_ENERGY_COPIES = 60
+
 _collection = None
 
 
+def free_energy_guids():
+    """Archetype GUIDs of the freely-granted basic Energy."""
+    return {card.guid for card in card_db()
+            if card.set_code == FREE_ENERGY_SET}
+
+
 def build_collection():
-    """CollectionCount[] granting CARDS_PER_ARCHETYPE of every archetype.
+    """CollectionCount[] granting every archetype.
 
     archetypeID is a TypedID, which serializes as a plain GUID string.
     """
     global _collection
     if _collection is None:
-        _collection = [
-            {
-                "archetypeID": uuid_to_guid_str(a["lo"], a["hi"]),
-                "tradable": CARDS_PER_ARCHETYPE,
+        unlimited = free_energy_guids()
+        _collection = []
+        for a in load_cards():
+            guid = uuid_to_guid_str(a["lo"], a["hi"])
+            _collection.append({
+                "archetypeID": guid,
+                "tradable": (FREE_ENERGY_COPIES if guid in unlimited
+                             else CARDS_PER_ARCHETYPE),
                 "nontradable": 0,
-            }
-            for a in load_cards()
-        ]
-        log.info("built collection: %d archetypes x %d",
-                 len(_collection), CARDS_PER_ARCHETYPE)
+            })
+        log.info("built collection: %d archetypes x %d, %d basic Energy x %d",
+                 len(_collection), CARDS_PER_ARCHETYPE,
+                 len(unlimited), FREE_ENERGY_COPIES)
     return _collection
 
 
@@ -2412,8 +2429,9 @@ class GameSession:
         # NetworkMessageEvent - which kills the read thread and drops the
         # session. The JSON class is the one the client actually consumes.
         counts = build_collection()
-        log.info("[game %s] -> CollectionCountFound (%d entries, %d each)",
-                 self.peer, len(counts), CARDS_PER_ARCHETYPE)
+        log.info("[game %s] -> CollectionCountFound (%d entries, %d each, "
+                 "basic Energy %d)", self.peer, len(counts),
+                 CARDS_PER_ARCHETYPE, FREE_ENERGY_COPIES)
         write_frame(self.sock,
                     msg("CollectionCountFound", {"collectionCountList": counts}),
                     request_id)
