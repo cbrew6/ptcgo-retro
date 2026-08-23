@@ -1746,8 +1746,9 @@ class GameSession:
                 return self.offer_actions()
             action = ai.choose(m.state, player)
             m.state, changes = engine.apply(m.state, action)
-            for name, body in m.messages_for(changes):
-                self.send_game(name, body)
+            # emit_items, not a flat push: the named sequences carry the
+            # choreography, and an Attack sent loose is a number changing.
+            self.emit_items(m.animation_for(changes))
         log.error("[game %s] match did not settle; stopping", self.peer)
 
     def offer_actions(self):
@@ -1839,8 +1840,7 @@ class GameSession:
         # The client only lights up the drop zones - it never moves the card
         # itself - so the placements still have to be animated from here.
         self.emit_sequence("IntroduceInitialPokemon",
-                           [("msg", name, body)
-                            for name, body in self.match.messages_for(changes)])
+                           self.match.animation_for(changes))
         self.advance_match()
 
     def on_SelectionWithTargetsAndActions(self, value, request_id):
@@ -1867,8 +1867,7 @@ class GameSession:
             log.warning("[game %s] illegal action %s: %s",
                         self.peer, type(action).__name__, exc)
             return self.offer_actions()       # re-offer rather than stall
-        for name, body in self.match.messages_for(changes):
-            self.send_game(name, body)
+        self.emit_items(self.match.animation_for(changes))
         self.advance_match()
 
     def finish_match(self):

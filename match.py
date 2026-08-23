@@ -83,6 +83,19 @@ def _loc(text):
     return {"id": text}
 
 
+def _loc_key(text):
+    """A localization key as the client wants it.
+
+    carddata wraps its keys for the exporter - "$$$com.direwolfdigital...$$$",
+    sometimes quoted as well - and the wrapper is not part of the key. Lookups
+    are case-insensitive (the shipped DB is entirely lowercase), so only the
+    decoration has to come off.
+    """
+    if not text:
+        return ""
+    return text.strip().strip('"').strip("$")
+
+
 def _target_entities(selection):
     """Every entity id the client named in its target responses, in order.
 
@@ -103,6 +116,16 @@ def _target_entities(selection):
         elif isinstance(response, str):
             out.append(response)
     return out
+
+
+def _flatten(items):
+    """Depth-first walk of emit_items() form, yielding only the messages."""
+    for kind, a, b in items:
+        if kind == "seq":
+            for inner in _flatten(b):
+                yield inner
+        else:
+            yield ("msg", a, b)
 
 
 def _entity(eid, parent, owner, name, attrs, children=None):
@@ -134,6 +157,10 @@ class Match:
         self.playmat_id = str(uuid.uuid4())
         self.player_entity = {}                 # player index -> entity GUID
         self.known = set()                      # every entity the client has
+        # The attack currently being resolved. The client's hit effect needs
+        # the declaration (which attack, whose) and the damage that landed, and
+        # those arrive as two separate Changes.
+        self._attack = None
 
     # -- identity --------------------------------------------------------
 
@@ -398,30 +425,32 @@ class Match:
         Only the visible consequences are emitted. Shuffles and phase markers
         move no card the client can see, and the deal is already reflected in
         whatever board state was sent, so they produce nothing here.
+
+        Flat pairs, for callers that just want to push messages. Use
+        animation_for() to get the same thing with its named sequences intact.
+        """
+        return [(name, body)
+                for kind, name, body in _flatten(self.animation_for(changes))
+                if kind == "msg"]
+
+    def animation_for(self, changes):
+        """The same translation, but keeping sequence structure.
+
+        Returns emit_items() form: ("msg", name, body) or ("seq", name, items).
+        Sequences are what make the board animate rather than snap - the named
+        ones each add real choreography, and a hit with no Attack sequence
+        around it just changes a number.
         """
         out = []
         for change in changes:
             handler = getattr(self, "_change_" + change.kind, None)
-            if handler is not None:
-                out.extend(handler(change) or [])
+            if handler is None:
+                continue
+            for item in handler(change) or []:
+                # Handlers mostly return plain (name, body); only the few that
+                # need choreography return a full ("seq", ...) item.
+                out.append(item if len(item) == 3 else ("msg",) + tuple(item))
         return out
-
-    def _introduce(self, cid, slot=None):
-        return ("EntityIntroduced", {
-            "gameID": self.game_id,
-            "entityID": self.eid(cid),
-            "entityName": self.card_kind(cid),   # never null, or Introduce throws
-            "attributeMap": self.card_attributes(cid, slot),
-        })
-
-    def _move(self, cid, destination, duration=300):
-        return ("EntityMoved", {
-            "gameID": self.game_id,
-            "entityID": self.eid(cid),
-            "destinationID": destination,
-            "positionInParent": -1,              # negative appends
-            "animDuration": duration,
-        })
 
     def _destination(self, change):
         """The entity a moved card should end up inside."""
@@ -441,8 +470,8 @@ class Match:
         # and face up means "has attributes" - so this is an introduction.
         if change.to_zone in OPEN_ZONES and (
                 change.player == 0 or change.to_zone != ZONE_HAND):
-            msgs.append(self._introduce(change.card))
-        msgs.append(self._move(change.card, destination))
+            msgs.append(self._introduce_msg(change.card))
+        msgs.append(self._move_msg(change.card, destination))
         return msgs
 
     def _change_attach(self, change):
@@ -452,7 +481,69 @@ class Match:
         target = self.entity_of_slot(self.resolve_slot(change.slot))
         if target is None:
             return []
-        return [self._introduce(change.card), self._move(change.card, target)]
+        return [self._introduce_msg(change.card), self._move_msg(change.card, target)]
+
+    def _change_attack(self, change):
+        """Remembered, not sent.
+
+        The client's hit effect needs the damage that actually landed, and that
+        is only known once the damage Change arrives. Holding the declaration
+        here lets _change_damage build one CakeAttackEffect carrying both.
+        """
+        self._attack = dict(change.detail or {})
+        self._attack["slot"] = change.slot
+        return []
+
+    def _attack_effect(self, defender_cid, change):
+        """CakeAttackEffect: the hit FX, the damage number, and the knockout.
+
+        The knockout is decided CLIENT-side, as
+        `damageAmount >= defender.currentHP`, which fixes the order this has to
+        be sent in: before the HP attribute is updated. Send it after, and a
+        60 damage hit on a 100 HP Pokemon compares 60 against the new current
+        of 40 and animates a knockout that did not happen.
+        """
+        detail = change.detail or {}
+        attacker_slot = self.resolve_slot((self._attack or {}).get("slot"))
+        attacker_cid = attacker_slot.stack[-1] if attacker_slot else None
+        attacker = self.card(attacker_cid) if attacker_cid is not None else None
+
+        # The FX prefab is "Basic<Type>/HitFX_<type>_<weight>", picked from the
+        # LAST entry, so an empty list falls back to Colorless rather than
+        # breaking the lookup.
+        damage_type = list(attacker.types) if attacker and attacker.types else []
+
+        if detail.get("weakness"):
+            modification = 1
+        elif detail.get("resistance"):
+            modification = 2
+        elif change.amount > (detail.get("baseDamage") or 0):
+            modification = 3
+        elif change.amount < (detail.get("baseDamage") or 0):
+            modification = 4
+        else:
+            modification = 0
+
+        return ("EffectPlayed", {
+            "gameID": self.game_id,
+            # An effect is carried in the same name/value envelope as any
+            # message, and "name" must be the first key.
+            "effectMessage": {
+                "name": "CakeAttackEffect",
+                "value": {
+                    "damageSource": self.eid(attacker_cid)
+                                    if attacker_cid is not None else None,
+                    "entityID": self.eid(defender_cid),
+                    "weaknessTriggered": bool(detail.get("weakness")),
+                    "resistanceTrigger": bool(detail.get("resistance")),
+                    "damageType": damage_type,
+                    "attackName": _loc_key((self._attack or {}).get("title")),
+                    "damageAmount": int(change.amount or 0),
+                    "damageModification": modification,
+                    "visualType": 0,          # DamagingAction; 1 hides the FX
+                },
+            },
+        })
 
     def _change_damage(self, change):
         """Damage is max minus current on one attribute, not a counter."""
@@ -464,12 +555,21 @@ class Match:
         if not card.max_hp:
             return []
         current = max(0, card.max_hp - slot.damage)
-        return [("AttributeModified", {
+        hp = ("AttributeModified", {
             "gameID": self.game_id,
             "entityID": self.eid(cid),
             "attribute": {"name": ATTR_HP, "value": current,
                           "originalValue": card.max_hp},
-        })]
+        })
+        # Damage from an attack gets the whole hit: FX, a flying damage number
+        # and the knockout animation. Damage from poison, burn or a confused
+        # attacker has no attacker to play it from, so it just moves the bar.
+        detail = change.detail or {}
+        if detail.get("abilityID") and self._attack:
+            effect = self._attack_effect(cid, change)
+            self._attack = None
+            return [("seq", "Attack", [("msg",) + effect, ("msg",) + hp])]
+        return [hp]
 
     def _change_condition(self, change):
         """Special conditions are one array attribute, not a flag per state.
@@ -791,7 +891,7 @@ class Match:
                               "PlayBasic", "Ability", {bench_pile: action})
         for target, action in retreat.items():
             self._offer_group(rows, decode, target, ACTION_RETREAT,
-                              "Retreat", "Ability", {target: action})
+                              "BaseRetreat", "Ability", {target: action})
         for target, action in promote.items():
             self._offer_group(rows, decode, target, ACTION_PROMOTE,
                               "Promote", "Ability", {target: action})
@@ -801,10 +901,11 @@ class Match:
             for action in attacks:
                 if not active_entity:
                     continue
+                attack = self.card(me.active.stack[-1]).attack(action.ability_id)
                 self._offer_group(
                     rows, decode, active_entity, action.ability_id,
-                    action.ability_id, "AbilitySelection",
-                    {opp_active: action})
+                    _loc_key(attack.title) if attack else action.ability_id,
+                    "AbilitySelection", {opp_active: action})
 
         # A promotion is owed, not chosen: the turn cannot continue around it,
         # so the client must not be given an end-turn button to escape with.
@@ -928,7 +1029,7 @@ class Match:
         return ("EntityIntroduced", {
             "gameID": self.game_id,
             "entityID": self.eid(cid),
-            "entityName": self.card_kind(cid),
+            "entityName": self.card_kind(cid),   # never null, or Introduce throws
             "attributeMap": self.card_attributes(cid, slot),
         })
 
@@ -937,6 +1038,9 @@ class Match:
             "gameID": self.game_id,
             "entityID": self.eid(cid),
             "destinationID": destination,
-            "positionInParent": -1,
+            "positionInParent": -1,              # negative appends
+            # Milliseconds, and it does NOT control the card's flight time -
+            # that comes from a CurveMotion prefab chosen by the source and
+            # destination zone. Its only effect is delaying the game-log line.
             "animDuration": duration,
         })
