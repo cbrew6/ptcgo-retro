@@ -46,6 +46,9 @@ import threading
 import time
 import uuid
 
+import engine
+import match
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 CERT = os.path.join(HERE, "certs", "server.crt")
 KEY = os.path.join(HERE, "certs", "server.key")
@@ -505,7 +508,13 @@ HAND_SIZE, PRIZE_COUNT = 7, 6
 # Introduce every card, including the opponent's hand. Face-down is believed to
 # be "attributes": null, but that is inferred and unverified - and a board that
 # renders wrongly is far easier to debug than one that does not render at all.
-HIDE_OPPONENT_CARDS = False
+# --------------------------------------------------------------------------
+# matches
+# --------------------------------------------------------------------------
+#
+# The client renders and reports clicks; it holds no rules at all. engine.py
+# owns the rules and knows nothing about the client, and match.py binds the
+# two. This module only speaks protocol.
 
 # The AI opponent needs an account GUID distinct from the player's;
 # getPlayerEntities throws for any third account, so exactly these two.
@@ -515,6 +524,22 @@ DEFAULT_AI_NAME = "Otis"
 # Legal outside a sequence: the parser's mismatch check short-circuits on
 # Guid.Empty, so the message goes straight to the queue and runs exactly once.
 EMPTY_SEQUENCE_ID = "00000000-0000-0000-0000-000000000000"
+
+# Above this many deal messages we stop animating and just show the result.
+MAX_DEAL_MESSAGES = 200
+
+
+_card_db = None
+
+
+def card_db():
+    """The engine's view of carddata, built once and shared by every match."""
+    global _card_db
+    if _card_db is None:
+        _card_db = engine.CardDB.from_directory(
+            os.path.join(HERE, "carddata"))
+        log.info("engine card database: %d cards", len(_card_db))
+    return _card_db
 
 
 _card_by_guid = None
@@ -1313,9 +1338,8 @@ class GameSession:
         self.username = None
         self.account = None
         self.game_id = None
-        self.game_state = None
-        self.game_plan = None
-        self.board_entities = set()
+        self.match = None
+        self.deck_pile = None
         self.game_started = None
         self.selection_counter = 0
         self.pending_selection = None
@@ -1586,10 +1610,7 @@ class GameSession:
                 raise ValueError("deck has no CakePile")
             account = (self.account or {}).get("accountID") or ZERO_GUID
             self.game_id = str(uuid.uuid4())
-            self.game_state, self.game_plan = build_game_state(
-                self.game_id, account, AI_ACCOUNT_ID, pile)
-            self.board_entities = collect_entity_ids(
-                self.game_state["entities"], set())
+            self.deck_pile = list(pile)
             log.info("[game %s] queue %r, deck %r (%d cards) -> game %s",
                      self.peer, req.get("queueName"),
                      deck.get("deckName"), len(pile), self.game_id)
@@ -1615,50 +1636,63 @@ class GameSession:
                       {"failureType": {"id": "queue.failed"}}, request_id)
 
     def on_PlayerReady(self, value, request_id):
-        """The Playmat scene is live, so the board can be applied.
+        """The Playmat scene is live.
+
+        Only the coin call happens here. The engine game is built from the
+        answer, so choosing to go first genuinely decides the turn order rather
+        than being asked and ignored.
 
         PlayerReady is a hand-built dictionary rather than a DwdJsonMessage, so
         it is matched on the literal name.
         """
-        if not self.game_state:
+        if not self.game_id:
             log.warning("[game %s] PlayerReady with no game in progress",
                         self.peer)
             return
-        entities = self.game_state["entities"]
-        log.info("[game %s] -> SerializedGameState (%d top-level entities)",
-                 self.peer, len(entities["children"]))
+        self.game_started = time.time()
+        self.offer_go_first()
+
+    def start_match(self, player_first):
+        """Build the game, show the board, then animate the opening."""
+        deck = self.deck_pile or []
+        self.match = match.Match(
+            self.game_id, [self.account_id(), AI_ACCOUNT_ID],
+            card_db(), [deck, list(deck)],
+            seed=random.randrange(1 << 30),
+            first_player=0 if player_first else 1)
+        opening = list(self.match.opening) + self.match.auto_setup()
+        # Render first: messages_for resolves destinations through the pile map
+        # that rendering assigns, so measuring the animation before there is a
+        # board silently drops every move.
+        board = self.match.serialized_state(predeal=True)
+        animation = self.match.messages_for(opening)
+
+        # A deck thin on Basics mulligans repeatedly, and replaying every
+        # redraw is hundreds of messages of shuffling that reads as a bug
+        # rather than as dealing. Past a threshold, snap to the dealt board
+        # instead: the game is identical, only the theatre is skipped.
+        animate = len(animation) <= MAX_DEAL_MESSAGES
+        if not animate:
+            log.info("[game %s] %d deal messages (%d mulligans) - "
+                     "showing the dealt board instead", self.peer,
+                     len(animation),
+                     sum(1 for c in opening if c.kind == "mulligan"))
+        if not animate:
+            board = self.match.serialized_state(predeal=False)
+        log.info("[game %s] -> SerializedGameState (%d entities), %s first",
+                 self.peer, len(self.match.known),
+                 "player" if player_first else "opponent")
         self.send("SequenceMessage", {
             "sequenceID": EMPTY_SEQUENCE_ID,
-            "msg": {"name": "SerializedGameState", "value": self.game_state},
-        }, request_id)
-        self.game_started = time.time()
-
-        # Everything starts face down in the decks; deal it out so the game
-        # visibly begins instead of arriving already set up.
-        try:
-            self.deal_board(self.game_plan)
-        except Exception:
-            log.exception("[game %s] deal failed; board stays as dealt",
-                          self.peer)
-
-        # Whose turn it is. Sent bare, NOT wrapped in a SequenceMessage: the
-        # sequence parser throws if a SequenceMessage with a non-empty
-        # sequenceID arrives outside an open sequence, and that exception kills
-        # the client's message-pump coroutine for the rest of the game.
-        #
-        # Safe to send here because its one precondition is already met: it
-        # dereferences a component that configurePlayerEntities attaches, and
-        # that runs only while applying SerializedGameState. A player entity
-        # introduced later would never have it.
-        self.send_game("ActivePlayerSet", {"accountID": self.account_id()})
-
-        # First real round trip. GoFirstChoice is deliberately the one we try
-        # first: its node kind is registered, so it cannot land in the
-        # no-UI-and-no-fallback case that stalls forever; it needs no entity
-        # references, so it cannot fault on an entity lookup; and on a fresh
-        # board the client renders it on the prompt bar, which iterates the
-        # button list rather than indexing [0] and [1].
-        self.offer_go_first()
+            "msg": {"name": "SerializedGameState", "value": board},
+        })
+        if animate:
+            for name, body in animation:
+                self.send_game(name, body)
+        else:
+            # The board already shows the result, so only the turn is left.
+            self.send_game("ActivePlayerSet", {
+                "accountID": self.match.account(self.match.state.to_move)})
 
     # -- selections ------------------------------------------------------
 
@@ -1748,52 +1782,6 @@ class GameSession:
             "animDuration": duration,         # milliseconds
         })
 
-    def deal_board(self, plan):
-        """Animate the opening deal out of the decks.
-
-        Both hands go out as one GroupedMove each: DealInitialHands runs every
-        nested GroupedMove in parallel, which is what made the two hands fan
-        out together. Only the local hand is introduced - the opponent's stays
-        face down, which is simply an entity with no attributes.
-        """
-        known = self.board_entities
-
-        def move(entity_id, destination):
-            # Neither endpoint is null-checked inside a sequence; an unknown id
-            # throws and takes the message pump with it.
-            if entity_id not in known or destination not in known:
-                raise ValueError("move %s -> %s: unknown entity"
-                                 % (entity_id, destination))
-            return self._move(entity_id, destination)
-
-        hands = []
-        for seat in plan["players"]:
-            moves = []
-            for entity_id, guid in seat["hand"]:
-                if seat["revealHand"]:
-                    moves.append(self._introduce(entity_id, guid))
-                moves.append(move(entity_id, seat["piles"][ZONE_HAND]))
-            hands.append(("seq", "GroupedMove", moves))
-        self.emit_sequence("DealInitialHands", hands)
-
-        # Both actives turn face up together.
-        reveal = []
-        for seat in plan["players"]:
-            if "active" not in seat:
-                continue
-            entity_id, guid = seat["active"]
-            reveal.append(self._introduce(entity_id, guid))
-            reveal.append(move(entity_id, seat["piles"][ZONE_ACTIVE]))
-        if reveal:
-            self.emit_sequence("IntroduceInitialPokemon", reveal)
-
-        prizes = []
-        for seat in plan["players"]:
-            moves = [move(e, seat["piles"][ZONE_PRIZES])
-                     for e, _ in seat["prizes"]]
-            prizes.append(("seq", "GroupedMove", moves))
-        self.emit_sequence("DealInitialPrizeCards", prizes)
-
     def offer_go_first(self):
         self.selection_counter += 1
         self.pending_selection = "GoFirst"
@@ -1858,9 +1846,7 @@ class GameSession:
         # Drop the board so the next match is not refused: applying a second
         # SerializedGameState while one is loaded throws.
         self.game_id = None
-        self.game_state = None
-        self.game_plan = None
-        self.board_entities = set()
+        self.match = None
         self.pending_selection = None
 
     def on_ResignGame(self, value, request_id):
@@ -1889,10 +1875,7 @@ class GameSession:
         if choice == -1:                      # cancelled; re-offer rather than
             self.offer_go_first()             # leave the client with no prompt
             return
-        first = self.account_id() if choice == 0 else AI_ACCOUNT_ID
-        log.info("[game %s] %s goes first", self.peer,
-                 "player" if choice == 0 else "opponent")
-        self.send_game("ActivePlayerSet", {"accountID": first})
+        self.start_match(player_first=(choice == 0))
 
     def on_GetNotifications(self, value, request_id):
         self.send("NotificationsRequested", {"notificationList": []}, request_id)
