@@ -55,7 +55,13 @@ LOOSE_ART = os.path.join(
     "Pokemon Trading Card Game Online_Data",
     "LooseArt",
 )
-ZIP_DIR = r"C:\Users\cbrew\Downloads\PTCGO"
+# The sprite-rip archives. They have moved once already (Downloads -> Documents),
+# so the first existing candidate wins rather than one hard-coded path.
+ZIP_DIRS = (
+    r"C:\Users\cbrew\Documents\PTCGO",
+    r"C:\Users\cbrew\Downloads\PTCGO",
+)
+ZIP_DIR = next((d for d in ZIP_DIRS if os.path.isdir(d)), ZIP_DIRS[0])
 
 # The 50 sets the rip covers and this run owns. Everything else in LooseArt -
 # BW2, BW6, XY6, XY9, the energy sets, AvatarItems, NoSet, RewardItems - belongs
