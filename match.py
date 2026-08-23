@@ -73,6 +73,7 @@ ACTION_SETUP_ACTIVE = "1e7c0b00-0000-4000-8000-000000000006"
 ACTION_SETUP_BENCH = "1e7c0b00-0000-4000-8000-000000000007"
 ACTION_TRAINER = "1e7c0b00-0000-4000-8000-000000000008"
 ACTION_TOOL = "1e7c0b00-0000-4000-8000-000000000009"
+ACTION_END_TURN = "1e7c0b00-0000-4000-8000-00000000000a"
 
 # The prompts the original server used, recovered from the localization DB -
 # it still carries the server's own com.direwolfdigital.cake.rules.* namespace,
@@ -1194,8 +1195,20 @@ class Match:
                     _loc_key(printed.title) if printed else ability_id,
                     "AbilitySelection", {target: action})
 
+        # Ending the turn, as a row rather than a button.
+        #
+        # Attacking ends your turn in this game, so "end early" only matters
+        # when the Active cannot attack - and when it cannot, the Active has no
+        # AbilitySelection rows, which is exactly when an "Ability" row can sit
+        # on it without mixing selection types on one entity. That makes the
+        # Active the one safe place to hang it.
+        active_entity = self.entity_of_slot(me.active) if me.active else None
+        if active_entity and not (attacks and opp_active):
+            self._offer_group(rows, decode, active_entity, ACTION_END_TURN,
+                              "EndTurn", "Ability",
+                              {active_entity: engine.Pass(player)})
+
         if opp_active:
-            active_entity = self.entity_of_slot(me.active) if me.active else None
             for action in attacks:
                 if not active_entity:
                     continue

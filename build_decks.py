@@ -72,21 +72,36 @@ def load_decks():
 
 
 def basic_energy(db):
-    """One basic Energy card per type it provides, preferring modern prints."""
+    """One basic Energy card per type, from the Free_Energy set.
+
+    The set matters more than the card. A deck may hold any number of
+    Free_Energy prints because the collection grants them without limit, but a
+    set-printed basic Energy - BW1 Fighting Energy, say - is an ordinary card
+    capped at four copies. Building a deck with 21 of those produces something
+    that is 60 cards, has Basics, and is illegal in every format, which is
+    exactly what the generated decks were.
+    """
     out = {}
     for card in db:
-        if not card.is_basic_energy or not card.energy_options:
+        if card.set_code != FREE_ENERGY or not card.energy_options:
             continue
         types = {t for option in card.energy_options for t in option}
         if len(types) != 1:
             continue                       # rainbow/special, not a basic
-        kind = next(iter(types))
-        # Later sets print the same Energy again; any is fine, but pinning the
-        # choice keeps generated decks reproducible run to run.
-        best = out.get(kind)
-        if best is None or (card.set_code or "") < (best.set_code or ""):
-            out[kind] = card
+        out[next(iter(types))] = card
     return out
+
+
+def illegal_counts(db, pile):
+    """Cards appearing more than four times that are not free Energy."""
+    bad = []
+    for guid, n in collections.Counter(pile).items():
+        if n <= MAX_COPIES:
+            continue
+        card = db.get(guid)
+        if card is None or card.set_code != FREE_ENERGY:
+            bad.append((card.name if card else guid, n))
+    return bad
 
 
 def evolution_lines(db):
@@ -249,6 +264,26 @@ def build_pile(lines, energy_card, trainers=()):
     return pile
 
 
+def deck_is_legal(db, pile):
+    """(ok, reason). What the client's own validator will decide.
+
+    Checked here rather than assumed, because the server answers every
+    ValidateDecks request with "valid" - the client computes legality itself,
+    so a deck this script writes can be rejected in the deck manager with no
+    trace on the server at all.
+    """
+    if len(pile) != DECK_SIZE:
+        return False, "%d cards, not %d" % (len(pile), DECK_SIZE)
+    over = illegal_counts(db, pile)
+    if over:
+        return False, "more than %d copies of %s" % (
+            MAX_COPIES, ", ".join("%s (%d)" % (n, c) for n, c in over))
+    if not any(db.get(g) is not None and db.get(g).is_basic_pokemon
+               for g in pile):
+        return False, "no Basic Pokemon to start with"
+    return True, ""
+
+
 def deck_is_playable(db, pile, rules, games=6):
     """Play it out against itself. Returns (ok, reason).
 
@@ -362,6 +397,10 @@ def main(argv=None):
         pile = build_pile(lines, energies[colour], trainers)
         if len(pile) != DECK_SIZE:
             print("skipping %r - built %d cards" % (name, len(pile)))
+            continue
+        ok, reason = deck_is_legal(db, pile)
+        if not ok:
+            print("skipping %r - illegal: %s" % (name, reason))
             continue
         ok, reason = deck_is_playable(db, pile, rules)
         if not ok:

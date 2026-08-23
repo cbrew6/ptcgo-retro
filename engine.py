@@ -400,6 +400,28 @@ def _strings(attrs, ident) -> tuple:
     return ()
 
 
+# The set that holds the freely-granted basic Energy. Its nine archetypes are
+# exactly the nine basic Energy cards, and they are the ones a deck may hold
+# more than four of.
+FREE_ENERGY_SET = "Free_Energy"
+
+
+def _is_basic_energy(attrs):
+    """Whether this is a basic Energy card.
+
+    Attribute 200520 says so for set-printed Energy, but the Free_Energy
+    archetypes omit it - even though their own name key reads
+    "...FreeEnergy.energy.BasicFairyEnergy.Name" and that set contains nothing
+    else. Trusting the attribute alone made every effect that looks for basic
+    Energy - Energy Retrieval, Professor's Letter - blind to the exact prints
+    a deck is actually built from.
+    """
+    if _bool(attrs, ATTR_IS_BASIC_ENERGY):
+        return True
+    return (_str(attrs, ATTR_SET) == FREE_ENERGY_SET
+            and "Energy" in _strings(attrs, ATTR_CARD_TYPES))
+
+
 def _card_image(value):
     """ATTR_ASSET_NAME, but only when it names a card face.
 
@@ -536,7 +558,7 @@ class Card:
             retreat_cost=_int(at, ATTR_RETREAT_COST),
             abilities=tuple(abilities),
             energy_options=energy_options,
-            is_basic_energy=_bool(at, ATTR_IS_BASIC_ENERGY),
+            is_basic_energy=_is_basic_energy(at),
             evolves_from=_str(at, ATTR_EVOLVES_FROM),
             family_id=at.get(ATTR_FAMILY_ID, {}).get("i"),
             set_code=_str(at, ATTR_SET),
