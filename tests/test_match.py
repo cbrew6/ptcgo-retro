@@ -16,6 +16,7 @@ Run: python -m unittest discover -s tests
 """
 
 import json
+import re
 import os
 import sys
 import unittest
@@ -366,6 +367,41 @@ class OfferTests(unittest.TestCase):
             for info in row["targetInfoLst"]:
                 self.assertIsInstance(info["validTargets"], list)
                 self.assertTrue(info["validTargets"])
+
+
+class LocalizationKeyTests(unittest.TestCase):
+    """Every key we send must exist in the client's shipped string DB.
+
+    A missing key is not an error client-side - L.LT returns the key itself -
+    so the UI simply displays "playmat.prompt.yourturn" and looks broken. That
+    exact string is what the player saw on screen, and it was a key this server
+    invented. The keys are checked here rather than trusted because inventing
+    one is silent, easy, and indistinguishable from a hang.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import server
+        cls.keys = {e["key"] for e in server.load_localization()}
+        if not cls.keys:
+            raise unittest.SkipTest("no localization DB on this machine")
+
+    def _sent_keys(self):
+        """Every playmat.* literal in the two modules that send prompts."""
+        here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        found = set()
+        for name in ("match.py", "server.py"):
+            with open(os.path.join(here, name), encoding="utf-8") as fh:
+                found.update(re.findall(r'"(playmat\.[a-z0-9_.]+)"', fh.read()))
+        return found
+
+    def test_every_prompt_key_we_send_really_exists(self):
+        sent = self._sent_keys()
+        self.assertTrue(sent, "found no prompt keys to check - regex stale?")
+        missing = sorted(k for k in sent if k not in self.keys)
+        self.assertFalse(
+            missing,
+            "these render as raw text in the UI: %s" % ", ".join(missing))
 
 
 class SerializedStateTests(unittest.TestCase):

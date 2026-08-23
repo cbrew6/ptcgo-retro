@@ -68,6 +68,8 @@ ACTION_PLAY_BASIC = "1e7c0b00-0000-4000-8000-000000000002"
 ACTION_RETREAT = "1e7c0b00-0000-4000-8000-000000000003"
 ACTION_EVOLVE = "1e7c0b00-0000-4000-8000-000000000004"
 ACTION_PROMOTE = "1e7c0b00-0000-4000-8000-000000000005"
+ACTION_SETUP_ACTIVE = "1e7c0b00-0000-4000-8000-000000000006"
+ACTION_SETUP_BENCH = "1e7c0b00-0000-4000-8000-000000000007"
 
 
 def _loc(text):
@@ -569,6 +571,54 @@ class Match:
             [self._target_info(targets, prompt, selected=len(targets) > 1)]))
         decode[(entity, action_id)] = dict(by_target)
 
+    def _setup_offer(self, player, counter):
+        """Let the player choose their own Active and Bench.
+
+        The real game has a dedicated setup screen driven by
+        SelectionWithTargetsRequired carrying ActivePokemonTargetInformation
+        and InitialBenchedTargetInformation. This is not that. It presents the
+        same two decisions through the ordinary action offer, which is a path
+        that is already exercised and tested - the server used to place both
+        Pokemon itself, so the player never chose at all.
+
+        The engine makes the phase easy to render because it only ever offers
+        one shape at a time: SetupPlaceActive alone while the Active is empty,
+        then SetupPlaceBench alongside SetupDone. So the Active step is forced
+        and the bench step is not, which puts "I am finished benching" on the
+        same Next button that ends a turn - a null selection, decoded by the
+        server as SetupDone.
+        """
+        rows, decode = [], {}
+        active_pile = self.pile.get((player, ZONE_ACTIVE))
+        bench_pile = self.pile.get((player, ZONE_BENCH))
+        placing_active = False
+
+        for action in engine.legal_actions(self.state, player):
+            if isinstance(action, engine.SetupPlaceActive):
+                placing_active = True
+                self._offer_group(rows, decode, self.eid(action.card),
+                                  ACTION_SETUP_ACTIVE, "PlayBasic", "Ability",
+                                  {active_pile: action})
+            elif isinstance(action, engine.SetupPlaceBench):
+                self._offer_group(rows, decode, self.eid(action.card),
+                                  ACTION_SETUP_BENCH, "PlayBasic", "Ability",
+                                  {bench_pile: action})
+        return {
+            "counter": counter,
+            "prompt": ("playmat.prompt.choosebasicpokemon" if placing_active
+                       else "playmat.prompt.choosepokemonforbench"),
+            "offerLength": 0,
+            "startingTimestamp": 0,
+            # Choosing an Active is compulsory - the game cannot start without
+            # one - so there is no Next button to skip it with. Benching is
+            # optional, so there is.
+            "forced": placing_active,
+            "targetType": "",
+            "optimalPlayMap": [],
+            "selectionParams": {},
+            "targetMap": rows,
+        }, decode
+
     def build_offer(self, player, counter):
         """A SelectionWithTargetsAndActionsRequired body, plus a decode map.
 
@@ -600,6 +650,9 @@ class Match:
         if self.state.players[opponent].active is not None:
             opp_active = self.entity_of_slot(self.state.players[opponent].active)
         bench_pile = self.pile.get((player, ZONE_BENCH))
+
+        if self.state.phase == engine.PHASE_SETUP:
+            return self._setup_offer(player, counter)
 
         # Gather first, emit second: several Actions can collapse into one row
         # that differs only by target, and that is only visible once they are
@@ -634,7 +687,7 @@ class Match:
         for card, by_target in evolve.items():
             self._offer_group(rows, decode, self.eid(card), ACTION_EVOLVE,
                               "Evolve", "Ability", by_target,
-                              "playmat.prompt.chooseaction")
+                              "playmat.prompt.selectapokemontoevolve")
         for card, action in play.items():
             # Benching needs no target, but a row with no target at all has no
             # click to resolve, so the bench itself stands in as a forced one.
@@ -662,7 +715,7 @@ class Match:
         forced = me.active is None and bool(promote)
         return {
             "counter": counter,
-            "prompt": ("playmat.prompt.selectnewactivepokemon" if forced
+            "prompt": ("playmat.prompt.dragbenchtoactive" if forced
                        else "playmat.prompt.chooseaction"),
             "offerLength": 0,                 # no client-side auto-pass
             "startingTimestamp": 0,

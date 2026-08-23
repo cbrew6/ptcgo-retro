@@ -1671,7 +1671,12 @@ class GameSession:
             card_db(), [deck, list(deck)],
             seed=random.randrange(1 << 30),
             first_player=0 if player_first else 1)
-        self.match.auto_setup()
+        # Setup is no longer done for the player. The board arrives dealt but
+        # unplaced, and advance_match then offers them their Active and Bench
+        # like any other decision - which is what "I don't have an option to
+        # select a basic to start" was asking for. The opponent still places
+        # itself, through the AI, in advance_match.
+        #
         # The board is sent with every card still in its deck, face down, and
         # the deal is then animated from the FINAL state rather than replayed
         # from the engine's change log - that log contains every mulligan
@@ -1767,7 +1772,8 @@ class GameSession:
         both.
         """
         state = self.match.state
-        if state.players[0].active is None:
+        if state.players[0].active is None \
+                and state.phase != engine.PHASE_SETUP:
             owed = [a for a in engine.legal_actions(state, 0)
                     if isinstance(a, engine.Promote)]
             if not owed:
@@ -1789,7 +1795,13 @@ class GameSession:
         action = self.match.decode_reply(req.get("selection"),
                                          self.action_decode or {})
         if action is None:
-            action = engine.Pass(0)           # null selection ends the turn
+            # A null selection is the Next button. During a turn that means
+            # "end it"; during setup it means "I have benched enough", and
+            # Pass is not legal there - sending it would be refused and the
+            # player would be re-offered the same choice for ever.
+            action = (engine.SetupDone(0)
+                      if self.match.state.phase == engine.PHASE_SETUP
+                      else engine.Pass(0))
         log.info("[game %s] <- player action %s", self.peer,
                  type(action).__name__)
         try:
