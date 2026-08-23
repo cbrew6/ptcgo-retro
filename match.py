@@ -250,7 +250,19 @@ class Match:
         return None, None
 
     def entity_of_slot(self, slot):
-        return self.eid(slot.stack[-1]) if slot.stack else None
+        return self.eid(slot.stack[-1]) if slot and slot.stack else None
+
+    def resolve_slot(self, slot_ref):
+        """A Change carries a slot id, not the Slot itself."""
+        if slot_ref is None:
+            return None
+        if hasattr(slot_ref, "stack"):
+            return slot_ref
+        try:
+            _player, slot, _active = self.state.slot(slot_ref)
+        except Exception:
+            return None
+        return slot
 
     # -- setup -----------------------------------------------------------
 
@@ -343,20 +355,21 @@ class Match:
         """Energy becomes a child of the Pokemon; there is no energy attribute."""
         if change.card is None or change.slot is None:
             return []
-        target = self.entity_of_slot(change.slot)
+        target = self.entity_of_slot(self.resolve_slot(change.slot))
         if target is None:
             return []
         return [self._introduce(change.card), self._move(change.card, target)]
 
     def _change_damage(self, change):
         """Damage is max minus current on one attribute, not a counter."""
-        if change.slot is None or not change.slot.stack:
+        slot = self.resolve_slot(change.slot)
+        if slot is None or not slot.stack:
             return []
-        cid = change.slot.stack[-1]
+        cid = slot.stack[-1]
         card = self.card(cid)
         if not card.max_hp:
             return []
-        current = max(0, card.max_hp - change.slot.damage)
+        current = max(0, card.max_hp - slot.damage)
         return [("AttributeModified", {
             "gameID": self.game_id,
             "entityID": self.eid(cid),
@@ -375,3 +388,108 @@ class Match:
             "gameID": self.game_id,
             "accountID": self.account(change.player),
         })]
+
+    # -- offering actions -------------------------------------------------
+    #
+    # The client cannot know what is legal - it has no rules - so the server
+    # sends a menu and the client renders it. Each row is one (entity, action)
+    # pair; the client regroups them by entity.
+    #
+    # selectionType decides the UI and is the most load-bearing string here.
+    # "Ability" auto-advances to target selection and never looks the action id
+    # up on the card, which is what makes it right for moves that are not a
+    # printed ability. "AbilitySelection" draws a button per ability and only
+    # draws it if the action id really appears in that card's ability list, so
+    # attacks must carry their true abilityID. A single entity whose rows mix
+    # the two lands in a fallback with no UI, so rows are grouped per entity
+    # and kept consistent.
+
+    def _target_info(self, valid, prompt, selected=True, minimum=1):
+        return {
+            "name": "EntityListTargetInformation",
+            "selected": selected,
+            "accountID": None,
+            "targetPrompt": prompt,
+            "validTargets": list(valid),      # never null: .Length is read
+            "numberToSelect": 1,
+            "minimumToSelect": minimum,
+            "forced": True,
+            "hintTargetMap": {},              # never null: iterated unguarded
+        }
+
+    def _action_row(self, entity_id, action_id, description, selection_type,
+                    targets):
+        return {
+            "entityID": entity_id,
+            "selectableAction": {
+                "gameID": self.game_id,
+                "actionID": action_id,
+                "description": description,
+                "selectionType": selection_type,
+                "actionHint": "Optimal",      # never "Unselectable": it throws
+            },
+            "targetInfoLst": targets,
+        }
+
+    def own_pokemon_entities(self, player):
+        return [self.entity_of_slot(slot)
+                for slot, _pile, _active in self.slot_entities(player)
+                if slot.stack]
+
+    def build_offer(self, player, counter):
+        """A SelectionWithTargetsAndActionsRequired body, plus a decode map.
+
+        The map is how the reply is turned back into an engine Action: the
+        client echoes (entityID, actionID), which is exactly what keys it.
+        """
+        rows, decode = [], {}
+        opponent = 1 - player
+        opp_active = None
+        if self.state.players[opponent].active is not None:
+            opp_active = self.entity_of_slot(self.state.players[opponent].active)
+        mine = [e for e in self.own_pokemon_entities(player) if e]
+
+        for action in engine.legal_actions(self.state, player):
+            if isinstance(action, engine.AttachEnergy):
+                entity = self.eid(action.card)
+                rows.append(self._action_row(
+                    entity, ACTION_ATTACH, "PlayEnergy", "Ability",
+                    [self._target_info(mine, "playmat.prompt.attachenergy")]))
+                decode[(entity, ACTION_ATTACH)] = ("attach", action)
+            elif isinstance(action, engine.Attack) and opp_active:
+                slot = self.state.players[player].active
+                entity = self.entity_of_slot(slot)
+                rows.append(self._action_row(
+                    entity, action.ability_id, action.ability_id,
+                    "AbilitySelection",
+                    # A single forced target needs no player choice, so it is
+                    # sent unselected: the click resolves immediately.
+                    [self._target_info([opp_active], None, selected=False)]))
+                decode[(entity, action.ability_id)] = ("attack", action)
+        return {
+            "counter": counter,
+            "prompt": "playmat.prompt.yourturn",
+            "offerLength": 0,                 # no client-side auto-pass
+            "startingTimestamp": 0,
+            "forced": False,                  # so the Next button can end turn
+            "targetType": "",                 # never null: looked up as a key
+            "optimalPlayMap": [],             # never null: iterated unguarded
+            "selectionParams": {},
+            "targetMap": rows,
+        }, decode
+
+    @staticmethod
+    def decode_reply(selection, decode):
+        """(entityID, actionID) from the client's echo -> the engine Action.
+
+        A null selection is the player passing, which is also how the Next
+        button ends a turn.
+        """
+        if not selection:
+            return None
+        try:
+            entity_id, action_id = selection[0][0], selection[0][1]
+        except (IndexError, TypeError, KeyError):
+            return None
+        found = decode.get((entity_id, action_id))
+        return found[1] if found else None

@@ -46,6 +46,7 @@ import threading
 import time
 import uuid
 
+import ai
 import engine
 import match
 
@@ -1340,6 +1341,7 @@ class GameSession:
         self.game_id = None
         self.match = None
         self.deck_pile = None
+        self.action_decode = None
         self.game_started = None
         self.selection_counter = 0
         self.pending_selection = None
@@ -1693,6 +1695,76 @@ class GameSession:
             # The board already shows the result, so only the turn is left.
             self.send_game("ActivePlayerSet", {
                 "accountID": self.match.account(self.match.state.to_move)})
+        self.advance_match()
+
+    def advance_match(self):
+        """Play out the opponent until the player has a decision to make.
+
+        The client holds no rules, so every legal move has to be offered by the
+        server. Between offers the AI takes its whole turn here and the
+        resulting Changes are streamed out as animations.
+        """
+        m = self.match
+        for _ in range(500):                  # bounded: never spin on a bug
+            if m is None or m.state.over:
+                return self.finish_match()
+            acting = engine.players_to_act(m.state)
+            if not acting:
+                return
+            player = acting[0]
+            if player == 0:
+                return self.offer_actions()
+            action = ai.choose(m.state, player)
+            m.state, changes = engine.apply(m.state, action)
+            for name, body in m.messages_for(changes):
+                self.send_game(name, body)
+        log.error("[game %s] match did not settle; stopping", self.peer)
+
+    def offer_actions(self):
+        """Send the player their legal moves.
+
+        Never offered to a player with an empty Active slot: the client's
+        end-turn check dereferences the active's first child unguarded.
+        """
+        if self.match.state.players[0].active is None:
+            return
+        self.selection_counter += 1
+        body, decode = self.match.build_offer(0, self.selection_counter)
+        self.action_decode = decode
+        self.pending_selection = "Actions"
+        log.info("[game %s] -> offer (%d actions, counter %d)",
+                 self.peer, len(body["targetMap"]), self.selection_counter)
+        self.send_game("SelectionWithTargetsAndActionsRequired", body)
+
+    def on_SelectionWithTargetsAndActions(self, value, request_id):
+        """The player chose a move, or passed with a null selection."""
+        req = value or {}
+        if self.match is None:
+            return
+        self.pending_selection = None
+        action = self.match.decode_reply(req.get("selection"),
+                                         self.action_decode or {})
+        if action is None:
+            action = engine.Pass(0)           # null selection ends the turn
+        log.info("[game %s] <- player action %s", self.peer,
+                 type(action).__name__)
+        try:
+            self.match.state, changes = engine.apply(self.match.state, action)
+        except engine.IllegalAction as exc:
+            log.warning("[game %s] illegal action %s: %s",
+                        self.peer, type(action).__name__, exc)
+            return self.offer_actions()       # re-offer rather than stall
+        for name, body in self.match.messages_for(changes):
+            self.send_game(name, body)
+        self.advance_match()
+
+    def finish_match(self):
+        """The engine says the game is over; tell the client who won."""
+        state = self.match.state
+        won = state.winner == 0
+        self.end_game(self.match.account(0 if won else 1),
+                      self.match.account(1 if won else 0),
+                      "OpponentScore", player_won=won)
 
     # -- selections ------------------------------------------------------
 
