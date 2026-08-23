@@ -45,13 +45,22 @@ SHADOWED = os.path.join(os.path.dirname(HERE), "_looseart_shadowed_foils")
 # looking like a namespace of their own, so their LooseArt blanks were never
 # recognised as shadowing and every SM foil stayed flat.
 VERSION_RE = re.compile(r"_\d+$")
-RELEASE_RE = re.compile(r"_CRR?[A-Za-z0-9]*$")
+
+# A mask bundle's namespace is deterministic: everything up to and including
+# the _wp_<kind>[_Foil<n>] part. What follows is a content-release token, and
+# those come in at least two shapes - _CR105, _CRR65p1, _CRSM4, and bare set
+# codes like _SM3 - so matching the release is guesswork, while matching the
+# namespace is not. Getting this wrong is silent: the blank simply keeps
+# winning and the card renders flat, which is how the whole SM era stayed
+# unfoiled through two rounds of "fixing" it.
+MASK_RE = re.compile(r"^(.+?_wp_[a-z]+(?:_Foil\d*)?)")
 
 
 def namespace_of(bundle):
     name = bundle[6:] if bundle.startswith("en_US_") else bundle
     name = VERSION_RE.sub("", name)
-    return RELEASE_RE.sub("", name)
+    m = MASK_RE.match(name)
+    return m.group(1) if m else name
 
 
 def bundle_namespaces():
