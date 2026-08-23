@@ -412,6 +412,31 @@ class ResourceTests(unittest.TestCase):
 
 class SetupTests(unittest.TestCase):
 
+    def test_takes_every_mulligan_card_it_is_offered(self):
+        """Compensation is offered one mulligan at a time, so one yes is not
+        enough - the AI has to answer each question separately or it stalls on
+        the second. It always says yes: a player this simple has no
+        deck-thinning plan a smaller hand could serve.
+        """
+        deck0 = _deck(["Bruiser", "Filler"])
+        # Player 1's first Basic sits at card 15, so with no shuffling it
+        # mulligans exactly twice and player 0 is offered two cards.
+        deck1 = ([GUID["PlainEnergy"]] * 14 + [GUID["Dummy"]]
+                 + [GUID["PlainEnergy"]] * 45)
+        state, _ = engine.new_game(DB, [deck0, deck1],
+                                   rng=_NoShuffle(), first_player=0)
+        self.assertEqual(state.players[0].owed_draws, 2)
+
+        for _ in range(2):
+            action = ai.choose(state, 0)
+            self.assertEqual(action, engine.DrawMulligans(0, True))
+            state, _ = engine.apply(state, action)
+
+        self.assertEqual(state.players[0].owed_draws, 0)
+        self.assertEqual(len(state.players[0].hand), 9)
+        # Both answered, so the ladder falls through to placing a Pokemon.
+        self.assertIsInstance(ai.choose(state, 0), engine.SetupPlaceActive)
+
     def test_leads_with_an_attacker_rather_than_a_filler(self):
         state, _ = engine.new_game(
             DB, [_deck(["Filler", "Bruiser", "Wall"]), _deck(["Dummy"])],

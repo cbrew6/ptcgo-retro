@@ -438,11 +438,19 @@ class SetupTests(unittest.TestCase):
         self.assertEqual(len(state.players[0].hand), 7)
         self.assertEqual(len(state.players[1].hand), 7)
         self.assertEqual(state.players[1].owed_draws, 1)
+        self.assertEqual(state.players[1].owed_draws_total, 1)
+        self.assertEqual(state.players[1].mulligan_draw_number, 1)
         self.assertEqual(engine.players_to_act(state), [1])
+        # Yes or no, never a list of counts.
+        self.assertEqual(engine.legal_actions(state, 1),
+                         [engine.DrawMulligans(1, True),
+                          engine.DrawMulligans(1, False)])
 
-        state, _ = engine.apply(state, engine.DrawMulligans(1, 1))
+        state, _ = engine.apply(state, engine.DrawMulligans(1, True))
         self.assertEqual(len(state.players[1].hand), 8)
         self.assertEqual(state.players[1].owed_draws, 0)
+        self.assertEqual(state.players[1].mulligan_draw_number, 0)
+        self.assertEqual(engine.players_to_act(state), [0])
 
     def test_mulligan_compensation_may_be_declined(self):
         """The rule is permissive, and a small hand is sometimes better."""
@@ -451,11 +459,82 @@ class SetupTests(unittest.TestCase):
         state, _ = engine.new_game(DB, [deck0, deck1],
                                    rng=ScriptedRandom(), first_player=0)
         self.assertEqual(state.players[1].owed_draws, 1)
-        state, changes = engine.apply(state, engine.DrawMulligans(1, 0))
+        state, changes = engine.apply(state, engine.DrawMulligans(1, False))
         self.assertEqual(len(state.players[1].hand), 7)
         # Answered, not deferred: leaving it owed would re-ask for ever.
         self.assertEqual(state.players[1].owed_draws, 0)
         self.assertNotIn(1, [p.index for p in state.players if p.owed_draws])
+        # Nothing moved, so nothing is reported - which is why the random-game
+        # invariant below has to allow this one action to be silent.
+        self.assertEqual(changes, [])
+
+    def test_each_mulligan_is_offered_separately(self):
+        """Three mulligans is three yes/no questions, numbered, not one total.
+
+        The original server asked once per mulligan - its prompt survives in
+        the client's shipped localization DB as "Would you like to draw a card
+        for mulligan {0}?" - so the state has to say which one is being asked
+        about and not merely how many are left.
+        """
+        deck0 = self.deck(("FireEnergy", 21), ("Pipsqueak", 1), ("FireEnergy", 8))
+        deck1 = self.deck(("Pipsqueak", 2), ("FireEnergy", 28))
+        state, _ = engine.new_game(DB, [deck0, deck1],
+                                   rng=ScriptedRandom(), first_player=0)
+        self.assertEqual(state.players[0].mulligans, 3)
+        self.assertEqual(state.players[1].owed_draws, 3)
+        self.assertEqual(state.players[1].owed_draws_total, 3)
+
+        for number in (1, 2, 3):
+            self.assertEqual(engine.players_to_act(state), [1])
+            self.assertEqual(state.players[1].mulligan_draw_number, number)
+            self.assertEqual(len(state.players[1].hand), 6 + number)
+            state, _ = engine.apply(state, engine.DrawMulligans(1, True))
+
+        self.assertEqual(len(state.players[1].hand), 10)
+        self.assertEqual(state.players[1].owed_draws, 0)
+        self.assertEqual(state.players[1].mulligan_draw_number, 0)
+        self.assertEqual(engine.players_to_act(state), [0])
+        with self.assertRaises(engine.IllegalAction):
+            engine.apply(state, engine.DrawMulligans(1, True))
+
+    def test_each_mulligan_offer_is_independently_declinable(self):
+        deck0 = self.deck(("FireEnergy", 21), ("Pipsqueak", 1), ("FireEnergy", 8))
+        deck1 = self.deck(("Pipsqueak", 2), ("FireEnergy", 28))
+        state, _ = engine.new_game(DB, [deck0, deck1],
+                                   rng=ScriptedRandom(), first_player=0)
+        self.assertEqual(state.players[1].owed_draws, 3)
+        # The answers need not agree with one another; each spends exactly one
+        # offer whichever way it goes.
+        for take in (True, False, True):
+            state, _ = engine.apply(state, engine.DrawMulligans(1, take))
+        self.assertEqual(len(state.players[1].hand), 9)
+        self.assertEqual(state.players[1].owed_draws, 0)
+        self.assertEqual(engine.players_to_act(state), [0])
+
+    def test_many_mulligans_stay_one_question_each(self):
+        """Fifteen mulligans is fifteen answers, not a sixteen-button dialog.
+
+        A 113-card deck is not a legal deck, but new_game does not police deck
+        construction and stacking the misses is the only way to reach the
+        counts a genuinely bad shuffle produced.
+        """
+        deck0 = self.deck(("FireEnergy", 7 * 15), ("Pipsqueak", 1),
+                          ("FireEnergy", 7))
+        deck1 = self.deck(("Pipsqueak", 2), ("FireEnergy", 28))
+        state, _ = engine.new_game(DB, [deck0, deck1],
+                                   rng=ScriptedRandom(), first_player=0)
+        self.assertEqual(state.players[0].mulligans, 15)
+        self.assertEqual(state.players[1].owed_draws_total, 15)
+
+        asked = []
+        while state.players[1].owed_draws:
+            self.assertEqual(len(engine.legal_actions(state, 1)), 2)
+            asked.append(state.players[1].mulligan_draw_number)
+            state, _ = engine.apply(state, engine.DrawMulligans(1, False))
+
+        self.assertEqual(asked, list(range(1, 16)))
+        self.assertEqual(len(state.players[1].hand), 7)
+        self.assertEqual(engine.players_to_act(state), [0])
 
     def test_compensation_can_be_taken_automatically_by_rule(self):
         rules = engine.Rules(optional_mulligan_draw=False)
@@ -465,6 +544,18 @@ class SetupTests(unittest.TestCase):
                                    rng=ScriptedRandom(), first_player=0)
         self.assertEqual(len(state.players[1].hand), 8)
         self.assertEqual(state.players[1].owed_draws, 0)
+        self.assertEqual(state.players[1].owed_draws_total, 0)
+        # Nothing is asked, so setup starts immediately.
+        self.assertEqual(engine.players_to_act(state), [0])
+
+        # Several mulligans is where a per-mulligan question would otherwise
+        # be asked several times; under this rule it is asked none.
+        many = self.deck(("FireEnergy", 21), ("Pipsqueak", 1), ("FireEnergy", 8))
+        state, _ = engine.new_game(DB, [many, list(deck1)], rules=rules,
+                                   rng=ScriptedRandom(), first_player=0)
+        self.assertEqual(state.players[0].mulligans, 3)
+        self.assertEqual(len(state.players[1].hand), 10)
+        self.assertEqual(engine.players_to_act(state), [0])
 
     def test_deck_with_no_basic_is_rejected_rather_than_looping(self):
         deck = self.deck(("FireEnergy", 30))
@@ -1242,7 +1333,7 @@ class RandomGameTests(unittest.TestCase):
                 # setup, and declining the mulligan compensation.
                 silent = (isinstance(action, engine.SetupDone)
                           or (isinstance(action, engine.DrawMulligans)
-                              and action.count == 0))
+                              and not action.take))
                 self.assertTrue(changes or silent)
                 self.check_invariants(state)
             self.assertTrue(state.over, "game %d did not finish" % seed)

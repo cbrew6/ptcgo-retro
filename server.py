@@ -1917,9 +1917,43 @@ class GameSession:
         self.selection_counter += 1
         body, owed = self.match.mulligan_selection(0, self.selection_counter)
         self.pending_selection = "MulliganDraw"
-        log.info("[game %s] -> mulligan draw offer (0-%d, counter %d)",
-                 self.peer, owed, self.selection_counter)
+        log.info("[game %s] -> mulligan draw offer %d of %d (counter %d)",
+                 self.peer, self.match.state.players[0].mulligan_draw_number,
+                 self.match.state.players[0].owed_draws_total,
+                 self.selection_counter)
         self.send_game("CustomChoiceRequired", body)
+
+    def resolve_mulligan_draw(self, choice):
+        """Answer one mulligan offer, or every remaining one at once.
+
+        The engine deliberately answers ONE at a time - the question is
+        numbered, and a count could not express "for mulligan 3". The "to
+        rest" buttons are therefore a protocol-layer shortcut that applies the
+        same answer in a loop, which is what makes a 23-mulligan opening
+        bearable without inventing a different rule.
+        """
+        m = self.match
+        take = choice in (m.MULLIGAN_YES, m.MULLIGAN_YES_REST)
+        every = choice in (m.MULLIGAN_NO_REST, m.MULLIGAN_YES_REST)
+        answers = m.state.players[0].owed_draws if every else 1
+        log.info("[game %s] <- mulligan draw: %s to %s",
+                 self.peer, "yes" if take else "no",
+                 "the rest (%d)" % answers if every else "this one")
+
+        changes = []
+        for _ in range(max(1, answers)):
+            if m.state.players[0].owed_draws <= 0:
+                break
+            try:
+                m.state, made = engine.apply(
+                    m.state, engine.DrawMulligans(0, take))
+            except engine.IllegalAction as exc:
+                log.warning("[game %s] illegal mulligan draw: %s",
+                            self.peer, exc)
+                break
+            changes.extend(made)
+        self.emit_items(m.animation_for(changes))
+        self.advance_match()
 
     def offer_setup(self):
         """Ask the player for their Active and Bench, on the real setup screen.
@@ -2203,19 +2237,7 @@ class GameSession:
             return self.resolve_flip(called_heads=(choice != 1))
         if self.pending_selection == "MulliganDraw":
             self.pending_selection = None
-            owed = self.match.state.players[0].owed_draws
-            count = choice if isinstance(choice, int) and 0 <= choice <= owed else 0
-            log.info("[game %s] <- mulligan draw: %d of %d",
-                     self.peer, count, owed)
-            try:
-                self.match.state, changes = engine.apply(
-                    self.match.state, engine.DrawMulligans(0, count))
-            except engine.IllegalAction as exc:
-                log.warning("[game %s] illegal mulligan draw: %s",
-                            self.peer, exc)
-                return self.offer_mulligan_draws()
-            self.emit_items(self.match.animation_for(changes))
-            return self.advance_match()
+            return self.resolve_mulligan_draw(choice)
         if self.pending_selection == "Choice":
             self.pending_selection = None
             options = self.choice_options or []

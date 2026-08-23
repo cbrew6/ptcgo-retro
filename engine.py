@@ -790,10 +790,15 @@ class PlayerState:
     stadiums_this_turn: int = 0
     setup_done: bool = False
     mulligans: int = 0
-    # Cards this player MAY draw because the opponent mulliganed - one per
-    # mulligan. The rule is permissive ("you may draw"), so this is an offer
-    # to be answered, not a debt to be settled automatically.
+    # Offers of one card, one per mulligan the opponent took, still
+    # unanswered. The rule is permissive ("you MAY draw") and it is per
+    # mulligan, so this is a queue of yes/no questions rather than a debt:
+    # DrawMulligans answers exactly one of them, either way.
     owed_draws: int = 0
+    # How many there were before any were answered. The remaining count alone
+    # cannot say WHICH mulligan is being asked about, and the client's own
+    # prompt is numbered ("...for mulligan {0}?").
+    owed_draws_total: int = 0
     # Set the moment a draw is required and the deck is empty. The loss is
     # recorded rather than raised so both players' losses can land on the same
     # check and produce a tie instead of a race.
@@ -803,6 +808,18 @@ class PlayerState:
     def in_play(self) -> list:
         """Active first, then bench - the order the rules resolve things in."""
         return ([self.active] if self.active else []) + list(self.bench)
+
+    @property
+    def mulligan_draw_number(self) -> int:
+        """Which mulligan the outstanding offer is about: 1-based, 0 if none.
+
+        The offers are answered oldest first, so this counts up as they are
+        answered. It exists for the renderer - the prompt names the mulligan
+        by number and a bare "3 left" cannot fill that in.
+        """
+        if self.owed_draws <= 0:
+            return 0
+        return self.owed_draws_total - self.owed_draws + 1
 
 
 # --------------------------------------------------------------------------
@@ -1098,12 +1115,20 @@ class Promote(Action):
 
 @dataclass(frozen=True)
 class DrawMulligans(Action):
-    """Take some of the cards the opponent's mulligans entitle you to.
+    """Answer ONE of the offers the opponent's mulligans entitle you to.
 
-    `count` may be zero: the rule says "you may draw", and answering nothing is
-    a legal answer that ends the offer.
+    Compensation is per mulligan, not a lump sum, and the original server asked
+    that way: its prompt survives in the client's shipped localization DB as
+    "Would you like to draw a card for mulligan {0}?" with Yes and No buttons.
+    So `take` is one answer to one offer - declining this card leaves the
+    remaining offers standing, and each is independently declinable.
+
+    The same DB carries "Yes to rest ({0})" and "No to rest ({0})", so the
+    original UI could also answer every remaining offer at once. That stays a
+    protocol-layer shortcut - it is this action repeated - rather than a count
+    on the action, because a count cannot express the numbered question.
     """
-    count: int
+    take: bool
 
 
 @dataclass(frozen=True)
@@ -1870,10 +1895,12 @@ def new_game(db: CardDB, decks, seed=0, rules: Rules = DEFAULT_RULES,
     places first) is visible to nobody but the server and removes a whole class
     of "who is waiting on whom" bug, so that is the assumption.
 
-    Mulligans: a hand with no Basic is revealed, shuffled back and redealt; the
-    opponent then draws one extra card per mulligan. The real rule makes that
-    draw optional and takes it after placement - taking it automatically, here,
-    is a simplification that never disadvantages the non-mulliganing player.
+    Mulligans: a hand with no Basic is revealed, shuffled back and redealt, and
+    the opponent is then OFFERED one card per mulligan - one yes/no answer
+    each, which is how the original server asked. The offers are answered
+    before placement rather than after it, because the cards drawn may be what
+    gets placed. Rules.optional_mulligan_draw False draws them all here instead
+    and asks nothing.
 
     `seed` builds a plain random.Random; `rng` overrides it entirely, which is
     how a test pins a specific shuffle or a specific run of coin flips. The
@@ -1928,6 +1955,7 @@ def new_game(db: CardDB, decks, seed=0, rules: Rules = DEFAULT_RULES,
             continue
         if rules.optional_mulligan_draw:
             state.players[p].owed_draws = extra
+            state.players[p].owed_draws_total = extra
         else:
             _draw(state, p, extra, changes)
 
@@ -2104,7 +2132,10 @@ def legal_actions(state: GameState, player: int) -> list:
         return _choice_actions(state)
 
     if ps.owed_draws > 0:
-        return [DrawMulligans(player, n) for n in range(ps.owed_draws + 1)]
+        # One offer, two answers, however many are outstanding. Both are always
+        # legal because either one spends exactly one offer, so the player is
+        # asked owed_draws times and can decline any of them separately.
+        return [DrawMulligans(player, True), DrawMulligans(player, False)]
 
     if state.pending_promotions and state.pending_promotions[0] == player:
         return [Promote(player, slot.slot_id) for slot in ps.bench]
@@ -2621,15 +2652,19 @@ def _do_pass(state, action, changes):
 
 
 def _do_draw_mulligans(state, action, changes):
+    """Answer one outstanding offer, yes or no.
+
+    The decrement is unconditional: the question is asked again while
+    owed_draws stands, so an answer that left the count alone - which is what
+    a declined draw would naturally do - would ask it for ever. Declining
+    therefore looks identical to taking from the state machine's point of
+    view, and differs only in whether a card moves.
+    """
     ps = state.players[action.player]
-    _require(ps.owed_draws > 0, "no mulligan draws are owed")
-    _require(0 <= action.count <= ps.owed_draws,
-             "may draw 0 to %d cards, not %d" % (ps.owed_draws, action.count))
-    # Cleared first, and unconditionally: declining is an answer, and leaving
-    # the offer standing after a zero would ask the same question for ever.
-    ps.owed_draws = 0
-    if action.count:
-        _draw(state, action.player, action.count, changes)
+    _require(ps.owed_draws > 0, "no mulligan draw is outstanding")
+    ps.owed_draws -= 1
+    if action.take:
+        _draw(state, action.player, 1, changes)
 
 
 _HANDLERS = {

@@ -111,6 +111,10 @@ PROMPT_MULLIGAN_DRAW = (
     "com.direwolfdigital.cake.rules.states.startgame.mulligancustomchoice")
 BUTTON_YES = "com.direwolfdigital.cake.rules.states.startgame.mulliganchoicechoice1"
 BUTTON_NO = "com.direwolfdigital.cake.rules.states.startgame.mulliganchoicechoice2"
+# The numbered variant of the same question, "...for mulligan {0}?".
+PROMPT_MULLIGAN_MULTI = PROMPT_MULLIGAN_DRAW + ".drawmultiple"
+BUTTON_YES_REST = "playmat.mulligan.drawcards.drawallbutton"
+BUTTON_NO_REST = "playmat.mulligan.drawcards.drawnonebutton"
 PROMPT_MULLIGAN_REVEAL = "playmat.mulligan.dialog.body.opponent"
 PROMPT_MULLIGAN_TITLE = "playmat.mulligan.dialog.carousel.header"
 
@@ -955,26 +959,42 @@ class Match:
     # feature, it is a hung match, which is why every option_kind has a path
     # here and the fallback answers rather than gives up.
 
-    def mulligan_selection(self, player, counter):
-        """How many of the opponent's mulligans to cash in.
+    #: Button indexes of mulligan_selection, and what each answer means.
+    MULLIGAN_NO, MULLIGAN_YES, MULLIGAN_NO_REST, MULLIGAN_YES_REST = range(4)
 
-        A button list rather than a target list: there is nothing on the board
-        to point at, the answer is a number, and CustomChoiceRequired's reply
-        is the button INDEX - which here is the count itself, since the buttons
-        run 0, 1, 2, ...
+    def mulligan_selection(self, player, counter):
+        """One mulligan's compensation, asked the way the original asked it.
+
+        Not "how many would you like" - the original server asked once per
+        mulligan, numbered, and the proof is in the client's own shipped
+        strings: the prompt has a "{0}" and there is a separate .drawmultiple
+        key for it. A 0..N button list was this project's invention.
+
+        Four buttons, because the DB carries all four and 23 mulligans is a
+        real opening: Yes and No answer THIS one, and "Yes/No to rest (N)"
+        answer every remaining one at once. Those two only appear when there
+        is more than one left to answer.
+
+        Returns (body, remaining).
         """
-        owed = self.state.players[player].owed_draws
+        ps = self.state.players[player]
+        owed = ps.owed_draws
+        number = ps.mulligan_draw_number
+        buttons = [_loc(BUTTON_NO), _loc(BUTTON_YES)]
+        if owed > 1:
+            buttons.append(_loc_n(BUTTON_NO_REST, n0=owed))
+            buttons.append(_loc_n(BUTTON_YES_REST, n0=owed))
         return {
             "counter": counter,
-            "prompt": PROMPT_MULLIGAN_DRAW,
+            # The numbered variant only makes sense when there was more than
+            # one to begin with; with a single mulligan "for mulligan 1" reads
+            # oddly and the plain key says the same thing.
+            "prompt": (_loc_n(PROMPT_MULLIGAN_MULTI, n0=number)
+                       if ps.owed_draws_total > 1 else _loc(PROMPT_MULLIGAN_DRAW)),
             "offerLength": 0,
             "startingTimestamp": 0,
             "sortType": "",
-            # The button INDEX is the answer, so the buttons are the counts in
-            # order. One mulligan is a yes/no question and reads better as
-            # one; several need the numbers.
-            "buttons": ([_loc(BUTTON_NO), _loc(BUTTON_YES)] if owed == 1
-                        else [_loc(str(n)) for n in range(owed + 1)]),
+            "buttons": buttons,
             "sourceEntity": None,
             "kind": "",
         }, owed

@@ -732,13 +732,11 @@ def _decide(state, player, legal, rng):
         return (_plan_choice(state, player, legal, rng),
                 "answer the pending choice (%s)" % state.pending.choice.prompt)
 
-    # Take every card the opponent's mulligans are worth. A bigger opening
-    # hand is close to strictly better for a player this simple - it has no
-    # deck-thinning plan a small hand could serve.
-    draws = [a for a in legal if isinstance(a, DrawMulligans)]
-    if draws:
-        return (max(draws, key=lambda a: a.count),
-                "take the mulligan compensation")
+    # One offer per mulligan, answered one at a time; say yes to every one. A
+    # bigger opening hand is close to strictly better for a player this simple
+    # - it has no deck-thinning plan a small hand could serve.
+    if any(isinstance(a, DrawMulligans) for a in legal):
+        return DrawMulligans(player, True), "take the mulligan compensation"
 
     promotes = [a for a in legal if isinstance(a, Promote)]
     if promotes:

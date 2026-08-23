@@ -509,6 +509,7 @@ class MulliganDrawTests(unittest.TestCase):
         cls.db = engine.CardDB.from_directory(CARD_DIR)
 
     def _match(self, owed):
+        """A match with `owed` mulligan offers outstanding."""
         basic = next(c for c in self.db if c.is_pokemon and c.stage == "Basic")
         energy = next(c for c in self.db
                       if c.is_basic_energy and c.energy_options)
@@ -517,15 +518,20 @@ class MulliganDrawTests(unittest.TestCase):
                         [deck, list(deck)], seed=5)
         m.serialized_state(predeal=True)
         m.state.players[0].owed_draws = owed
+        m.state.players[0].owed_draws_total = owed
         return m
 
-    def test_the_button_index_is_the_count(self):
-        """CustomChoiceRequired replies with the button INDEX, so the buttons
-        have to be the counts in order or the answer means something else."""
+    def test_the_question_is_numbered(self):
+        """The original asked once per mulligan, numbered - the shipped prompt
+        has a "{0}" and a separate .drawmultiple key. A 0..N count list was
+        this project's invention."""
         m = self._match(3)
+        m.state.players[0].owed_draws_total = 3
         body, owed = m.mulligan_selection(0, 1)
         self.assertEqual(owed, 3)
-        self.assertEqual(len(body["buttons"]), 4)      # 0, 1, 2, 3
+        self.assertIn("drawmultiple", body["prompt"]["id"])
+        self.assertEqual(body["prompt"]["textVars"]["numberMap"]["{0}"],
+                         m.state.players[0].mulligan_draw_number)
 
     def test_a_single_mulligan_is_a_yes_no_question(self):
         m = self._match(1)
@@ -535,11 +541,23 @@ class MulliganDrawTests(unittest.TestCase):
         self.assertIn("mulliganchoicechoice2", body["buttons"][0]["id"])
         self.assertIn("mulliganchoicechoice1", body["buttons"][1]["id"])
 
-    def test_many_mulligans_still_produce_one_button_each(self):
-        """The engine caps mulligans at 100, so the count can be large."""
+    def test_many_mulligans_are_still_four_buttons(self):
+        """23 mulligans is a real opening, so the dialog must not grow with
+        the count. The original answered that with "Yes/No to rest (N)",
+        which is why the shipped DB carries those two button keys."""
         m = self._match(40)
+        body, owed = m.mulligan_selection(0, 1)
+        self.assertEqual(owed, 40)
+        self.assertEqual(len(body["buttons"]), 4)
+        self.assertIn("drawnonebutton", body["buttons"][2]["id"])
+        self.assertIn("drawallbutton", body["buttons"][3]["id"])
+        # The "rest" count is substituted, not left as a literal "{0}".
+        self.assertEqual(body["buttons"][3]["textVars"]["numberMap"]["{0}"], 40)
+
+    def test_the_last_mulligan_drops_the_rest_buttons(self):
+        m = self._match(1)
         body, _ = m.mulligan_selection(0, 1)
-        self.assertEqual(len(body["buttons"]), 41)
+        self.assertEqual(len(body["buttons"]), 2)
 
 
 class LocalizationKeyTests(unittest.TestCase):
@@ -564,23 +582,44 @@ class LocalizationKeyTests(unittest.TestCase):
             raise unittest.SkipTest("no localization DB on this machine")
 
     def _sent_keys(self):
-        """Every localization key literal in the modules that send prompts.
+        """Every localization key the prompt-sending modules can emit.
+
+        Two sources, because neither alone is enough. Module constants are
+        read from the imported modules rather than the source, so a key built
+        by concatenation - PROMPT_MULLIGAN_DRAW + ".drawmultiple" - is checked
+        as the key it actually becomes rather than as two half-keys. Inline
+        literals are still regexed out of the source, since plenty of prompts
+        are written at the call site.
 
         Both namespaces matter: playmat.* is the client's own, and
         com.direwolfdigital.cake.rules.* is the ORIGINAL SERVER's, still
-        present in the shipped DB - which makes it direct evidence of what the
-        real server sent rather than something to guess at.
+        present in the shipped DB - direct evidence of what was really sent.
         """
+        import server
         here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         pattern = r'"((?:playmat|com\.direwolfdigital\.cake)[A-Za-z0-9_.]+)"'
         found = set()
         for name in ("match.py", "server.py"):
             with open(os.path.join(here, name), encoding="utf-8") as fh:
                 found.update(re.findall(pattern, fh.read()))
+
+        def harvest(value):
+            if isinstance(value, str):
+                found.add(value)
+            elif isinstance(value, dict):
+                for item in value.values():
+                    harvest(item)
+
+        for module in (match, server):
+            for name in dir(module):
+                if name.startswith(("PROMPT_", "BUTTON_", "CHOICE_PROMPT")):
+                    harvest(getattr(module, name))
+
         # Entity class names share the com.direwolfdigital prefix but are Java
-        # FQCNs, not localization keys.
-        return {k for k in found if ".entities." not in k
-                and ".game.core." not in k}
+        # FQCNs, not localization keys. An empty prompt is deliberate - it is
+        # how a banner is suppressed - and has nothing to look up.
+        return {k for k in found
+                if k and ".entities." not in k and ".game.core." not in k}
 
     def test_every_prompt_key_we_send_really_exists(self):
         sent = self._sent_keys()
