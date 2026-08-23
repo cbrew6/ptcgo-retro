@@ -73,7 +73,7 @@ ACTION_SETUP_ACTIVE = "1e7c0b00-0000-4000-8000-000000000006"
 ACTION_SETUP_BENCH = "1e7c0b00-0000-4000-8000-000000000007"
 ACTION_TRAINER = "1e7c0b00-0000-4000-8000-000000000008"
 ACTION_TOOL = "1e7c0b00-0000-4000-8000-000000000009"
-ACTION_END_TURN = "1e7c0b00-0000-4000-8000-00000000000a"
+ACTION_SETUP_DONE = "1e7c0b00-0000-4000-8000-00000000000b"
 
 # The prompts the original server used, recovered from the localization DB -
 # it still carries the server's own com.direwolfdigital.cake.rules.* namespace,
@@ -95,6 +95,9 @@ PROMPT_CHOOSE_ACTION = (
 # exist is not an error client-side, it is displayed verbatim, so every one of
 # these was looked up rather than guessed.
 PROMPT_COIN_FLIP = "com.direwolfdigital.cake.rules.states.startgame.coinflip"
+PROMPT_CALL_FLIP = "playmat.gamestart.prompt.coinflipchoice"
+BUTTON_HEADS = "com.direwolfdigital.cake.rules.states.startgame.heads"
+BUTTON_TAILS = "com.direwolfdigital.cake.rules.states.startgame.tails"
 # The original server's own mulligan prompt, still in the shipped DB: "Your
 # opponent had no Basic Pokemon and had to draw a new hand. Would you like to
 # draw a card?" It asked once per mulligan, with Yes/No; asking once for a
@@ -103,6 +106,8 @@ PROMPT_MULLIGAN_DRAW = (
     "com.direwolfdigital.cake.rules.states.startgame.mulligancustomchoice")
 BUTTON_YES = "com.direwolfdigital.cake.rules.states.startgame.mulliganchoicechoice1"
 BUTTON_NO = "com.direwolfdigital.cake.rules.states.startgame.mulliganchoicechoice2"
+PROMPT_MULLIGAN_REVEAL = "playmat.mulligan.dialog.body.opponent"
+PROMPT_MULLIGAN_TITLE = "playmat.mulligan.dialog.carousel.header"
 
 CHOICE_PROMPT_DEFAULT = "playmat.prompt.choosecards"
 CHOICE_PROMPTS = {
@@ -219,6 +224,7 @@ class Match:
         # the declaration (which attack, whose) and the damage that landed, and
         # those arrive as two separate Changes.
         self._attack = None
+        self._single_areas = None
 
     # -- identity --------------------------------------------------------
 
@@ -900,29 +906,14 @@ class Match:
             "forced": True,
             "hintTargetMap": {},
         }
+        # ONLY the Active. Chaining InitialBenchedTargetInformation after it is
+        # how the real screen works, but finishing that step needs the client's
+        # own Done button, and when that button does not appear the player is
+        # left with a bench lit up and no way forward - a hard freeze, reported
+        # twice. A chain with nothing after it advances straight to the reply,
+        # so the Active always resolves on the drag, and benching is asked
+        # separately as ordinary clickable rows.
         infos = [active_info]
-        # One of the Basics is about to become the Active, so only the REST can
-        # be benched. With a single Basic in hand there is nothing left, and
-        # offering the step anyway is a dead end: the bench lights up, its only
-        # candidate is the card that just became Active, and the player is
-        # stuck looking at a hand with no Pokemon in it. Omitting the node
-        # instead completes the selection the moment the Active is chosen,
-        # because a chain with nothing after it advances straight to the reply.
-        benchable = min(free, len(basics) - 1)
-        if benchable > 0:
-            infos.append({
-                "name": "InitialBenchedTargetInformation",
-                "selected": True,
-                "accountID": None,
-                "targetPrompt": PROMPT_SETUP_BENCH,
-                "validTargets": list(entities),
-                "numberToSelect": benchable,
-                # Benching is optional and the Done button is always shown for
-                # this node, so a player may finish with an empty bench.
-                "minimumToSelect": 0,
-                "forced": False,
-                "hintTargetMap": {},
-            })
         body = {
             "counter": counter,
             "prompt": PROMPT_SETUP_ACTIVE,
@@ -969,6 +960,25 @@ class Match:
             "sourceEntity": None,
             "kind": "",
         }, owed
+
+    def call_flip_selection(self, counter):
+        """Call heads or tails. Kind "CoinFlipChoice", so the client's own
+        command raises both coins (InitialUp) and sets YouPickHeadsOrTails.
+
+        This is not decoration: nothing else raises the coins at the start of a
+        game, so a flip sent without it animates a coin that is still down -
+        which is why the flip was invisible.
+        """
+        return {
+            "counter": counter,
+            "prompt": PROMPT_CALL_FLIP,
+            "offerLength": 0,
+            "startingTimestamp": 0,
+            "sortType": "",
+            # Index 0 is heads, 1 is tails.
+            "buttons": [_loc(BUTTON_HEADS), _loc(BUTTON_TAILS)],
+            "sourceEntity": None,
+        }
 
     def coin_flip_items(self, winner, heads):
         """The opening coin flip, as an InitialCoinFlip sequence.
@@ -1120,47 +1130,42 @@ class Match:
         return active, bench
 
     def _setup_offer(self, player, counter):
-        """Let the player choose their own Active and Bench.
+        """Benching, as ordinary clickable rows.
 
-        The real game has a dedicated setup screen driven by
-        SelectionWithTargetsRequired carrying ActivePokemonTargetInformation
-        and InitialBenchedTargetInformation. This is not that. It presents the
-        same two decisions through the ordinary action offer, which is a path
-        that is already exercised and tested - the server used to place both
-        Pokemon itself, so the player never chose at all.
+        The Active is chosen on the real setup screen (setup_selection); this
+        is only the step after it. It deliberately does NOT use the chained
+        InitialBenchedTargetInformation node, because finishing that needs the
+        client's own Done button and a player who does not get one is frozen
+        with a lit bench and no way forward.
 
-        The engine makes the phase easy to render because it only ever offers
-        one shape at a time: SetupPlaceActive alone while the Active is empty,
-        then SetupPlaceBench alongside SetupDone. So the Active step is forced
-        and the bench step is not, which puts "I am finished benching" on the
-        same Next button that ends a turn - a null selection, decoded by the
-        server as SetupDone.
+        Every Basic left in hand is a row, and so is "done" - which hangs off
+        the Active, the one entity in play that carries no other rows during
+        setup, so nothing has to mix selection types.
         """
         rows, decode = [], {}
-        active_pile = self.pile.get((player, ZONE_ACTIVE))
         bench_pile = self.pile.get((player, ZONE_BENCH))
-        placing_active = False
+        me = self.state.players[player]
+        active_entity = (self.entity_of_slot(me.active) if me.active else None)
 
         for action in engine.legal_actions(self.state, player):
-            if isinstance(action, engine.SetupPlaceActive):
-                placing_active = True
-                self._offer_group(rows, decode, self.eid(action.card),
-                                  ACTION_SETUP_ACTIVE, "PlayBasic", "Ability",
-                                  {active_pile: action})
-            elif isinstance(action, engine.SetupPlaceBench):
+            if isinstance(action, engine.SetupPlaceBench):
+                spots = {bench_pile: action, self.eid(action.card): action}
+                for entity in self.own_pokemon_entities(player):
+                    if entity and entity != active_entity:
+                        spots[entity] = action
                 self._offer_group(rows, decode, self.eid(action.card),
                                   ACTION_SETUP_BENCH, "PlayBasic", "Ability",
-                                  {bench_pile: action})
+                                  spots)
+            elif isinstance(action, engine.SetupDone) and active_entity:
+                self._offer_group(rows, decode, active_entity,
+                                  ACTION_SETUP_DONE, "EndTurn", "Ability",
+                                  {active_entity: action})
         return {
             "counter": counter,
-            "prompt": ("playmat.prompt.choosebasicpokemon" if placing_active
-                       else "playmat.prompt.choosepokemonforbench"),
+            "prompt": "playmat.prompt.choosepokemonforbench",
             "offerLength": 0,
             "startingTimestamp": 0,
-            # Choosing an Active is compulsory - the game cannot start without
-            # one - so there is no Next button to skip it with. Benching is
-            # optional, so there is.
-            "forced": placing_active,
+            "forced": False,
             "targetType": "",
             "optimalPlayMap": [],
             "selectionParams": {},
@@ -1286,19 +1291,12 @@ class Match:
                     _loc_key(printed.title) if printed else ability_id,
                     "AbilitySelection", {target: action})
 
-        # Ending the turn, as a row rather than a button.
-        #
-        # Attacking ends your turn in this game, so "end early" only matters
-        # when the Active cannot attack - and when it cannot, the Active has no
-        # AbilitySelection rows, which is exactly when an "Ability" row can sit
-        # on it without mixing selection types on one entity. That makes the
-        # Active the one safe place to hang it.
+        # NOTHING but attacks goes on the Active during a turn. An end-turn row
+        # here hijacked the click that asks for the attack menu: with no Energy
+        # attached there were no attack rows, so clicking the Active to see its
+        # attacks silently ended the turn instead. Ending the turn is the
+        # client's own button, which does appear during a turn.
         active_entity = self.entity_of_slot(me.active) if me.active else None
-        if active_entity and not (attacks and opp_active):
-            self._offer_group(rows, decode, active_entity, ACTION_END_TURN,
-                              "EndTurn", "Ability",
-                              {active_entity: engine.Pass(player)})
-
         if opp_active:
             for action in attacks:
                 if not active_entity:
@@ -1365,6 +1363,54 @@ class Match:
 
     # -- the opening animation --------------------------------------------
 
+    def _single_card_areas(self):
+        """Pile entities that hold exactly one card and lay it out by index."""
+        if self._single_areas is None:
+            self._single_areas = {
+                self.pile.get((index, ZONE_ACTIVE))
+                for index in range(len(self.state.players))
+            } - {None}
+        return self._single_areas
+
+    def mulligan_items(self):
+        """Every mulliganed hand, revealed the way the client expects.
+
+        A mulligan is a public event: the hand with no Basic is shown to the
+        opponent before it goes back in the deck. Suppressing it - which this
+        did, because the raw redraws looked like cards flying in and out of the
+        deck - hid a rule rather than a rendering problem.
+
+        MulliganRevealCardsEffect carries the hands INLINE as attributes and
+        introduces those entities itself, so no EntityIntroduced is needed for
+        cards that are back in the deck by now. It goes inside the Mulligan
+        sequence, which blocks the rest of the opening until the dialog is
+        dismissed - otherwise the deal animates behind it.
+        """
+        items = []
+        for change in self.opening:
+            if change.kind != engine.CHANGE_MULLIGAN:
+                continue
+            hand = (change.detail or {}).get("hand") or []
+            pile = {self.eid(cid): self.card_attributes(cid) for cid in hand}
+            if not pile:
+                continue
+            items.append(("msg", "EffectPlayed", {
+                "gameID": self.game_id,
+                "effectMessage": {
+                    "name": "MulliganRevealCardsEffect",
+                    "value": {
+                        "player": self.account(change.player),
+                        # One dict per mulliganed hand; the carousel pages
+                        # through them and counts them.
+                        "entityIDPiles": [pile],
+                        "prompt": _loc(PROMPT_MULLIGAN_REVEAL),
+                        "revealTitle": _loc(PROMPT_MULLIGAN_TITLE),
+                        "revealSource": self.player_entity.get(change.player),
+                    },
+                },
+            }))
+        return [("seq", "Mulligan", items)] if items else []
+
     def opening_animation(self):
         """A clean deal derived from the final board, not from the change log.
 
@@ -1383,6 +1429,10 @@ class Match:
           - Order. Working from the final state means each card is dealt once,
             to where it actually ended up.
 
+        The mulligans themselves ARE shown - see mulligan_items. Only the
+        card-by-card churn of the redraws is left out; the hands that were
+        mulliganed are revealed properly, in the client's own carousel.
+
         Returns items for emit_sequence: ("seq", name, [...]) or ("msg", ...).
         """
         items = []
@@ -1391,6 +1441,7 @@ class Match:
                 "gameID": self.game_id,
                 "entityID": self.pile[(index, ZONE_DECK)],
             }))
+        items.extend(self.mulligan_items())
 
         hands = []
         for index, player in enumerate(self.state.players):
@@ -1433,12 +1484,18 @@ class Match:
             "attributeMap": self.card_attributes(cid, slot),
         })
 
-    def _move_msg(self, cid, destination, duration=300):
+    def _move_msg(self, cid, destination, duration=300, position=None):
+        if position is None:
+            # The Active area holds exactly one Pokemon, and SingleCardArea
+            # lays it out by index. Appending with -1 left it sitting off
+            # centre, because "wherever the list happens to put it" is not the
+            # same as "the one slot there is".
+            position = 0 if destination in self._single_card_areas() else -1
         return ("EntityMoved", {
             "gameID": self.game_id,
             "entityID": self.eid(cid),
             "destinationID": destination,
-            "positionInParent": -1,              # negative appends
+            "positionInParent": position,        # negative appends
             # Milliseconds, and it does NOT control the card's flight time -
             # that comes from a CurveMotion prefab chosen by the source and
             # destination zone. Its only effect is delaying the game-log line.

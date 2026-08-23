@@ -410,15 +410,19 @@ class SetupSelectionTests(unittest.TestCase):
         self.assertEqual([i["name"] for i in infos],
                          ["ActivePokemonTargetInformation"])
 
-    def test_two_basics_offers_a_bench_step_sized_to_what_is_left(self):
-        m = self._match_with_basics(2)
-        body, basics = m.setup_selection(0, 1)
-        infos = next(iter(body["targetMap"].values()))
-        self.assertEqual([i["name"] for i in infos],
-                         ["ActivePokemonTargetInformation",
-                          "InitialBenchedTargetInformation"])
-        # One of the two is about to be the Active, so at most one is benchable.
-        self.assertEqual(infos[1]["numberToSelect"], len(basics) - 1)
+    def test_the_bench_is_never_chained_onto_the_active(self):
+        """Finishing a chained InitialBenchedTargetInformation needs the
+        client's own Done button, and a player who does not get one is frozen
+        with a lit bench and no way forward. Benching is asked separately, as
+        clickable rows, so the Active always resolves on the drag."""
+        # 1 and 2 are what the sparse fixture deck reliably deals; the shape
+        # of the node list does not depend on how many there are.
+        for wanted in (1, 2):
+            m = self._match_with_basics(wanted)
+            body, _ = m.setup_selection(0, 1)
+            infos = next(iter(body["targetMap"].values()))
+            self.assertEqual([i["name"] for i in infos],
+                             ["ActivePokemonTargetInformation"])
 
     def test_exactly_one_target_map_key_always(self):
         """ignoreFirst makes the client throw on anything but one key."""

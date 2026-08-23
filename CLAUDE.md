@@ -667,6 +667,74 @@ Collection and deck views build cards from the local archetype DB, which has
 every attribute. Only entities the server synthesises can be missing one, which
 is why art broke in matches alone.
 
+### The opening is three steps, and skipping one breaks the next
+
+```
+CoinFlipChoiceRequired   call heads or tails   <- raises BOTH coins
+InitialCoinFlip          the flip itself
+GoFirstChoiceRequired    only to whoever WON the flip
+```
+
+The call is not a formality. Nothing else raises the coins at the start of a
+game - the `CoinFlipChoice` command does it (`InitialUp`,
+`YouPickHeadsOrTails`) - so a flip sent without it animates a coin that is
+still lying down, which reads as "there was no coin flip". `DealInitialHands`
+then lowers both coins again, so the flip has to come before the deal.
+
+`MultipleCoinFlipWithContextEffect` needs a `source` the client already knows:
+its command constructor does `All.get_Item(source)` with no guard. That forces
+the board to be sent first, so the match is built with a provisional first
+player and the real answer written back before setup begins.
+
+`resultLst[0] == 0` is heads.
+
+### Mulligans are shown, not hidden
+
+A mulligan is public: the hand with no Basic is revealed to the opponent before
+it is shuffled back. `opening_animation` used to suppress the whole thing
+because the raw redraws looked like cards flying in and out of the deck - that
+hid a rule to fix a rendering problem.
+
+`MulliganRevealCardsEffect` inside the `Mulligan` sequence is the right tool.
+It carries the hands INLINE as attributes and introduces those entities itself,
+so cards that are back in the deck need no prior `EntityIntroduced`, and the
+sequence blocks the rest of the opening until the dialog closes.
+
+`MulliganChoiceRequired` is a dead end - `IMulliganChoice` has exactly one
+implementation and no caller anywhere in pie-src.
+
+Compensation ("for each of your opponent's mulligans you MAY draw a card") is
+an offer, not a debt: `PlayerState.owed_draws`, answered by `DrawMulligans`,
+ranked ahead of setup because the drawn cards may be what gets placed.
+
+### What may and may not hang off the Active
+
+Only attacks. Clicking the Active is how a player asks for its attack menu, so
+any other row there hijacks that click - an end-turn row on an Active with no
+Energy attached meant clicking it silently ended the turn instead of showing
+anything. Ending a turn is the client's own button.
+
+During SETUP the Active carries no attacks, so a "done benching" row there is
+safe, and that is where it goes.
+
+### Do not chain InitialBenchedTargetInformation
+
+The real setup screen chains it after `ActivePokemonTargetInformation`, and
+finishing it needs the client's own Done button. When that button does not
+appear the player is frozen: the bench lights up and there is no way forward.
+Reported twice. Send the Active node ALONE - a chain with nothing after it
+advances straight to the reply, so the Active always resolves on the drag - and
+ask for the bench separately as ordinary clickable rows.
+
+More generally: **an offer must never be a dead end.** If nothing is legal the
+server ends the turn itself rather than sending a row-less offer.
+
+### positionInParent
+
+`-1` appends, which is right for a hand or a discard pile and wrong for the
+Active: `SingleCardArea` lays its one card out by index, so an appended Active
+sits off centre. Send `0` for single-card areas.
+
 ### Selection replies
 
 Two different shapes, and they are not interchangeable:
@@ -808,6 +876,11 @@ Known gaps, in rough order of value:
   name, abilities) rather than full attributes.
 - The **AI is beginner strength** and will discard a good hand to a draw
   Supporter.
+- **The client's own end-turn button is load-bearing and unverified from
+  here.** It is what ends a turn early and what confirms a chained selection;
+  the server can only guarantee the cases where nothing is legal. If it stops
+  appearing, look at `buttonIsActive` in the playmat action-button component
+  (`pie_d.cs:137899`) before changing message shapes.
 - **Retreat hangs off the bench Pokemon**, not the Active, to keep one
   selectionType per entity. The client's own drag path looks for a
   `BaseRetreat` action *on the Active* (`CheckHintStrength`), so dragging the

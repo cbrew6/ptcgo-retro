@@ -211,6 +211,7 @@ class Harness:
         self.coin_flips = 0
         self.mulligan_offers = 0
         self.went_first = None
+        self.flip_calls = 0
         self.revealed_pokemon = 0
         self.result = None
         self.turns = 0
@@ -360,7 +361,8 @@ class Harness:
 
         for _ in range(max_actions):
             name, value = self.wait_for(
-                ["GoFirstChoiceRequired",
+                ["CoinFlipChoiceRequired",
+                 "GoFirstChoiceRequired",
                  "SelectionWithTargetsAndActionsRequired",
                  "SelectionWithTargetsRequired",
                  "CustomChoiceRequired",
@@ -368,6 +370,13 @@ class Harness:
             if name == "GameCompletedMessage":
                 self.result = value
                 return
+            if name == "CoinFlipChoiceRequired":
+                # Calling the coin is what raises both coin animators, so it
+                # comes before the flip. Index 0 is heads.
+                self.flip_calls += 1
+                self.send("GameCustomChoice",
+                          {"selection": 0, "counter": value.get("counter")})
+                continue
             if name == "GoFirstChoiceRequired":
                 self.went_first = go_first
                 self.send("GameCustomChoice",
@@ -578,8 +587,10 @@ def report(h):
           "Pokemon itself" % h.setups)
     check("the harness actually played", h.actions_taken > 0,
           "%d of %d offers answered with an action" % (h.actions_taken, h.turns))
-    check("the opening coin was flipped", h.coin_flips > 0,
-          "%d MultipleCoinFlipWithContextEffect seen" % h.coin_flips)
+    check("the coin was called then flipped",
+          h.flip_calls > 0 and h.coin_flips > 0,
+          "%d calls, %d flips - the call is what raises the coins"
+          % (h.flip_calls, h.coin_flips))
     print("\n   %d offers, %d answered with an action, %d choices, "
           "%d mulligan offers"
           % (h.turns, h.actions_taken, h.choices, h.mulligan_offers))

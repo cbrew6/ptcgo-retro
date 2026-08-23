@@ -1705,13 +1705,32 @@ class GameSession:
             "msg": {"name": "SerializedGameState", "value": board},
         })
 
-        # A real coin decides who chooses, which is the actual rule - the
-        # player used to simply be asked.
+        self.offer_call_flip()
+
+    def offer_call_flip(self):
+        """Ask the player to call heads or tails.
+
+        The full opening is universal and has three steps - call the coin,
+        flip it, and let the winner choose who goes first. Skipping the call
+        is what made the flip invisible: the client raises both coins in the
+        CoinFlipChoice command, and nothing else does, so a flip sent without
+        it animates a coin that is still lying down.
+        """
+        self.selection_counter += 1
+        self.pending_selection = "CallFlip"
+        self.send_game("CoinFlipChoiceRequired",
+                       self.match.call_flip_selection(self.selection_counter))
+        log.info("[game %s] -> CoinFlipChoiceRequired (counter %d)",
+                 self.peer, self.selection_counter)
+
+    def resolve_flip(self, called_heads):
+        """Flip, show it, and let whoever won decide who starts."""
         heads = random.random() < 0.5
-        self.player_won_flip = heads
-        winner = 0 if heads else 1
-        log.info("[game %s] coin flip: %s, %s won",
-                 self.peer, "heads" if heads else "tails",
+        self.player_won_flip = (heads == called_heads)
+        winner = 0 if self.player_won_flip else 1
+        log.info("[game %s] called %s, flipped %s - %s won",
+                 self.peer, "heads" if called_heads else "tails",
+                 "heads" if heads else "tails",
                  "player" if winner == 0 else "opponent")
         self.emit_items(self.match.coin_flip_items(winner, heads))
 
@@ -2183,6 +2202,11 @@ class GameSession:
         counter = req.get("counter")
         log.info("[game %s] <- GameCustomChoice selection=%r counter=%r (%s)",
                  self.peer, choice, counter, self.pending_selection)
+        if self.pending_selection == "CallFlip":
+            self.pending_selection = None
+            # Index 0 is heads. A cancel is treated as calling heads rather
+            # than re-asking: the call cannot be declined.
+            return self.resolve_flip(called_heads=(choice != 1))
         if self.pending_selection == "MulliganDraw":
             self.pending_selection = None
             owed = self.match.state.players[0].owed_draws
