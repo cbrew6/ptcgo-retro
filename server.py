@@ -512,6 +512,10 @@ HIDE_OPPONENT_CARDS = False
 AI_ACCOUNT_ID = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
 DEFAULT_AI_NAME = "Otis"
 
+# Real localization key: a missing one is returned verbatim rather than
+# erroring, so the end-of-game panel would show the raw key.
+END_OF_GAME_TEXT = "playmat.endgame.wincondition.opponent.resigned"
+
 _card_by_guid = None
 
 
@@ -1626,8 +1630,12 @@ class GameSession:
             "offerLength": 30,
             "startingTimestamp": int(time.time() * 1000),
             "sortType": "",
-            # Exactly two: one UI path indexes [0] and [1] directly.
-            "buttons": ["playmat.gofirst.first", "playmat.gofirst.second"],
+            # Real localization keys, not invented ones: a missing key is
+            # returned verbatim rather than erroring, so the dialog renders the
+            # raw key and looks broken. The prompt asks "Would You Like to Go
+            # First?", so the answers are yes/no. Exactly two entries, because
+            # one of the two possible UIs indexes [0] and [1] directly.
+            "buttons": ["playmat.option.yes", "playmat.option.no"],
             "sourceEntity": None,
         })
         log.info("[game %s] -> GoFirstChoiceRequired (counter %d)",
@@ -1651,7 +1659,7 @@ class GameSession:
             "coins": 0,
             "exp": 0,
             "share": False,
-            "endOfGameText": "playmat.endofgame.concede",
+            "endOfGameText": END_OF_GAME_TEXT,
             "rewardList": [],
             "winner": winner,
             "loser": loser,
