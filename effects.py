@@ -1752,6 +1752,26 @@ def _less_per_retreat(m, ability):
     return damage
 
 
+@attack_damage(r"Does " + N + r" more damage for each of your opponent's "
+               r"Benched " + POKEMON + r"\.")
+def _more_per_their_bench(m, ability):
+    each = int(m.group(1))
+
+    def damage(state, ctx, changes):
+        them = state.players[1 - ctx["player"]]
+        return ctx["attack"].damage + each * len(them.bench)
+    return damage
+
+
+@attack_effect(r"Your opponent reveals (?:his or her|their) hand\.")
+def _reveal_their_hand(m, ability):
+    def effect(state, ctx, changes):
+        them = 1 - ctx["player"]
+        engine.reveal(state, changes, them, state.players[them].hand,
+                      reason="attack")
+    return effect
+
+
 @attack_damage(r"Does " + N + r" more damage for each Energy attached to the "
                r"Defending " + POKEMON + r"\.")
 def _more_per_defender_energy(m, ability):

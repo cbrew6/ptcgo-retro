@@ -610,6 +610,30 @@ class Match:
         and turns the prize-count badges on afterwards.
         """
         out, run = [], []
+        kos = []
+
+        def flush_kos():
+            """A knockout and the cards it takes out of play, as one sequence.
+
+            The Knockout sequence does two things nothing else does: it walks
+            its EntityMoved children to find the Pokemon leaving play and
+            animates it into the knockout pile, and cleanupSelectAreaIfNeeded
+            returns the attacker from the target-select area to its slot.
+            Sent loose, the KO'd Pokemon simply appeared in the discard and the
+            attacker never came home - which is "it went straight to discard
+            with no knockout animation".
+            """
+            if not kos:
+                return
+            items = []
+            for change in kos:
+                destination = self.pile.get((change.player, change.to_zone))
+                if destination is None or change.card is None:
+                    continue
+                items.append(("msg",) + self._move_msg(change.card, destination))
+            del kos[:]
+            if items:
+                out.append(("seq", "Knockout", items))
 
         def flush():
             if not run:
@@ -644,7 +668,25 @@ class Match:
                 # Draw buckets its children by card type for the draw fan.
                 out.append(("seq", "Draw", items))
 
+        # Which player currently owes a knockout run, so the moves that follow
+        # a knockout are gathered and anything else closes it.
+        knocked = [None]
+
         for change in changes:
+            if change.kind == engine.CHANGE_KNOCKOUT:
+                flush()
+                flush_draws()
+                flush_kos()
+                knocked[0] = change.player
+                continue
+            if (knocked[0] is not None
+                    and change.kind == engine.CHANGE_MOVE
+                    and change.player == knocked[0]
+                    and change.to_zone in (ZONE_DISCARD, ZONE_LOST)):
+                kos.append(change)
+                continue
+            knocked[0] = None
+            flush_kos()
             if (change.kind == engine.CHANGE_MOVE
                     and change.to_zone == ZONE_PRIZES
                     and change.from_zone == ZONE_DECK):
@@ -662,6 +704,7 @@ class Match:
             out.append(change)
         flush()
         flush_draws()
+        flush_kos()
         return out
 
     def _destination(self, change):
@@ -897,6 +940,38 @@ class Match:
         if entity is None:
             return []
         return [("seq", "PokeAbility", [])]
+
+    def _change_reveal(self, change):
+        """Show cards to both players, one at a time, inside AlwaysReveal.
+
+        RevealCardToAllEffect is the light one: the card flies to the present
+        area, waits about half a second or a click, and comes back. The modal
+        forms (RevealCardsToAllEffect, CakeRevealOpened) block the client's
+        queue on model.c until a RevealClosed arrives, and model.c is the same
+        sticky flag that disables the action button - not worth the risk for
+        "your opponent reveals their hand".
+
+        alwaysReveal is set because the point is to show the card even when
+        the viewer could otherwise see it.
+        """
+        cards = (change.detail or {}).get("cards") or []
+        items = []
+        for cid in cards:
+            # The card has to exist client-side and carry attributes, or there
+            # is nothing to turn face up.
+            items.append(("msg",) + self._introduce_msg(cid))
+            items.append(("msg", "EffectPlayed", {
+                "gameID": self.game_id,
+                "effectMessage": {
+                    "name": "RevealCardToAllEffect",
+                    "value": {
+                        "entityID": self.eid(cid),
+                        "Return": True,
+                        "alwaysReveal": True,
+                    },
+                },
+            }))
+        return [("seq", "AlwaysReveal", items)] if items else []
 
     def _change_prize(self, change):
         return self._change_move(change)

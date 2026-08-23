@@ -1167,6 +1167,7 @@ CHANGE_HEAL = "heal"          # damage counters removed
 CHANGE_CHOICE = "choice"      # a Choice is now outstanding; detail is it
 CHANGE_CHOSE = "chose"        # ... and this is the answer that resolved it
 CHANGE_MODIFIER = "modifier"  # a temporary rules change started
+CHANGE_REVEAL = "reveal"      # cards shown to both players; detail has "cards"
 
 
 @dataclass(frozen=True)
@@ -1702,6 +1703,20 @@ def _registry(state: GameState, kind: str) -> Mapping[str, Callable]:
     return {EFFECT_TRAINER: state.rules.trainer_effects,
             EFFECT_ABILITY: state.rules.ability_effects,
             EFFECT_ATTACK: state.rules.attack_effects}[kind]
+
+
+def reveal(state, changes, player, cards, reason=""):
+    """Show cards to both players.
+
+    A rules-visible event, not a rendering flourish: "your opponent reveals
+    their hand" is information the opponent is entitled to, so it belongs in
+    the change log rather than being left to the protocol layer to infer.
+    """
+    cards = [cid for cid in cards if cid is not None]
+    if not cards:
+        return
+    changes.append(Change(CHANGE_REVEAL, player=player,
+                          detail={"cards": list(cards), "reason": reason}))
 
 
 def _new_ctx(state: GameState, kind: str, key: str, player: int, **extra) -> dict:
