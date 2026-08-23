@@ -47,6 +47,7 @@ import time
 import uuid
 
 import ai
+import effects
 import engine
 import match
 
@@ -541,6 +542,16 @@ def card_db():
             os.path.join(HERE, "carddata"))
         log.info("engine card database: %d cards", len(_card_db))
     return _card_db
+
+
+def match_rules():
+    """The rules a match is played under, with every effect registry filled.
+
+    effects.rules_for memoises on the database, so this is a dict lookup after
+    the first call - but it walks every card and runs every text pattern over
+    every sentence to build, which is ~70ms and not something to do per match.
+    """
+    return effects.rules_for(card_db())
 
 
 _card_by_guid = None
@@ -1343,6 +1354,7 @@ class GameSession:
         self.deck_pile = None
         self.action_decode = None
         self.setup_cards = None
+        self.choice_options = None
         self.game_started = None
         self.selection_counter = 0
         self.pending_selection = None
@@ -1671,6 +1683,10 @@ class GameSession:
             self.game_id, [self.account_id(), AI_ACCOUNT_ID],
             card_db(), [deck, list(deck)],
             seed=random.randrange(1 << 30),
+            # Without this every registry is empty and the engine is inert:
+            # Trainers do nothing, Abilities cannot be used, and an attack is
+            # only its printed damage.
+            rules=match_rules(),
             first_player=0 if player_first else 1)
         # Setup is no longer done for the player. The board arrives dealt but
         # unplaced, and advance_match then offers them their Active and Bench
@@ -1774,6 +1790,8 @@ class GameSession:
         both.
         """
         state = self.match.state
+        if state.pending is not None:
+            return self.offer_choice()
         if state.phase == engine.PHASE_SETUP:
             return self.offer_setup()
         if state.players[0].active is None:
@@ -1788,6 +1806,43 @@ class GameSession:
         log.info("[game %s] -> offer (%d actions, counter %d)",
                  self.peer, len(body["targetMap"]), self.selection_counter)
         self.send_game("SelectionWithTargetsAndActionsRequired", body)
+
+    def offer_choice(self):
+        """Ask the outstanding Choice.
+
+        An effect that stopped to ask leaves state.pending set, and until it is
+        answered nothing else in the game is legal. A Choice we fail to put on
+        screen is therefore not a missing feature, it is a hung match - so an
+        unrenderable one is answered with the first legal pick rather than
+        dropped.
+        """
+        choice = self.match.state.pending.choice
+        self.selection_counter += 1
+        name, body, options = self.match.choice_selection(
+            choice, self.selection_counter)
+        if not options:
+            log.warning("[game %s] choice %r had no options; answering empty",
+                        self.peer, choice.prompt)
+            return self.resolve_choice(())
+        self.choice_options = options
+        self.pending_selection = "Choice"
+        log.info("[game %s] -> %s for %r (%d options, pick %d-%d)",
+                 self.peer, name, choice.prompt, len(options),
+                 choice.minimum, choice.maximum)
+        self.send_game(name, body)
+
+    def resolve_choice(self, picks):
+        """Apply a Choose and carry on."""
+        try:
+            self.match.state, changes = engine.apply(
+                self.match.state, engine.Choose(
+                    self.match.state.pending.choice.player, tuple(picks)))
+        except engine.IllegalAction as exc:
+            log.warning("[game %s] illegal choice %r: %s; re-offering",
+                        self.peer, picks, exc)
+            return self.offer_choice()
+        self.emit_items(self.match.animation_for(changes))
+        self.advance_match()
 
     def offer_setup(self):
         """Ask the player for their Active and Bench, on the real setup screen.
@@ -1813,7 +1868,16 @@ class GameSession:
         with an arbitrary placement, which is what the player was complaining
         about in the first place.
         """
-        if self.match is None or self.pending_selection != "Setup":
+        if self.match is None:
+            return
+        if self.pending_selection == "Choice":
+            self.pending_selection = None
+            picks = self.match.decode_choice_reply(
+                (value or {}).get("selection"), self.choice_options or [],
+                self.match.state.pending.choice)
+            log.info("[game %s] <- choice: %d pick(s)", self.peer, len(picks))
+            return self.resolve_choice(picks)
+        if self.pending_selection != "Setup":
             return
         self.pending_selection = None
         active, bench = self.match.decode_setup_reply(
@@ -2053,6 +2117,12 @@ class GameSession:
         counter = req.get("counter")
         log.info("[game %s] <- GameCustomChoice selection=%r counter=%r (%s)",
                  self.peer, choice, counter, self.pending_selection)
+        if self.pending_selection == "Choice":
+            self.pending_selection = None
+            options = self.choice_options or []
+            if choice is None or choice < 0 or choice >= len(options):
+                return self.offer_choice()    # cancelled or nonsense
+            return self.resolve_choice((options[choice],))
         if self.pending_selection != "GoFirst":
             return
         self.pending_selection = None

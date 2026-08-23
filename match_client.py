@@ -207,6 +207,7 @@ class Harness:
         self.revealed = 0
         self.actions_taken = 0
         self.setups = 0
+        self.choices = 0
         self.revealed_pokemon = 0
         self.result = None
         self.turns = 0
@@ -351,13 +352,24 @@ class Harness:
             name, value = self.wait_for(
                 ["SelectionWithTargetsAndActionsRequired",
                  "SelectionWithTargetsRequired",
+                 "CustomChoiceRequired",
                  "GameCompletedMessage"], timeout=30)
             if name == "GameCompletedMessage":
                 self.result = value
                 return
             if name == "SelectionWithTargetsRequired":
-                self.setups += 1
-                self.send("SelectionWithTargets", self._setup_reply(value))
+                # Setup and every effect Choice share this message; the setup
+                # one is the only one that sends two TargetInformations.
+                infos = next(iter((value.get("targetMap") or {}).values()), [])
+                if len(infos) > 1:
+                    self.setups += 1
+                else:
+                    self.choices += 1
+                self.send("SelectionWithTargets", self._targets_reply(value))
+                continue
+            if name == "CustomChoiceRequired":
+                self.choices += 1
+                self.send("GameCustomChoice", self._custom_choice_reply(value))
                 continue
             self.turns += 1
             options = value.get("targetMap") or []
@@ -369,48 +381,55 @@ class Harness:
                        "counter": value.get("counter")})
         raise ProtocolError("match did not finish in %d actions" % max_actions)
 
-    def _setup_reply(self, offer):
-        """Answer the setup screen: one Active, then some Bench, together.
+    def _targets_reply(self, offer):
+        """Answer any SelectionWithTargetsRequired.
 
-        targetMap here is a dict with exactly one key, and the response echoes
-        that key plus one EntityListTargetResponse per TargetInformation, in
-        the order the array declared them - Active first, Bench second.
+        One reply shape covers both the setup screen and every effect Choice:
+        targetMap is a dict with exactly one key, and the response echoes that
+        key plus one EntityListTargetResponse per TargetInformation, in the
+        order the array declared them. Setup happens to send two (Active, then
+        Bench); a Choice sends one.
+
+        Nothing here already picked is offered again, which is what stops the
+        Active being echoed back inside the bench list.
         """
         target_map = offer.get("targetMap") or {}
         if len(target_map) != 1:
             raise ProtocolError(
-                "setup offer had %d targetMap keys; the client throws on "
-                "anything but exactly 1" % len(target_map))
+                "offer had %d targetMap keys; the client throws on anything "
+                "but exactly 1" % len(target_map))
         entity_id, infos = next(iter(target_map.items()))
-        active_info = infos[0] if infos else {}
-        bench_info = infos[1] if len(infos) > 1 else {}
 
-        candidates = list(active_info.get("validTargets") or [])
-        if not candidates:
-            raise ProtocolError("setup offer listed no Basic to choose")
-        if self.rng is not None:
-            active = self.rng.choice(candidates)
-        else:
-            active = candidates[0]
-
-        rest = [e for e in (bench_info.get("validTargets") or [])
-                if e != active]
-        room = int(bench_info.get("numberToSelect") or 0)
-        if self.rng is not None:
-            self.rng.shuffle(rest)
-            bench = rest[:self.rng.randint(0, min(room, len(rest)))]
-        else:
-            bench = rest[:room]
-
+        responses, taken = [], set()
+        for info in infos or []:
+            info = info or {}
+            pool = [e for e in (info.get("validTargets") or [])
+                    if e not in taken]
+            most = int(info.get("numberToSelect") or 0)
+            least = int(info.get("minimumToSelect") or 0)
+            least = max(0, min(least, len(pool)))
+            most = max(least, min(most, len(pool)))
+            if self.rng is not None:
+                self.rng.shuffle(pool)
+                count = self.rng.randint(least, most) if most >= least else 0
+            else:
+                count = most
+            picked = pool[:count]
+            taken.update(picked)
+            responses.append({"name": "EntityListTargetResponse",
+                              "entityList": picked})
         return {"counter": offer.get("counter"),
-                "selection": {
-                    "entityID": entity_id,
-                    "targetResponses": [
-                        {"name": "EntityListTargetResponse",
-                         "entityList": [active]},
-                        {"name": "EntityListTargetResponse",
-                         "entityList": list(bench)},
-                    ]}}
+                "selection": {"entityID": entity_id,
+                              "targetResponses": responses}}
+
+    def _custom_choice_reply(self, offer):
+        """Answer a button prompt; the reply is the button INDEX."""
+        buttons = offer.get("buttons") or []
+        if not buttons:
+            return {"counter": offer.get("counter"), "selection": -1}
+        index = (self.rng.randrange(len(buttons)) if self.rng is not None
+                 else 0)
+        return {"counter": offer.get("counter"), "selection": index}
 
     def _select(self, target_map):
         """Choose one offered action, or pass when there is nothing.

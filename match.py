@@ -39,7 +39,8 @@ ZONE_PLAYMAT = "playmat"
 ZONE_DECK, ZONE_HAND, ZONE_PRIZES = "deck", "hand", "prizePile"
 ZONE_ACTIVE, ZONE_BENCH = "activePokemonArea", "bench"
 ZONE_DISCARD, ZONE_LOST = "discard", "lostZone"
-PLAYMAT_ZONES = ("outOfPlay", "activeStadium", "activeTrainer")
+ZONE_STADIUM, ZONE_OUT_OF_PLAY = "activeStadium", "outOfPlay"
+PLAYMAT_ZONES = (ZONE_OUT_OF_PLAY, ZONE_STADIUM, "activeTrainer")
 PLAYER_ZONES = (ZONE_DECK, ZONE_HAND, ZONE_PRIZES, ZONE_ACTIVE,
                 ZONE_BENCH, ZONE_DISCARD, ZONE_LOST)
 
@@ -70,6 +71,8 @@ ACTION_EVOLVE = "1e7c0b00-0000-4000-8000-000000000004"
 ACTION_PROMOTE = "1e7c0b00-0000-4000-8000-000000000005"
 ACTION_SETUP_ACTIVE = "1e7c0b00-0000-4000-8000-000000000006"
 ACTION_SETUP_BENCH = "1e7c0b00-0000-4000-8000-000000000007"
+ACTION_TRAINER = "1e7c0b00-0000-4000-8000-000000000008"
+ACTION_TOOL = "1e7c0b00-0000-4000-8000-000000000009"
 
 # The prompts the original server used, recovered from the localization DB -
 # it still carries the server's own com.direwolfdigital.cake.rules.* namespace,
@@ -77,6 +80,41 @@ ACTION_SETUP_BENCH = "1e7c0b00-0000-4000-8000-000000000007"
 PROMPT_SETUP_ACTIVE = (
     "com.direwolfdigital.cake.rules.states.startgame.selectstartingpokemon")
 PROMPT_SETUP_BENCH = "playmat.gamestart.promptbenchpokemon.new"
+
+# engine Choice.prompt is a stable id for the renderer to key off, not text.
+# Each maps to a real key from the client's shipped DB - a key that does not
+# exist is not an error client-side, it is displayed verbatim, so every one of
+# these was looked up rather than guessed.
+CHOICE_PROMPT_DEFAULT = "playmat.prompt.choosecards"
+CHOICE_PROMPTS = {
+    "healTarget":      "playmat.prompt.selectahurtpokemon",
+    "discardFromHand": "playmat.prompt.selectcardtodiscard",
+    "discardEnergy":   "playmat.prompt.chooseenergydiscard",
+    "moveEnergy":      "playmat.prompt.chooseenergymove",
+    "energyTarget":    "playmat.prompt.attachenergy",
+    "evolveTarget":    "playmat.prompt.selectapokemontoevolve",
+    "searchDeck":      "playmat.prompt.choosecardtoputintohand",
+    "fromDiscard":     "playmat.prompt.choosecardtoputintohand",
+    "fromHand":        "playmat.prompt.choosecards",
+    "shuffleFromHand": "playmat.prompt.choosecards",
+    "lookAtTop":       "playmat.prompt.choosecards",
+    "gustTarget":      "playmat.prompt.selectanenemybenchedpokemon",
+    "snipeTarget":     "playmat.prompt.choosebenchedpokemontodamage",
+    "switchTo":        "playmat.prompt.selectabenchedpokemon",
+    "scoopTarget":     "playmat.prompt.selectapokemon",
+}
+
+
+def _option_label(option):
+    """A CHOICE_OPTION id as a button key.
+
+    The engine's opaque options are words like "yes" / "no" / a colour. Yes and
+    no have real keys; anything else has none, and the client renders an
+    unknown key as itself - which for a bare word is a readable button rather
+    than a broken one.
+    """
+    return {"yes": "common.dialog.yes",
+            "no": "common.dialog.no"}.get(str(option).lower(), str(option))
 
 
 def _loc(text):
@@ -155,6 +193,7 @@ class Match:
         self.entity = {}                        # engine card id -> entity GUID
         self.pile = {}                          # (player, zone) -> entity GUID
         self.playmat_id = str(uuid.uuid4())
+        self.playmat_zone = {}                  # playmat-level zone -> GUID
         self.player_entity = {}                 # player index -> entity GUID
         self.known = set()                      # every entity the client has
         # The attack currently being resolved. The client's hit effect needs
@@ -275,11 +314,14 @@ class Match:
         # owningPlayerID is how IntroduceEntity routes an area: anything owned
         # by a player goes into that player's piles, so a playmat-level area
         # with an owner is never bound to its layout and throws on the way.
-        children = [
-            _entity(str(uuid.uuid4()), self.playmat_id, None,
-                    ENTITY_AREA, [{"name": ATTR_NAME_KEY, "value": _loc(z)}])
-            for z in PLAYMAT_ZONES
-        ]
+        children = []
+        for zone in PLAYMAT_ZONES:
+            # Kept, because a Stadium has to be moved into one later and a
+            # freshly minted id would name an entity the client never saw.
+            zone_id = self.playmat_zone.setdefault(zone, str(uuid.uuid4()))
+            children.append(_entity(
+                zone_id, self.playmat_id, None, ENTITY_AREA,
+                [{"name": ATTR_NAME_KEY, "value": _loc(zone)}]))
         for index, player in enumerate(self.state.players):
             owner = self.account(index)
             player_id = self.player_entity.setdefault(index, str(uuid.uuid4()))
@@ -596,6 +638,48 @@ class Match:
                           "value": sorted(slot.conditions)},
         })]
 
+    # Healing changes the same attribute damage does, and _change_damage
+    # recomputes it from the live slot rather than from the change, so the two
+    # are genuinely the same message.
+    _change_heal = _change_damage
+
+    def _change_play(self, change):
+        """A Trainer was played. The move to the discard is its own Change."""
+        if change.card is None:
+            return []
+        return [("seq", "TrainerCard", [("msg",) + self._introduce_msg(change.card)])]
+
+    def _change_tool(self, change):
+        """A Tool becomes a child of the Pokemon, like Energy does."""
+        if change.card is None or change.slot is None:
+            return []
+        target = self.entity_of_slot(self.resolve_slot(change.slot))
+        if target is None:
+            return []
+        return [("seq", "PlayTool",
+                 [("msg",) + self._introduce_msg(change.card),
+                  ("msg",) + self._move_msg(change.card, target)])]
+
+    def _change_stadium(self, change):
+        """A Stadium belongs to the playmat, not to either player's board."""
+        if change.card is None:
+            return []
+        destination = self.playmat_zone.get(ZONE_STADIUM)
+        if destination is None:
+            return []
+        return [("seq", "StadiumPresent",
+                 [("msg",) + self._introduce_msg(change.card),
+                  ("msg",) + self._move_msg(change.card, destination)])]
+
+    def _change_ability(self, change):
+        """An Ability activated. The board changes are separate Changes."""
+        if change.slot is None:
+            return []
+        entity = self.entity_of_slot(self.resolve_slot(change.slot))
+        if entity is None:
+            return []
+        return [("seq", "PokeAbility", [])]
+
     def _change_prize(self, change):
         return self._change_move(change)
 
@@ -745,6 +829,111 @@ class Match:
         }
         return body, basics
 
+    # -- pending choices ---------------------------------------------------
+    #
+    # An effect that stops to ask something leaves state.pending set, and until
+    # it is answered NOTHING else in the game is legal - players_to_act returns
+    # only the asker. So a Choice the server cannot render is not a missing
+    # feature, it is a hung match, which is why every option_kind has a path
+    # here and the fallback answers rather than gives up.
+
+    def choice_selection(self, choice, counter):
+        """A Choice as a client selection. Returns (name, body, decode).
+
+        Cards and Pokemon go through SelectionWithTargetsRequired, the same
+        message the setup screen uses - one targetMap key, ignoreFirst, and a
+        single EntityListTargetInformation. Cards sitting in a zone the player
+        cannot see are sent as RevealEntityListTargetInformation instead, which
+        carries their attributes inline so the client can draw cards it was
+        never told about; that is the deck-search dialog.
+
+        Opaque options have no entities at all and become a button list.
+        """
+        owner = self.player_entity.get(choice.player) or self.playmat_id
+        prompt = CHOICE_PROMPTS.get(choice.prompt, CHOICE_PROMPT_DEFAULT)
+
+        if choice.option_kind == engine.CHOICE_OPTION:
+            body = {
+                "counter": counter,
+                "prompt": prompt,
+                "offerLength": 0,
+                "startingTimestamp": 0,
+                "sortType": "",
+                "buttons": [_loc(_option_label(o)) for o in choice.options],
+                "sourceEntity": None,
+                "kind": "",
+            }
+            return "CustomChoiceRequired", body, list(choice.options)
+
+        if choice.option_kind == engine.CHOICE_SLOT:
+            entities, options = [], []
+            for slot_id in choice.options:
+                slot = self.resolve_slot(slot_id)
+                entity = self.entity_of_slot(slot) if slot else None
+                if entity:
+                    entities.append(entity)
+                    options.append(slot_id)
+            reveal = None
+        else:
+            entities, options, reveal = [], [], {}
+            for cid in choice.options:
+                entity = self.eid(cid)
+                entities.append(entity)
+                options.append(cid)
+                # The client cannot render a card it has never been introduced
+                # to, and cards in the deck or the prize pile never were.
+                if choice.zone not in OPEN_ZONES:
+                    reveal[entity] = self.card_attributes(cid)
+            if not reveal:
+                reveal = None
+
+        info = {
+            "name": ("RevealEntityListTargetInformation" if reveal
+                     else "EntityListTargetInformation"),
+            "selected": True,
+            "accountID": None,
+            "targetPrompt": prompt,
+            "validTargets": entities,
+            "numberToSelect": max(1, choice.maximum),
+            "minimumToSelect": choice.minimum,
+            "forced": choice.minimum > 0,
+            "hintTargetMap": {},
+        }
+        if reveal:
+            info["revealEntities"] = reveal
+        body = {
+            "counter": counter,
+            "prompt": prompt,
+            "offerLength": 0,
+            "startingTimestamp": 0,
+            "forced": choice.minimum > 0,
+            "ignoreFirst": True,
+            "targetType": "",
+            "optimalPlayMap": [],
+            "selectionParams": {},
+            "sourceID": None,
+            "targetMap": {owner: [info]},
+        }
+        return "SelectionWithTargetsRequired", body, options
+
+    def decode_choice_reply(self, selection, options, choice):
+        """The picks named by a SelectionWithTargets reply, as engine ids."""
+        by_entity = {}
+        for option in options:
+            if choice.option_kind == engine.CHOICE_SLOT:
+                slot = self.resolve_slot(option)
+                entity = self.entity_of_slot(slot) if slot else None
+            else:
+                entity = self.eid(option)
+            if entity:
+                by_entity[entity] = option
+        picks = []
+        for response in (selection or {}).get("targetResponses") or []:
+            for entity in (response or {}).get("entityList") or []:
+                if entity in by_entity and by_entity[entity] not in picks:
+                    picks.append(by_entity[entity])
+        return tuple(picks[:max(1, choice.maximum)])
+
     def decode_setup_reply(self, selection, basics):
         """(active card, [bench cards]) from a SelectionWithTargets response.
 
@@ -854,6 +1043,7 @@ class Match:
         # that differs only by target, and that is only visible once they are
         # all in hand.
         attach, evolve, play, retreat, promote = {}, {}, {}, {}, {}
+        trainer, tool, ability = {}, {}, {}
         attacks = []
         for action in engine.legal_actions(self.state, player):
             if isinstance(action, engine.AttachEnergy):
@@ -873,6 +1063,16 @@ class Match:
             elif isinstance(action, engine.Promote):
                 target = self.entity_of_slot(self.resolve_slot(action.slot))
                 promote[target] = action
+            elif isinstance(action, engine.PlayTrainer):
+                trainer[action.card] = action
+            elif isinstance(action, engine.AttachTool):
+                target = self.entity_of_slot(self.resolve_slot(action.slot))
+                tool.setdefault(action.card, {})[target] = action
+            elif isinstance(action, engine.UseAbility):
+                # A real printed abilityID, so it belongs on the Pokemon with
+                # AbilitySelection - the same treatment an attack gets.
+                target = self.entity_of_slot(self.resolve_slot(action.slot))
+                ability.setdefault(target, {})[action.ability_id] = action
             elif isinstance(action, engine.Attack):
                 attacks.append(action)
 
@@ -895,6 +1095,25 @@ class Match:
         for target, action in promote.items():
             self._offer_group(rows, decode, target, ACTION_PROMOTE,
                               "Promote", "Ability", {target: action})
+        for card, action in trainer.items():
+            # A Trainer names no target when it is played; anything it needs to
+            # know it asks for afterwards, as a Choice.
+            self._offer_group(rows, decode, self.eid(card), ACTION_TRAINER,
+                              "TrainerCard", "Ability",
+                              {self.pile.get((player, ZONE_DISCARD)): action})
+        for card, by_target in tool.items():
+            self._offer_group(rows, decode, self.eid(card), ACTION_TOOL,
+                              "PlayTool", "Ability", by_target,
+                              "playmat.prompt.selectapokemon")
+        for target, by_ability in ability.items():
+            for ability_id, action in by_ability.items():
+                card = self.card(self.resolve_slot(action.slot).stack[-1])
+                printed = next((a for a in card.abilities
+                                if a.ability_id == ability_id), None)
+                self._offer_group(
+                    rows, decode, target, ability_id,
+                    _loc_key(printed.title) if printed else ability_id,
+                    "AbilitySelection", {target: action})
 
         if opp_active:
             active_entity = self.entity_of_slot(me.active) if me.active else None

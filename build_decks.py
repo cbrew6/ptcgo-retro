@@ -40,6 +40,7 @@ import uuid
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import ai       # noqa: E402
+import effects  # noqa: E402
 import engine   # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -191,7 +192,45 @@ def pick_lines(db, energies, count=3, seed=0):
     return out
 
 
-def build_pile(lines, energy_card):
+def pick_trainers(db, rules, want=6, seed=0):
+    """Trainers the engine can actually resolve, one printing per name.
+
+    Only cards in the effect registry are used. A Trainer with no implemented
+    effect is a blank card that costs the player a turn to discover, which is
+    worse than not being in the deck - the same "blank beats wrong" call this
+    project makes about card art.
+
+    Supporters are limited because only one may be played per turn; a deck full
+    of them is a deck full of dead cards.
+    """
+    rng = random.Random(seed)
+    by_name = {}
+    for guid in rules.trainer_effects:
+        if guid not in db:
+            continue
+        card = db.get(guid)
+        if not card.name or not card.trainer_types:
+            continue
+        kind = card.trainer_types[0]
+        if kind not in ("Item", "Supporter"):
+            continue          # Tools and Stadiums need a target or a slot
+        # One printing per name, chosen deterministically.
+        best = by_name.get(card.name)
+        if best is None or (card.set_code or "") < (best.set_code or ""):
+            by_name[card.name] = card
+
+    items = sorted((c for c in by_name.values() if c.trainer_types[0] == "Item"),
+                   key=lambda c: c.name)
+    supporters = sorted((c for c in by_name.values()
+                        if c.trainer_types[0] == "Supporter"),
+                        key=lambda c: c.name)
+    rng.shuffle(items)
+    rng.shuffle(supporters)
+    chosen = items[:max(0, want - 2)] + supporters[:2]
+    return chosen
+
+
+def build_pile(lines, energy_card, trainers=()):
     """A 60-card list of archetype GUIDs.
 
     Counts follow the shape a real list uses - more Basics than Stage 1s, more
@@ -204,11 +243,13 @@ def build_pile(lines, energy_card):
         pile += [stage1.guid] * (3 if stage2 else MAX_COPIES)
         if stage2 is not None:
             pile += [stage2.guid] * 2
+    for card in trainers:
+        pile += [card.guid] * 2
     pile += [energy_card.guid] * (DECK_SIZE - len(pile))
     return pile
 
 
-def deck_is_playable(db, pile, games=6):
+def deck_is_playable(db, pile, rules, games=6):
     """Play it out against itself. Returns (ok, reason).
 
     A deck can satisfy every counting rule and still be unplayable, and the
@@ -216,7 +257,8 @@ def deck_is_playable(db, pile, games=6):
     """
     for seed in range(games):
         try:
-            state, _ = engine.new_game(db, [list(pile), list(pile)], seed=seed)
+            state, _ = engine.new_game(db, [list(pile), list(pile)],
+                                       seed=seed, rules=rules)
         except Exception as exc:                  # a deck must never do this
             return False, "new_game failed: %s" % exc
         rng = random.Random(seed)
@@ -284,6 +326,10 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     db = engine.CardDB.from_directory(CARDDATA)
+    # The real registries, so a deck is proved playable under the same rules
+    # the server will run it under - an unimplemented Trainer is a dead card
+    # and this is where that shows up.
+    rules = effects.rules_for(db)
     energies = basic_energy(db)
     print("%d cards, basic Energy for %d types" % (len(db), len(energies)))
 
@@ -312,11 +358,12 @@ def main(argv=None):
         if name in have:
             print("skipping %r - a deck with that name already exists" % name)
             continue
-        pile = build_pile(lines, energies[colour])
+        trainers = pick_trainers(db, rules, seed=args.seed + len(built))
+        pile = build_pile(lines, energies[colour], trainers)
         if len(pile) != DECK_SIZE:
             print("skipping %r - built %d cards" % (name, len(pile)))
             continue
-        ok, reason = deck_is_playable(db, pile)
+        ok, reason = deck_is_playable(db, pile, rules)
         if not ok:
             print("skipping %r - %s" % (name, reason))
             continue
