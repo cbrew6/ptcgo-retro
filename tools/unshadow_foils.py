@@ -13,101 +13,139 @@ aside exactly the placeholders a bundle can now serve, and leaves every other
 one in place - a set with no donated foils still needs its blank, or the smear
 comes back.
 
-Nothing is deleted. Files are moved to a sibling directory so a bad call here
-is one move command away from being undone.
+Nothing is deleted. Files are moved to a sibling directory, and `--restore`
+puts them all back, so a bad call here is one command away from being undone.
+
+--------------------------------------------------------------------------
+Why this is request-driven now
+--------------------------------------------------------------------------
+
+The previous two versions worked backwards: take a LooseArt filename, guess
+which part of it is the "namespace", and ask whether a bundle with a matching
+name exists. That guess is where both earlier rounds went wrong, because a
+bundle's name ends in a content-release token of at least four shapes
+(_CR105, _CRR65p1, _CRSM4, a bare _SM3, or nothing at all) and the request
+namespace is not recoverable from it by pattern-matching.
+
+It is recoverable from the other end, exactly and with no guessing. The client
+builds its foil request in CardImageRenderer from card data, and it picks
+between two forms based on DoesAssetExistInManifest - so `foil_coverage` can
+compute the one string the client will actually ask for, per card. This tool
+now enumerates those strings, asks the manifest (as asset_server serves it)
+which of them a bundle can answer, and moves aside only the placeholders
+sitting on top of those. No namespace is ever derived.
+
+The second thing that changed: only files that are byte-for-byte the neutral
+placeholder are moved. A real mask dropped into LooseArt by hand now stays
+put no matter what a bundle claims.
 
 Usage:
-    python tools/unshadow_foils.py [--apply]
+    python tools/unshadow_foils.py             # dry run
+    python tools/unshadow_foils.py --apply
+    python tools/unshadow_foils.py --unused    # also report never-requested blanks
+    python tools/unshadow_foils.py --restore   # put everything back
 """
 
-import json
 import os
-import re
 import shutil
 import sys
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-INDEX = os.path.join(HERE, "bundle_index.json")
-LOOSE_ART = os.path.join(
-    os.path.dirname(HERE),
-    "PokemonTradingCardGameOnline",
-    "Pokemon Trading Card Game Online_Data",
-    "LooseArt",
-)
+sys.path.insert(0, HERE)
+sys.path.insert(0, os.path.join(HERE, "tools"))
+
+import foil_coverage as fc                                    # noqa: E402
+
+LOOSE_ART = fc.LOOSE_ART
 SHADOWED = os.path.join(os.path.dirname(HERE), "_looseart_shadowed_foils")
 
-# en_US_COL_wp_pcd_Foil2_CR116_2 -> COL_wp_pcd_Foil2
-# The trailing number is a build version and the _CR token is a content
-# release; neither is part of the namespace the client requests.
-#
-# The CR token is NOT always numeric - SM-era releases are _CRSM4, _CRSM6,
-# _CRR65p1. A pattern that only matched _CR<digits> left those bundles
-# looking like a namespace of their own, so their LooseArt blanks were never
-# recognised as shadowing and every SM foil stayed flat.
-VERSION_RE = re.compile(r"_\d+$")
 
-# A mask bundle's namespace is deterministic: everything up to and including
-# the _wp_<kind>[_Foil<n>] part. What follows is a content-release token, and
-# those come in at least two shapes - _CR105, _CRR65p1, _CRSM4, and bare set
-# codes like _SM3 - so matching the release is guesswork, while matching the
-# namespace is not. Getting this wrong is silent: the blank simply keeps
-# winning and the card renders flat, which is how the whole SM era stayed
-# unfoiled through two rounds of "fixing" it.
-MASK_RE = re.compile(r"^(.+?_wp_[a-z]+(?:_Foil\d*)?)")
+def placeholders():
+    """LooseArt mask files that are the neutral placeholder -> full path."""
+    out = {}
+    if not os.path.isdir(LOOSE_ART):
+        return out
+    with os.scandir(LOOSE_ART) as it:
+        for entry in it:
+            if "_wp_" not in entry.name or not entry.name.endswith(".png"):
+                continue
+            try:
+                if entry.stat().st_size == fc.PLACEHOLDER_SIZE:
+                    out[entry.name.lower()] = entry.path
+            except OSError:
+                pass
+    return out
 
 
-def namespace_of(bundle):
-    name = bundle[6:] if bundle.startswith("en_US_") else bundle
-    name = VERSION_RE.sub("", name)
-    m = MASK_RE.match(name)
-    return m.group(1) if m else name
+def analyse():
+    """-> (shadowing, unused) lists of (filename, request)."""
+    manifest = fc.manifest_asset_names()
+    blanks = placeholders()
+    wanted = set()
+    shadowing = []
+    for card in fc.enumerate_cards():
+        for _role, request in fc.requests_for(card, manifest):
+            stem = request.replace("/", "_").lower() + ".png"
+            wanted.add(stem)
+            if stem in blanks and request in manifest:
+                shadowing.append((os.path.basename(blanks[stem]), request))
+    seen = set()
+    shadowing = [x for x in shadowing
+                 if not (x[0] in seen or seen.add(x[0]))]
+    unused = sorted(os.path.basename(p) for s, p in blanks.items()
+                    if s not in wanted)
+    return shadowing, unused
 
 
-def bundle_namespaces():
-    """namespace -> set of asset names the bundles can serve."""
-    with open(INDEX, encoding="utf-8") as fh:
-        bundles = json.load(fh)
-    served = {}
-    for name, assets in bundles.items():
-        served.setdefault(namespace_of(name), set()).update(assets)
-    return served
+def restore():
+    if not os.path.isdir(SHADOWED):
+        print("nothing to restore: %s does not exist" % SHADOWED)
+        return
+    names = os.listdir(SHADOWED)
+    for fn in names:
+        shutil.move(os.path.join(SHADOWED, fn), os.path.join(LOOSE_ART, fn))
+    print("restored %d files to LooseArt" % len(names))
 
 
 def main(argv):
-    apply_changes = "--apply" in argv
-    served = bundle_namespaces()
-    moves = []
-    for fn in sorted(os.listdir(LOOSE_ART)):
-        # Only the mask layer. Card faces in LooseArt are ours and stay.
-        if "_wp_" not in fn or not fn.endswith(".png"):
-            continue
-        stem = fn[:-4]
-        # Split into the longest namespace that a bundle actually serves.
-        for cut in range(len(stem) - 1, 0, -1):
-            if stem[cut] != "_":
-                continue
-            namespace, asset = stem[:cut], stem[cut + 1:]
-            if asset in served.get(namespace, ()):
-                moves.append((fn, namespace))
-                break
+    if "--restore" in argv:
+        restore()
+        return
+    shadowing, unused = analyse()
 
     by_ns = {}
-    for _fn, ns in moves:
+    for _fn, request in shadowing:
+        ns = request.split("/")[0]
         by_ns[ns] = by_ns.get(ns, 0) + 1
-    print("%d mask files in LooseArt are now served by a bundle" % len(moves))
+    print("%d neutral placeholders are shadowing a mask a bundle can serve"
+          % len(shadowing))
     for ns, count in sorted(by_ns.items())[:12]:
         print("   %-34s %d" % (ns, count))
     if len(by_ns) > 12:
-        print("   ... and %d more namespaces" % (len(by_ns) - 12))
+        print("   ... and %d more request namespaces" % (len(by_ns) - 12))
 
-    if not apply_changes:
+    if "--unused" in argv:
+        print("\n%d placeholders are never requested by any archetype "
+              "(dead weight, safe to leave)" % len(unused))
+        pref = {}
+        for fn in unused:
+            key = fn.rsplit("_", 1)[0]
+            pref[key] = pref.get(key, 0) + 1
+        for key, count in sorted(pref.items(), key=lambda x: -x[1])[:12]:
+            print("   %-34s %d" % (key, count))
+
+    if "--apply" not in argv:
         print("\n(dry run - pass --apply to move them aside)")
         return
 
     os.makedirs(SHADOWED, exist_ok=True)
-    for fn, _ns in moves:
-        shutil.move(os.path.join(LOOSE_ART, fn), os.path.join(SHADOWED, fn))
-    print("\nmoved %d files to %s" % (len(moves), SHADOWED))
+    moved = 0
+    for fn, _request in shadowing:
+        src = os.path.join(LOOSE_ART, fn)
+        if os.path.exists(src):
+            shutil.move(src, os.path.join(SHADOWED, fn))
+            moved += 1
+    print("\nmoved %d files to %s" % (moved, SHADOWED))
 
 
 if __name__ == "__main__":

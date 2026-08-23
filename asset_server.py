@@ -37,7 +37,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 PORT = 8081
 # Bump when the manifest contents change - the client caches the manifest by
 # version number and won't re-fetch otherwise.
-MANIFEST_VERSION = 5
+# 6: bundle_index.json is now read from each bundle's own m_Container instead
+#    of by walking strings, which removed 1,279 invented asset names (and
+#    added one real one). Invented names matter: DoesAssetExistInManifest is
+#    what makes the client commit to a request, so a name no bundle can serve
+#    sends it down a branch with no fallback.
+MANIFEST_VERSION = 6
 
 log = logging.getLogger("assets")
 

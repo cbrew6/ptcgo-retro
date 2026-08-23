@@ -136,7 +136,13 @@ def unityweb_payload(d):
     return _lzma_alone(d[header_size:])
 
 
-def unityfs_payload(d):
+def unityfs_layout(d):
+    """-> (blocks, data_off, nodes) without decompressing any block yet.
+
+    blocks is [(uncompressedSize, compressedSize, flags)] in stream order;
+    nodes is the directory that follows it, [(path, offset, size, flags)],
+    where offset is relative to the concatenated decompressed blocks.
+    """
     o = 0
     _, o = _cstr(d, o)
     version = struct.unpack_from(">i", d, o)[0]; o += 4
@@ -153,9 +159,24 @@ def unityfs_payload(d):
 
     q = 16                      # skip uncompressedDataHash
     count = struct.unpack_from(">i", info, q)[0]; q += 4
-    out = []
+    blocks = []
     for _ in range(count):
         usize, csize, bflags = struct.unpack_from(">iih", info, q); q += 10
+        blocks.append((usize, csize, bflags))
+    nodes = []
+    if q + 4 <= len(info):
+        ncount = struct.unpack_from(">i", info, q)[0]; q += 4
+        for _ in range(ncount):
+            off, size, nflags = struct.unpack_from(">qqi", info, q); q += 20
+            path, q = _cstr(info, q)
+            nodes.append((path, off, size, nflags))
+    return blocks, data_off, nodes
+
+
+def unityfs_payload(d):
+    blocks, data_off, _nodes = unityfs_layout(d)
+    out = []
+    for usize, csize, bflags in blocks:
         out.append(_unpack(bflags & 0x3F, d[data_off:data_off + csize], usize))
         data_off += csize
     return b"".join(out)
@@ -195,10 +216,107 @@ def asset_names(raw):
     return out
 
 
+# --------------------------------------------------------------------------
+# m_Container - the authoritative list
+# --------------------------------------------------------------------------
+#
+# The string-walking heuristic above finds asset names, but it also finds
+# anything else in the file that happens to look like one. Measured over all
+# 1,818 bundles it invented 1,279 names ("kj", "midl", "pKPC__UU", ...) and
+# missed one real one. Invented names are not harmless: the client gates on
+# DoesAssetExistInManifest, so a bogus entry can make it commit to a request
+# that no bundle can serve, and the fallback it would otherwise have taken is
+# never tried.
+#
+# The AssetBundle object (class 142) carries m_Container, which is exactly the
+# name -> asset map the bundle can serve. It sits at the very start of the
+# serialized file - offset 4164 in a 17 MB payload - so for UnityFS only the
+# first block or two has to be decompressed. That makes the authoritative
+# read *faster* than the heuristic, not slower: all 1,818 bundles in ~8s.
+
+CLASS_ASSETBUNDLE = 142
+
+
+def _serialized_file():
+    """bundle_textures imports us, so import it lazily to avoid a cycle."""
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                    "tools"))
+    from bundle_textures import SerializedFile
+    return SerializedFile
+
+
+def _container_of(payload, base):
+    SerializedFile = _serialized_file()
+    sf = SerializedFile(payload, base)
+    for obj in sf.objects:
+        if obj["class_id"] == CLASS_ASSETBUNDLE:
+            return [e["first"] for e in (sf.read_object(obj).get("m_Container")
+                                         or [])]
+    return None
+
+
+def _container_unityfs(d):
+    blocks, data_off, nodes = unityfs_layout(d)
+    if not nodes:
+        return None
+    base = nodes[0][1]
+    buf = bytearray()
+    pos = [data_off]
+    it = iter(blocks)
+
+    def grow():
+        try:
+            usize, csize, bflags = next(it)
+        except StopIteration:
+            return False
+        buf.extend(_unpack(bflags & 0x3F, d[pos[0]:pos[0] + csize], usize))
+        pos[0] += csize
+        return True
+
+    # One block is normally plenty; keep growing while the parse says it is
+    # short rather than guessing how much a given bundle needs.
+    while len(buf) < base + 65536 and grow():
+        pass
+    for _ in range(len(blocks) + 1):
+        try:
+            return _container_of(bytes(buf), base)
+        except Exception:
+            if not grow():
+                raise
+    return None
+
+
+def _container_unityweb(d):
+    raw = unityweb_payload(d)
+    n = struct.unpack_from(">i", raw, 0)[0]
+    p = 4
+    first = None
+    for _ in range(n):
+        e = raw.index(b"\0", p)
+        p = e + 1
+        off, _size = struct.unpack_from(">2i", raw, p)
+        p += 8
+        if first is None:
+            first = off
+    return _container_of(raw, first)
+
+
+def container_names(path):
+    """Asset names straight out of the bundle's own m_Container, or None."""
+    with open(path, "rb") as fh:
+        head = fh.read(8)
+    d = open(path, "rb").read()
+    if head.startswith(b"UnityFS"):
+        return _container_unityfs(d)
+    if head.startswith(b"UnityWeb"):
+        return _container_unityweb(d)
+    return None
+
+
 def main():
     if not os.path.isdir(BUNDLE_DIR):
         sys.exit("no bundle directory: %s" % BUNDLE_DIR)
-    index, total = {}, 0
+    index, total, fell_back = {}, 0, []
     for fn in sorted(os.listdir(BUNDLE_DIR)):
         if not fn.endswith(".unity3d"):
             continue
@@ -208,19 +326,34 @@ def main():
         name, _, ver = stem.rpartition("_")
         if not name or not ver.isdigit():
             continue
+        path = os.path.join(BUNDLE_DIR, fn)
+        names = None
         try:
-            raw = decompress(os.path.join(BUNDLE_DIR, fn))
-        except (lzma.LZMAError, ValueError, struct.error) as exc:
-            print("  SKIP %s: %s" % (fn, exc))
-            continue
-        if raw is None:
-            continue
-        names = asset_names(raw)
+            names = container_names(path)
+        except Exception as exc:                       # noqa: BLE001
+            fell_back.append("%s (%s)" % (fn, exc))
+        if names is None:
+            # No AssetBundle object, no type tree, or an unreadable container:
+            # keep the old heuristic so a bundle is never dropped entirely.
+            if not fell_back or not fell_back[-1].startswith(fn):
+                fell_back.append(fn)
+            try:
+                raw = decompress(path)
+            except (lzma.LZMAError, ValueError, struct.error) as exc:
+                print("  SKIP %s: %s" % (fn, exc))
+                continue
+            if raw is None:
+                continue
+            names = asset_names(raw)
         index[name] = names
         total += len(names)
     with open(OUT, "w", encoding="utf-8") as fh:
         json.dump(index, fh, indent=1)
     print("indexed %d bundles, %d asset names -> %s" % (len(index), total, OUT))
+    if fell_back:
+        print("  %d bundles fell back to the string heuristic:" % len(fell_back))
+        for f in fell_back[:10]:
+            print("    %s" % f)
 
 
 if __name__ == "__main__":

@@ -27,13 +27,46 @@ dictionary *by shape* rather than by field name.
 `Ensure()` never throws: an exception there would break the texture path for
 every asset in the game.
 
+## Reference counting — load-bearing, do not remove
+
+Every texture `Ensure()` inserts must also be registered with pie-bundles'
+`AssetRefCounter`, and `Track()` does that.
+
+`AssetBundleImageCache` is an LRU capped at 60. `AddTexture()` evicts before
+inserting, and eviction calls `AssetRefCounter.RemoveReference`, which *throws*
+for anything it isn't counting. The first version of this helper wrote straight
+into the cache dictionary and never registered anything, so every loose texture
+was an untracked landmine. Once the player had browsed about sixty cards the
+cache stayed full and the next `AddTexture` — which is exactly how a real foil
+mask arrives from a bundle — hit one during eviction and threw.
+
+The throw escapes the loading coroutine and Unity kills it where it stood:
+
+| coroutine | dies before | what the player sees |
+| --- | --- | --- |
+| `CardImageRenderer.updateCardImage` | `setFoilMask()` | card keeps its face, loses its foil |
+| `AssetBundleTexture.loadAssetRoutine` | `set_mainTexture()` | deck box, sleeve and coin blank |
+| `AssetBundleMaterial` | same | the 3D deck box wrap blank |
+
+One session's log carried 203 of these. That is the whole reason foils "worked
+for the first few cards and then stopped", and why it read as an era-specific
+gap rather than a cache-size one — whether a card got its foil depended only on
+how many cards had been looked at that session.
+
 ## Applying
 
 ```
-csc -target:library -out:PtcgoLooseArt.dll \
-    -r:<Managed>/UnityEngine.dll -r:<Managed>/UnityEngine.CoreModule.dll \
-    -r:<Managed>/UnityEngine.ImageConversionModule.dll PtcgoLooseArt.cs
-copy PtcgoLooseArt.dll <Managed>/
+build.cmd
+```
+
+which compiles `PtcgoLooseArt.cs` and copies the DLL into `<Managed>`. That is
+all that is needed to change the helper: `pie-bundles.dll` already calls
+`PtcgoLooseArt.Ensure(object, string)`, and neither the assembly identity
+(`PtcgoLooseArt, 0.0.0.0`) nor that signature changes.
+
+The IL injection itself only has to be redone if `pie-bundles.dll` is replaced:
+
+```
 powershell -File patch.ps1 -CecilDir <cecil> -Managed <Managed> -Helper <Managed>/PtcgoLooseArt.dll
 ```
 

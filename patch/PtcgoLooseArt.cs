@@ -24,15 +24,58 @@ using UnityEngine;
 ///
 /// Files live in &lt;game&gt;_Data/LooseArt/ and are named after the asset request
 /// with '/' replaced by '_', e.g. asset "BW1/079" -> "BW1_079.png".
+///
+/// ------------------------------------------------------------------------
+/// REF COUNTING -- do not remove, this is load-bearing
+/// ------------------------------------------------------------------------
+///
+/// AssetBundleImageCache is an LRU capped at cacheSize (60). AddTexture()
+/// evicts before inserting:
+///
+///     foreach (var item in imageCache)
+///         if (!requesters.ContainsValue(item.Value)) {
+///             AssetRefCounter.RemoveReference(item.Value);   // <-- here
+///             imageCache.Remove(item.Key);
+///             break;
+///         }
+///
+/// and AssetRefCounter.RemoveReference THROWS InvalidOperationException
+/// ("Tried to remove a Material reference to a Material that we weren't
+/// tracking! &lt;name&gt;") for anything it has no count for.
+///
+/// The first version of this helper wrote straight into the dictionary and
+/// never told AssetRefCounter, so every loose texture was an untracked
+/// landmine. Once the player had browsed ~60 cards the cache stayed full, and
+/// the very next AddTexture -- which is how a real foil mask arrives from a
+/// bundle -- hit a loose texture during eviction and threw. The throw escapes
+/// CardImageRenderer.updateCardImage, and Unity kills that coroutine at the
+/// point it reached: immediately BEFORE setFoilMask(). The card keeps its
+/// face and silently loses its foil, with nothing in the UI to show for it.
+///
+/// That is why "foils work for the first few cards and then stop", and why it
+/// looked like an era-specific or set-specific gap rather than a cache-size
+/// one. Registering the reference here makes eviction legal and the coroutine
+/// survives to bind the mask.
+///
+/// The reference we add mirrors exactly the one AddTexture() would have added
+/// for a bundle-loaded texture, so the counts stay balanced: +1 on insert into
+/// imageCache, +1 per GetTexture() requester, -1 on eviction, -1 when a
+/// requester goes away.
 /// </summary>
 public static class PtcgoLooseArt
 {
     private static string dir;
     private static FieldInfo cacheField;
     private static Type cacheOwner;
+    private static MethodInfo addReference;
+    private static bool addReferenceResolved;
     // Remember misses so a missing file isn't stat'd on every single frame.
     private static readonly HashSet<string> missing = new HashSet<string>();
-    private const int missLogLimit = 40;
+    // The miss log is the only way to discover a request name we are not
+    // serving, and at 40 it ran out during the login/collection walk - which
+    // is why nobody had ever seen a deckBoxes/ or cardSleeves/ line even
+    // though the client asks for them. One line per distinct asset, once.
+    private const int missLogLimit = 500;
 
     private static readonly string[] extensions = { ".png", ".jpg", ".jpeg" };
 
@@ -72,6 +115,10 @@ public static class PtcgoLooseArt
             tex.LoadImage(File.ReadAllBytes(file));
             tex.name = request;
             map[request] = tex;
+            // MUST happen for every texture that enters imageCache; see the
+            // class comment. Without it the cache's own eviction throws and
+            // takes CardImageRenderer's loader coroutine down with it.
+            Track(cache, tex);
             Debug.Log("[LooseArt] " + request + " <- " + Path.GetFileName(file));
         }
         catch (Exception e)
@@ -80,6 +127,58 @@ public static class PtcgoLooseArt
             // texture path for every asset in the game.
             Debug.LogWarning("[LooseArt] " + request + ": " + e.Message);
         }
+    }
+
+    /// <summary>Register the texture with pie-bundles' AssetRefCounter, the
+    /// way AddTexture() does for bundle-loaded ones.</summary>
+    private static void Track(object cache, Texture tex)
+    {
+        if (!addReferenceResolved)
+        {
+            addReferenceResolved = true;
+            try
+            {
+                // Same assembly as the cache, so no assembly reference and no
+                // dependency on the obfuscated name surviving.
+                Type t = cache.GetType().Assembly
+                              .GetType("pie.bundles.bundlemanager.AssetRefCounter");
+                if (t == null)
+                {
+                    // Fall back to shape: a static class with both
+                    // AddReference(Object) and RemoveReference(Object).
+                    foreach (Type candidate in cache.GetType().Assembly.GetTypes())
+                    {
+                        MethodInfo add = candidate.GetMethod(
+                            "AddReference",
+                            BindingFlags.Static | BindingFlags.Public |
+                            BindingFlags.NonPublic,
+                            null, new[] { typeof(UnityEngine.Object) }, null);
+                        MethodInfo rem = candidate.GetMethod(
+                            "RemoveReference",
+                            BindingFlags.Static | BindingFlags.Public |
+                            BindingFlags.NonPublic,
+                            null, new[] { typeof(UnityEngine.Object) }, null);
+                        if (add != null && rem != null) { t = candidate; break; }
+                    }
+                }
+                if (t != null)
+                    addReference = t.GetMethod(
+                        "AddReference",
+                        BindingFlags.Static | BindingFlags.Public |
+                        BindingFlags.NonPublic,
+                        null, new[] { typeof(UnityEngine.Object) }, null);
+            }
+            catch (Exception e)
+            {
+                Debug.LogWarning("[LooseArt] no AssetRefCounter: " + e.Message);
+            }
+            if (addReference == null)
+                Debug.LogWarning("[LooseArt] AssetRefCounter.AddReference not " +
+                                 "found - cache eviction will throw and foils " +
+                                 "will stop loading after ~60 cards");
+        }
+        if (addReference != null)
+            addReference.Invoke(null, new object[] { tex });
     }
 
     /// <summary>Find the cache's Dictionary&lt;string, Texture&gt; by shape, not
