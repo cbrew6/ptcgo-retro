@@ -1442,7 +1442,16 @@ class GameSession:
         self.send("CurrentWallet", {"currencies": []}, request_id)
 
     def on_GetDeckList(self, value, request_id):
-        decks = [deck_for_client(d) for d in load_decks()]
+        """Card decks only.
+
+        Equipping an avatar saves it through CakeSaveDeck like any other deck,
+        so decks.json accumulates an "Avatar" entry holding an AvatarPile. It
+        belongs to GetAvatarDeckList, and serving it here put a deck named
+        Avatar in the deck manager with no cards in it - selectable, and
+        unplayable if selected.
+        """
+        decks = [deck_for_client(d) for d in load_decks()
+                 if (d.get("piles") or {}).get("CakePile") is not None]
         log.info("[game %s] -> OnlineDecksFound (%d decks)",
                  self.peer, len(decks))
         write_frame(self.sock, msg("OnlineDecksFound", {"decks": decks}),
