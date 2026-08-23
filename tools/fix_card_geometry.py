@@ -1,42 +1,65 @@
 """
-Re-composites card faces that were built at the true paper ratio instead of the
-game's own.
+Repairs the horizontal stretch this script used to apply, and lays card faces
+out the way the client's own textures actually are.
 
-An authentic PTCGO card texture is 1024x1024 with the card occupying exactly
-803x1024, centred - i.e. the card is deliberately stretched horizontally away
-from the 63:88 ratio of the physical card, with ~110px of white padding down
-each side. That convention holds across every rip checked (bw1, xy1, xy12, sm8,
-hgss1, rsp, tk6a), so the client clearly expects it: it maps the whole 1024
-texture onto a card quad and lets the padding fall outside the visible face.
+THE ACTUAL GEOMETRY (measured, not assumed)
+An authentic PTCGO card texture is 1024x1024 and holds three things:
 
-Some art was instead fetched from api.pokemontcg.io and composited at the true
-paper ratio on a 1024 canvas - 734x1024 for most sets, putting the card in
-columns 145..878. Those cards render ~9% too narrow in game. Most sets can
-simply be replaced with the game's ripped texture; the sets handled here have
-no rip available, so the only available fix is to re-stretch the existing
-pixels. The source width is not the same everywhere, so it is a per-set
-parameter (see SOURCE_SPAN) rather than one global constant.
+    cols    0..109   white padding
+    cols  110..144   BLEED - a horizontal copy of the card's outermost column
+    cols  145..877   THE CARD, 733px wide, over the full 1024 height
+    cols  878..912   BLEED - a horizontal copy of the card's outermost column
+    cols  913..1023  white padding
 
-WHY THE EDGE CHECK IS THE WHOLE OPERATION
-This transform is NOT idempotent - stretching an already-correct 803px card
-again would take it to 879px and wreck it. The guard is that a file is only
-rewritten when its content is measured to start and end at exactly the columns
-its set is expected to occupy. An already-corrected file spans 110..912 and so
-fails that test; it is recognised by name and skipped. A file matching neither
-is skipped rather than guessed at.
+733/1024 = 0.71582 against the 63:88 paper card's 0.71591. The card sits at its
+TRUE ratio and is not stretched at all; the 803-column figure everyone reaches
+for is the outer extent of card PLUS bleed.
 
-The check is never relaxed to raise the success count, and it demands that the
-content REACH both edges rather than merely sit inside them. That strictness
-earned itself: SM_Energy has white margins wide enough to pass the weaker
-"outer columns are white" form of the test against the 145..878 span, and
-would have been silently cropped 5px too wide on each side. Measuring instead
-of assuming turned that into a known per-set difference.
+Verified with tools/bundle_textures.py over all 36 shipped en_US_*_Energy_*
+bundles: every one puts the card's left edge at column 145. Twenty-seven bleed
+the edge colour outwards to 110..912; the nine Free_Energy ones fill that band
+with black instead, which is what proves the band is not card. Within a row the
+band is flat and equal to column 145 (mean deviation 0.17-0.46), and on a card
+whose edge colour varies down the side it tracks that colour row by row.
 
-Only base card faces are touched: "<SET>_<number>.png" and the stamp-variant
-"<SET>_<number>xy.png". Files carrying "_wp_" are transparent stamp overlays
-with entirely different geometry, and the deck/pack/promo images (e.g.
-"BW2_packs_...", "XY6_stormriderxy6deck") are not card faces at all. Neither
-is matched by the pattern, so neither can be reached.
+The extractor those measurements come from is trustworthy: XY12 bundle textures
+decode byte-identically to the XY12 rip PNGs (MAE 0.00, max channel diff 0).
+
+Inside those textures a round type symbol measures 50x50 - a circle - and the
+psychic eye glyph 39x28, w/h 1.3929, against 1.3913 for untouched paper art. A
+9% horizontal stretch would read 1.52.
+
+WHAT THIS SCRIPT USED TO DO, AND WHY IT WAS WRONG
+It read 110..912 as the card and resampled each 734-wide card up to fill it,
+which made every face it rewrote ~9.4% too wide. That reading was reinforced by
+a second bug elsewhere: most LooseArt faces were at the time the game's own rip
+texture with the bleed columns painted white, so they measured 145..878 and
+looked like under-wide paper composites. They were not - they were correct
+cards missing only their bleed.
+
+The distortion is nearly invisible on illustrated art, which is why the change
+was reported as an improvement, and obvious on a basic energy, whose symbol is
+a circle. That is how it was caught.
+
+WHAT IT DOES NOW
+Restores the file from _backup_20260822/LooseArt and bleeds the card box's
+outermost columns out to 110..912. Card pixels are copied through UNRESAMPLED,
+so the art keeps the exact proportions it was fetched at. Nothing is scaled,
+cropped or padded.
+
+WHY THE GUARD IS THE WHOLE OPERATION
+A file is rewritten only when its current content is EXACTLY the old stretch
+recomputed from its own backup. That signature cannot arise by accident, so
+this can never touch a face it did not damage - in particular not the ~1,288
+faces later replaced with the game's own rip textures, which are byte-identical
+to the rip and already carry the real bleed. Idempotency comes free: a repaired
+file no longer matches the signature and is skipped.
+
+Rips are not consulted here. Replacing a face with its rip belongs to
+upgrade_card_art_from_rips.py, which has already taken every face it can serve.
+Of the faces left, the only one whose set and number name a rip entry
+(BW5 #111) is a 512x512 full-bleed image on a coloured ground - a different
+convention entirely - so it is refused rather than reshaped.
 
 Usage:
     python tools/fix_card_geometry.py [--apply]
@@ -50,85 +73,60 @@ import sys
 from PIL import Image, ImageChops
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+GAME = os.path.dirname(HERE)
 LOOSE_ART = os.path.join(
-    os.path.dirname(HERE),
+    GAME,
     "PokemonTradingCardGameOnline",
     "Pokemon Trading Card Game Online_Data",
     "LooseArt",
 )
+BACKUP = os.path.join(GAME, "_backup_20260822", "LooseArt")
 
-# Sets with no ripped texture available, so re-compositing is the only fix,
-# each with the source span (inclusive columns) its art was actually built at.
-#
-# Most api.pokemontcg.io art was composited at the true 63:88 paper ratio,
-# 734x1024 centred, i.e. columns 145..878.
-#
-# SM_Energy is 724px wide, not 734, and that is measured rather than assumed:
-# in all 9 files every one of the 1024 rows starts at exactly column 150 and
-# ends at exactly column 873, symmetric about the same centre. These cards are
-# square-cornered, so there are no rounded corners to explain the inset - the
-# compositor simply used a slightly narrower card width for this set. It is a
-# real difference, NOT a mistake in this table: cropping them at 145..878 like
-# every other set would bake a ~5px white sliver into each side and leave only
-# 792px of card inside the 803px box.
-#
-# Whole sets are listed even though most of their files are already correct.
-# That is deliberate: an already-correct file is recognised and skipped, so
-# naming the set costs nothing and avoids maintaining a per-file list.
-#
-# Sets not listed here are unreachable by this script. That matters for
-# TK10A_005.png, which is a copy of SM_Energy_006 and so carries the identical
-# 724-wide signature: it belongs to another set's namespace and is handled by
-# hand elsewhere, so "TK10A" is deliberately absent below.
-PAPER_SPAN = (145, 878)
-SOURCE_SPAN = {
-    "BW2": PAPER_SPAN,
-    "BW5": PAPER_SPAN,
-    "BW6": PAPER_SPAN,
-    "BW7": PAPER_SPAN,
-    "Promo_SM": PAPER_SPAN,
-    "Promo_XY": PAPER_SPAN,
-    "SM1": PAPER_SPAN,
-    "XY10": PAPER_SPAN,
-    "XY11": PAPER_SPAN,
-    "XY2": PAPER_SPAN,
-    "XY3": PAPER_SPAN,
-    "XY4": PAPER_SPAN,
-    "XY6": PAPER_SPAN,
-    "XY7": PAPER_SPAN,
-    "XY8": PAPER_SPAN,
-    "XY9": PAPER_SPAN,
+CANVAS = 1024
+
+# Outer extent of card plus bleed, measured from the shipped bundles. Identical
+# for every set.
+BLEED_BOX = (110, 912)
+
+# Where each set's card actually sits. fetch_art.py's to_card_texture() centres
+# the card over the full height, so the box follows from the source's aspect:
+# a 734-wide paper composite lands at 145..878. This is the card, not a guess
+# at one - content is verified to lie inside it before anything is written.
+PAPER_BOX = (145, 878)
+
+# SM_Energy composited 724 wide rather than 734, and that is measured rather
+# than assumed: in all 9 files every one of the 1024 rows starts at exactly
+# column 150 and ends at exactly column 873. Treating it as 145..878 would
+# bleed from a white column and leave a sliver of padding inside the card.
+CARD_BOX = {
+    "BW2": PAPER_BOX,
+    "BW5": PAPER_BOX,
+    "BW6": PAPER_BOX,
+    "BW7": PAPER_BOX,
+    "Promo_SM": PAPER_BOX,
+    "Promo_XY": PAPER_BOX,
+    "SM1": PAPER_BOX,
+    "XY10": PAPER_BOX,
+    "XY11": PAPER_BOX,
+    "XY2": PAPER_BOX,
+    "XY3": PAPER_BOX,
+    "XY4": PAPER_BOX,
+    "XY6": PAPER_BOX,
+    "XY7": PAPER_BOX,
+    "XY8": PAPER_BOX,
+    "XY9": PAPER_BOX,
     "SM_Energy": (150, 873),
 }
-SETS = list(SOURCE_SPAN)
+SETS = list(CARD_BOX)
 
 # A base card face. Trailing "xy" is the stamp/foil printing of the same card,
 # which is a card face too. Anything else after the set prefix - "packs_...",
 # a deck name, a "_wp_" overlay - deliberately does not match.
 FACE_RE = {s: re.compile(r"^%s_(\d+)(xy)?\.png$" % re.escape(s)) for s in SETS}
 
-CANVAS = 1024
-
-# The target geometry, identical for every set: the game's own convention.
-DST_LEFT, DST_WIDTH = 110, 803
-
 # A channel value above this counts as white. Padding written by a compositor
 # is a flat 255, so the tolerance only absorbs PNG-level noise, not real ink.
 WHITE = 245
-
-# How far short of its nominal edge the detected content may stop and still
-# count as reaching it. Some cards have a near-white border whose outermost
-# column or two sits above WHITE and so goes undetected; without this they
-# would be reported as unexplained rather than fixed. Kept at 2 because the
-# under-detection actually observed is one column, and every pixel of slack
-# here becomes a white sliver inside the rewritten card.
-#
-# This slack applies in ONE direction only - see span_matches().
-REACH_TOL = 2
-
-# Used ONLY to label a skip (see classify), never to admit a rewrite, so it can
-# be generous where REACH_TOL cannot.
-NEAR_TOL = 8
 
 
 def content_span(img):
@@ -146,87 +144,83 @@ def content_span(img):
     return box[0], box[2] - 1
 
 
-def span_matches(left, right, lo, hi):
-    """Is content at [left,right] the geometry [lo,hi]?
+def old_stretch(img, lo, hi):
+    """The damage this script used to do. Kept ONLY to recognise it.
 
-    The two halves of this are deliberately asymmetric, and the asymmetry is
-    the safety property:
-
-      CONTAINMENT is absolute. Content outside lo..hi means the crop would cut
-      the card, so it is never tolerated by any amount. Promo_SM_078 (content
-      from column 144) and XY4_122 (from 142) are real files that would each
-      lose a column of border to a symmetric tolerance. Losing card is worse
-      than leaving a card slightly narrow, so those are skipped and reported.
-
-      REACHING is tolerant, by REACH_TOL, because stopping a column short of
-      the edge is a detection artifact of a near-white border rather than
-      different geometry, and costs at most a hairline of white.
-
-    An earlier version used abs() on both ends, which silently permitted
-    content up to 3 columns OUTSIDE the span. Nothing had yet hit that case,
-    but XY4 does.
+    Must stay byte-for-byte what the old version produced, or the guard in
+    classify() stops matching and a damaged file goes unrepaired.
     """
-    if left < lo or right > hi:
-        return False
-    return left <= lo + REACH_TOL and right >= hi - REACH_TOL
+    crop = img.crop((lo, 0, hi + 1, CANVAS))
+    out = Image.new("RGB", (CANVAS, CANVAS), (255, 255, 255))
+    out.paste(crop.resize((BLEED_BOX[1] - BLEED_BOX[0] + 1, CANVAS),
+                          Image.LANCZOS), (BLEED_BOX[0], 0))
+    return out
 
 
-def classify(img, src_left, src_right):
-    """(verdict, detail) for one already-opened RGB image.
+def card_edges(img, lo, hi):
+    """The card's real outermost columns, or None if content escapes lo..hi.
 
-    Verdict "fix" means this set's expected centred composite was positively
-    identified. Every other verdict is a skip.
-
-    Content must REACH src_left and src_right, not merely sit somewhere
-    inside them. Testing only that the outer margins are white would have
-    accepted SM_Energy against the 145..878 span every other set uses and
-    quietly baked a white sliver down each side of all 9 files. The strict
-    form is what caught that, so it is applied to every set.
+    CARD_BOX is where the compositor PASTED the card; it is not always where
+    the ink starts. BW5 #111 composited 732 wide and so sits at 146..877, one
+    column inside the 145..878 box every other face uses. Bleeding from the box
+    corner there would replicate a white column - a no-op that leaves the face
+    with no bleed at all - so the edges are measured, not assumed.
     """
     span = content_span(img)
-    if span is None:
-        return "skip", "blank: no non-white pixel anywhere"
-    left, right = span
-    dst_right = DST_LEFT + DST_WIDTH - 1
-
-    if span_matches(left, right, src_left, src_right):
-        return "fix", "%dpx composite (cols %d..%d)" % (
-            src_right - src_left + 1, left, right)
-
-    # Explicit idempotency guard. Not needed for correctness - such a file has
-    # ink in columns 110..144 and so already failed the test above - but named
-    # so that a second run reports "already correct" instead of "unexpected".
-    if span_matches(left, right, DST_LEFT, dst_right):
-        return "skip", "already correct 803-wide geometry"
-
-    # Reporting only, and deliberately loose. Plenty of authentic textures
-    # measure a few columns off 110..912 - a dark border bleeds a pixel or two
-    # past the card edge, or a full-art promo is drawn marginally narrow. They
-    # are nowhere near the 734 signature and are not ours to touch, so they are
-    # named for what they are instead of being lumped in with the clip warning
-    # below. Widening this tolerance can only change a skip message; it can
-    # never turn a skip into a rewrite.
-    if abs(left - DST_LEFT) <= NEAR_TOL and abs(right - dst_right) <= NEAR_TOL:
-        return "skip", "at or near 803-wide geometry (cols %d..%d) - not the "                        "734 signature" % (left, right)
-
-    # Called out separately from a plain span mismatch because this is the
-    # case where rewriting would destroy card, not merely mis-pad it.
-    if left < src_left or right > src_right:
-        return "skip", (
-            "content reaches outside %d..%d (cols %d..%d, %dpx wide) - "
-            "cropping would clip the card"
-            % (src_left, src_right, left, right, right - left + 1))
-
-    return "skip", "unexpected content span (cols %d..%d, %dpx wide)" % (
-        left, right, right - left + 1)
+    if span is None or span[0] < lo or span[1] > hi:
+        return None
+    return span
 
 
-def restretch(img, src_left, src_right):
-    """This set's composite, re-laid out at the game's 803-wide convention."""
-    crop = img.crop((src_left, 0, src_right + 1, CANVAS))
-    out = Image.new("RGB", (CANVAS, CANVAS), (255, 255, 255))
-    out.paste(crop.resize((DST_WIDTH, CANVAS), Image.LANCZOS), (DST_LEFT, 0))
+def bleed(img, lo, hi):
+    """Extend the card's outermost columns sideways to fill BLEED_BOX.
+
+    Fills outward from the card's real edge, so any near-white padding the
+    compositor left between the box corner and the ink is covered by the bleed
+    rather than surviving as a sliver inside it.
+
+    Resizing a 1-column strip with NEAREST replicates that exact column, so no
+    new colour is invented and the card itself is never read back or rewritten.
+    """
+    out = img.copy()
+    left, right = BLEED_BOX
+    out.paste(img.crop((lo, 0, lo + 1, CANVAS))
+                 .resize((lo - left, CANVAS), Image.NEAREST), (left, 0))
+    out.paste(img.crop((hi, 0, hi + 1, CANVAS))
+                 .resize((right - hi, CANVAS), Image.NEAREST), (hi + 1, 0))
     return out
+
+
+def classify(current, backup, lo, hi):
+    """(verdict, detail). "fix" means this face carries the old stretch."""
+    if backup.size != (CANVAS, CANVAS):
+        return "skip", "backup is %dx%d" % backup.size
+    if current.size != (CANVAS, CANVAS):
+        return "skip", "current is %dx%d" % current.size
+
+    if content_span(backup) is None:
+        return "skip", "backup is blank: no non-white pixel anywhere"
+    edges = card_edges(backup, lo, hi)
+    if edges is None:
+        return "skip", ("backup content reaches outside %d..%d (cols %s) - "
+                        "not this set's composite box"
+                        % (lo, hi, content_span(backup)))
+
+    repaired = bleed(backup, *edges)
+    if ImageChops.difference(current, repaired).getbbox() is None:
+        return "skip", "already repaired"
+
+    if ImageChops.difference(current, old_stretch(backup, lo, hi)).getbbox() is None:
+        return "fix", "carries the old %d-wide stretch" % (
+            BLEED_BOX[1] - BLEED_BOX[0] + 1)
+
+    if ImageChops.difference(current, backup).getbbox() is None:
+        # Restored but never bled - the state a repair run leaves behind when
+        # it bled from a white box corner. Finishing the job is in scope.
+        return "fix", "at backup state but carries no bleed"
+
+    return "skip", ("changed by something else (content cols %s) - left alone"
+                    % (content_span(current),))
 
 
 def write_atomic(img, path):
@@ -242,8 +236,8 @@ def write_atomic(img, path):
 
 
 def targets():
-    """Existing LooseArt files that are base card faces of the target sets."""
-    for name in sorted(os.listdir(LOOSE_ART)):
+    """Backed-up files that are base card faces of the sets this script owns."""
+    for name in sorted(os.listdir(BACKUP)):
         for setcode, pattern in FACE_RE.items():
             if pattern.match(name):
                 yield setcode, name
@@ -255,40 +249,48 @@ def main(argv):
     unknown = [a for a in argv[1:] if a != "--apply"]
     if unknown:
         sys.exit("unrecognised argument(s): %s" % " ".join(unknown))
+    if not os.path.isdir(BACKUP):
+        sys.exit("no backup directory: %s" % BACKUP)
 
     fixed = collections.Counter()
     seen = collections.Counter()
     skips = collections.defaultdict(collections.Counter)
-    skip_files = collections.defaultdict(list)
 
     for setcode, name in targets():
         seen[setcode] += 1
         path = os.path.join(LOOSE_ART, name)
+        if not os.path.exists(path):
+            skips[setcode]["absent from LooseArt"] += 1
+            continue
+        lo, hi = CARD_BOX[setcode]
+        with Image.open(os.path.join(BACKUP, name)) as raw:
+            backup = raw.convert("RGB")
         with Image.open(path) as raw:
-            size = raw.size
-            if size != (CANVAS, CANVAS):
-                reason = "not 1024x1024 (is %dx%d)" % size
-                skips[setcode][reason] += 1
-                skip_files[reason].append(name)
-                continue
-            # Flatten to RGB up front: a stray alpha channel or palette would
-            # otherwise make "white" mean different things from file to file.
-            img = raw.convert("RGB")
+            current = raw.convert("RGB")
 
-        src_left, src_right = SOURCE_SPAN[setcode]
-        verdict, detail = classify(img, src_left, src_right)
+        verdict, detail = classify(current, backup, lo, hi)
         if verdict != "fix":
-            skips[setcode][detail] += 1
-            skip_files[detail].append(name)
+            skips[setcode][detail.split(" (")[0]] += 1
+            continue
+
+        left, right = card_edges(backup, lo, hi)
+        repaired = bleed(backup, left, right)
+        # Never write a face whose card pixels are not the backup's, untouched.
+        if ImageChops.difference(repaired.crop((left, 0, right + 1, CANVAS)),
+                                 backup.crop((left, 0, right + 1, CANVAS))
+                                 ).getbbox() is not None:
+            skips[setcode]["card pixels would change - refused"] += 1
             continue
 
         fixed[setcode] += 1
         if apply_changes:
-            write_atomic(restretch(img, src_left, src_right), path)
+            write_atomic(repaired, path)
 
-    verb = "rewritten" if apply_changes else "would rewrite"
+    verb = "repaired" if apply_changes else "would repair"
     print("mode: %s" % ("APPLY" if apply_changes else "dry run"))
-    for setcode in SETS:
+    for setcode in sorted(SETS):
+        if not seen[setcode]:
+            continue
         print("%-10s %4d faces  %s %4d  skipped %4d"
               % (setcode, seen[setcode], verb, fixed[setcode],
                  seen[setcode] - fixed[setcode]))
@@ -297,15 +299,13 @@ def main(argv):
              sum(seen.values()) - sum(fixed.values())))
 
     if any(skips.values()):
-        print("\nskips by set and reason:")
-        for setcode in SETS:
-            for reason, count in sorted(skips[setcode].items()):
-                print("  %-10s %4d  %s" % (setcode, count, reason))
-        print("\nskipped files:")
-        for reason, names in sorted(skip_files.items()):
-            print("  %s:" % reason)
-            for name in names:
-                print("    %s" % name)
+        print("\nskips by reason:")
+        totals = collections.Counter()
+        for setcode in skips:
+            for reason, count in skips[setcode].items():
+                totals[reason] += count
+        for reason, count in totals.most_common():
+            print("  %5d  %s" % (count, reason))
 
     strays = [n for n in os.listdir(LOOSE_ART) if n.endswith(".part")]
     print("\n.part files left in LooseArt: %d" % len(strays))

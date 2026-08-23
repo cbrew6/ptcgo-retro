@@ -2,9 +2,18 @@
 Replaces LooseArt base card faces with the game's own ripped textures.
 
 Art fetched from api.pokemontcg.io was composited at 734x1024 - the card's true
-63:88 ratio. The client's own textures put the card at 803x1024 inside the same
-1024x1024 canvas: horizontally stretched, centred, white padding either side.
-The API art therefore renders about 9% too narrow. The rips fix that exactly.
+63:88 ratio - and centred on white. The game's own textures place the card at
+the SAME true aspect (733x1024, cols 145..877) and then fill out to cols
+110..912 with a 35px horizontal BLEED of the card's own edge column. Copying a
+rip therefore gets both the art and that border exactly right.
+
+The 803 figure is the outer box, card plus bleed - it is NOT a card width, and
+the card is never stretched to reach it. Reading it as one is a mistake this
+project actually made: ~5,000 faces were resampled 9.4% too wide before the
+shipped DXT1 textures were decoded and measured (see CLAUDE.md). Two things
+made the wrong reading look right - the missing bleed makes correct art seem
+too narrow, and some rip textures carry no bleed at all, so they are
+indistinguishable from api art by span alone.
 
 Three rules this script does not bend:
 

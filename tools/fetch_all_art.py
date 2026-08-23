@@ -124,13 +124,15 @@ TIMEOUT = 60
 
 ATTR_NAME, ATTR_NUM = 200630, 200780
 
-# Geometry. See fetch_art.py for the full derivation; in short, the client's
-# own textures are 1024x1024 with the card in a centred column and white
-# either side, and the display quad crops to that column. Fit to full height,
-# keep the source's aspect, centre, pad with white. Do NOT stretch to fill:
-# that is what makes cards render noticeably too wide.
+# Geometry. See fetch_art.py for the full derivation and the measurements it
+# rests on. In short: a card texture is 1024x1024 with the card at its TRUE
+# 63:88 ratio, 733px wide (cols 145..877) over the full height, and the card's
+# outermost column bled sideways to cols 110..912. The display quad crops to
+# about that column. Do NOT stretch a scan to fill 110..912 - that band is card
+# PLUS bleed, and treating it as card makes every face ~9% too wide.
 CARD_TEXTURE = (1024, 1024)
 PAD_COLOUR = (255, 255, 255)
+BLEED_BOX = (110, 912)
 
 # Foil layers are masks, not artwork. With nothing bound the shader samples
 # leftover reflection state and smears a sheen across the card, so a fully
@@ -316,6 +318,23 @@ def set_index(sid, retries=RETRIES):
 
 # --------------------------------------------------------------- images ----
 
+def bleed_edges(canvas, lo, hi):
+    """Extend the card's outermost columns sideways to fill BLEED_BOX.
+
+    Resizing a 1-column strip with NEAREST replicates that exact column, so no
+    colour is invented and the card's own pixels are never resampled.
+    """
+    left, right = BLEED_BOX
+    h = canvas.height
+    if lo > left:
+        canvas.paste(canvas.crop((lo, 0, lo + 1, h))
+                           .resize((lo - left, h), Image.NEAREST), (left, 0))
+    if hi < right:
+        canvas.paste(canvas.crop((hi, 0, hi + 1, h))
+                           .resize((right - hi, h), Image.NEAREST), (hi + 1, 0))
+    return canvas
+
+
 def to_card_texture(data):
     """Lay a card out the way the client's own textures are laid out."""
     src = Image.open(io.BytesIO(data))
@@ -329,7 +348,9 @@ def to_card_texture(data):
     tw, th = CARD_TEXTURE
     w = max(1, min(tw, int(round(th * src.width / float(src.height)))))
     canvas = Image.new("RGB", CARD_TEXTURE, PAD_COLOUR)
-    canvas.paste(src.resize((w, th), Image.LANCZOS), ((tw - w) // 2, 0))
+    x0 = (tw - w) // 2
+    canvas.paste(src.resize((w, th), Image.LANCZOS), (x0, 0))
+    bleed_edges(canvas, x0, x0 + w - 1)
     buf = io.BytesIO()
     canvas.save(buf, format="PNG")
     return buf.getvalue()

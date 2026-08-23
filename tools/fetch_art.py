@@ -61,25 +61,33 @@ IMAGE = ("https://limitlesstcg.nyc3.cdn.digitaloceanspaces.com"
 UA = "Mozilla/5.0 (compatible; ptcgo-local personal archive)"
 DELAY = 2.0          # be polite to a community-run site
 
-# Geometry measured from the client's own shipped XY12 textures (DXT1,
-# 1024x1024): the card does NOT fill the square. It sits in a centred column
-# spanning x=110..912 (803px wide) over the full 1024 height, with white
-# padding either side. The display quad crops to that column, so a full-bleed
-# image gets magnified and its left/right edges cut off - which is exactly the
-# "stretched wide" symptom.
+# Geometry, measured from the client's own shipped textures with
+# tools/bundle_textures.py and cross-checked against the rips, which decode
+# byte-identically to them. A card texture is 1024x1024 holding three things:
 #
-# Reproduce that layout rather than any theoretical card aspect: whatever the
-# game ships is by definition what renders correctly.
-# The client's own art is ~0.78 aspect (yellow border spans x=111..909 over the
-# full 1024 height). Source images elsewhere are usually a true card scan at
-# ~0.719. Do NOT stretch one to the other - scaling a 0.719 image into the
-# 0.78 column makes every card render ~9% too wide.
+#     cols    0..109   white padding
+#     cols  110..144   BLEED - a horizontal copy of the card's outermost column
+#     cols  145..877   THE CARD, 733px wide, over the full 1024 height
+#     cols  878..912   BLEED - a horizontal copy of the card's outermost column
+#     cols  913..1023  white padding
 #
-# Instead: fit to full height, keep the source's own aspect, centre it, and let
-# white padding take up the slack. The quad crops to roughly the card column,
-# so a slightly narrower card sits inside that crop at correct proportions.
+# 733/1024 = 0.71582 against the 63:88 paper card's 0.71591, so the card sits at
+# its TRUE ratio and is not stretched. Every one of the 36 shipped
+# en_US_*_Energy_* bundles puts the card's left edge at column 145; 27 bleed the
+# edge colour outwards and the 9 Free_Energy ones fill that band with black
+# instead, which is what proves the band is not card.
+#
+# The 803-column figure (110..912) is the outer extent of card PLUS bleed.
+# Reading it as the card is what once made fetched faces ~9% too wide: a round
+# type symbol, 50x50 in the shipped textures, came out an ellipse. Do NOT
+# stretch a 0.716 scan to fill it.
+#
+# So: fit to full height, keep the source's own aspect, centre it - then bleed
+# the card's edge columns out to 110..912, because the display quad crops to
+# about that column and would otherwise show a white sliver down each side.
 CARD_TEXTURE = (1024, 1024)
 PAD_COLOUR = (255, 255, 255, 255)
+BLEED_BOX = (110, 912)
 
 ATTR_SET, ATTR_NAME, ATTR_NUM = 200580, 200630, 200780
 
@@ -124,11 +132,29 @@ def local_card(ptcgo_set, number):
     return None
 
 
+def bleed_edges(canvas, lo, hi):
+    """Extend the card's outermost columns sideways to fill BLEED_BOX.
+
+    Resizing a 1-column strip with NEAREST replicates that exact column, so no
+    colour is invented and the card's own pixels are never resampled.
+    """
+    from PIL import Image
+    left, right = BLEED_BOX
+    h = canvas.height
+    if lo > left:
+        canvas.paste(canvas.crop((lo, 0, lo + 1, h))
+                           .resize((lo - left, h), Image.NEAREST), (left, 0))
+    if hi < right:
+        canvas.paste(canvas.crop((hi, 0, hi + 1, h))
+                           .resize((right - hi, h), Image.NEAREST), (hi + 1, 0))
+    return canvas
+
+
 def to_card_texture(data):
     """Lay the card out the way the client's own textures are laid out.
 
-    1024x1024 canvas, card scaled into the centred column x=110..912 over full
-    height, white either side. See the CARD_* constants for why.
+    1024x1024 canvas: card at its own aspect over the full height, centred,
+    then its edge columns bled out to 110..912. See the geometry note above.
     """
     try:
         from PIL import Image
@@ -141,7 +167,9 @@ def to_card_texture(data):
     tw, th = CARD_TEXTURE
     w = max(1, min(tw, int(round(th * src.width / float(src.height)))))
     canvas = Image.new("RGBA", CARD_TEXTURE, PAD_COLOUR)
-    canvas.paste(src.resize((w, th), Image.LANCZOS), ((tw - w) // 2, 0))
+    x0 = (tw - w) // 2
+    canvas.paste(src.resize((w, th), Image.LANCZOS), (x0, 0))
+    bleed_edges(canvas, x0, x0 + w - 1)
     buf = io.BytesIO()
     canvas.save(buf, format="PNG")
     return buf.getvalue()
