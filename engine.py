@@ -76,6 +76,7 @@ ATTR_EVOLVES_FROM = 200640         # the *name* (ATTR_CARD_NAME) of the pre-evol
 ATTR_SET = 200580
 ATTR_COLLECTOR_NUMBER = 200780
 ATTR_TRAINER_TYPES = 200270        # "Item" | "Supporter" | "Stadium" | "PokemonTool"
+ATTR_ASSET_NAME = 10020            # art override; absolute when it contains "/"
 
 # --------------------------------------------------------------------------
 # vocabulary
@@ -249,6 +250,19 @@ def _strings(attrs, ident) -> tuple:
     return ()
 
 
+def _card_image(value):
+    """ATTR_ASSET_NAME, but only when it names a card face.
+
+    The same attribute doubles as an absolute asset path for products
+    ("packs/SM3Booster"), which the client resolves against the bundle root
+    rather than the card's set. Those archetypes are boosters and deck boxes,
+    so anything containing "/" is not a face and is dropped here.
+    """
+    if not value or "/" in value:
+        return None
+    return value
+
+
 @dataclass(frozen=True)
 class Ability:
     """One entry of ATTR_ABILITIES, already parsed out of its JSON string.
@@ -310,6 +324,10 @@ class Card:
     # but the client's hand comparator dereferences it unguarded, so the
     # protocol layer needs it and this is where archetypes are already parsed.
     name_key: Optional[str] = None
+    # Art-variant suffix ("017a", "043xy"). The client's textureLookup prefers
+    # this over the padded collector number, so a variant that does not send it
+    # renders the wrong printing's art.
+    card_image: Optional[str] = None
 
     @classmethod
     def from_archetype(cls, archetype: Mapping[str, Any]) -> "Card":
@@ -370,6 +388,10 @@ class Card:
             # stored as a JSON string: "\"$$$com...Name$$$\""
             name_key=(_str(at, 10140) or "").strip('"').strip("$") or None,
             trainer_types=_strings(at, ATTR_TRAINER_TYPES),
+            # A value containing "/" is an absolute asset path naming a product
+            # ("packs/SM3Booster"), not a card face - those archetypes are boxes
+            # and boosters, never anything that reaches a playmat.
+            card_image=_card_image(_str(at, ATTR_ASSET_NAME)),
         )
 
     # -- classification ----------------------------------------------------

@@ -49,6 +49,10 @@ ATTR_HP = 200490                 # value = current, originalValue = max
 ATTR_SET, ATTR_CARD_NAME, ATTR_CARD_NUM = 200580, 200630, 200780
 ATTR_CARD_TYPE, ATTR_TRAINER_TYPE = 200300, 200270
 ATTR_STAGE, ATTR_RETREAT, ATTR_FAMILY = 200540, 200800, 200260
+ATTR_POKEMON_TYPES = 200570        # PokemonTypes[]; CardImageRenderer throws
+                                   # without it - see card_attributes
+ATTR_ENERGY_PROVIDED = 201040      # {"options": [[type, ...], ...]}
+ATTR_ASSET_NAME = 10020            # art-variant suffix, preferred over 200780
 ATTR_BENCH_SLOTS = 201920          # BenchLayout divides by this: 0 gives NaN
 
 # Zones whose contents the owner may see. Everything else stays face down.
@@ -153,6 +157,25 @@ class Match:
                 attrs.append({"name": ATTR_RETREAT, "value": card.retreat_cost})
             if card.family_id is not None:
                 attrs.append({"name": ATTR_FAMILY, "value": card.family_id})
+        # 200570 is what makes a card show its art at all. CardImageRenderer's
+        # getDefaultPerCardType picks the placeholder from
+        # typeData.EnergyType.Value, and EnergyType is only populated for a
+        # Pokemon from the LAST entry of this array - so with the attribute
+        # absent it is a Nullable with no value and .Value throws. The throw
+        # unwinds RefreshRequestData before it reaches getImageRequestString,
+        # so the card never requests its texture and stays blank forever.
+        # Collection and deck views build cards from the local archetype DB,
+        # which has every attribute; only entities we synthesise are affected,
+        # which is why art broke in matches alone.
+        if card.types and (card.is_pokemon or "LegendHalf" in card.card_types):
+            attrs.append({"name": ATTR_POKEMON_TYPES, "value": list(card.types)})
+        if card.energy_options:
+            attrs.append({"name": ATTR_ENERGY_PROVIDED,
+                          "value": {"options": [list(o) for o in card.energy_options]}})
+        # Variant printings ("017a") are looked up by this instead of the
+        # padded collector number; without it they render the plain printing.
+        if card.card_image:
+            attrs.append({"name": ATTR_ASSET_NAME, "value": card.card_image})
         if card.name:
             attrs.append({"name": ATTR_CARD_NAME, "value": card.name})
         if card.set_code:
