@@ -137,6 +137,26 @@ ATTR_RARITY_TEXT = 200900  # LocalizableText parsed into Cake.enums.Rarities
 ATTR_SPRITE = 200930     # LocalizableText carrying the sprite base name
 ATTR_IS_DEFAULT = 200940  # bool?, marks the fallback item for a slot
 ATTR_FREE = 200950       # bool?, "no purchase needed"
+ATTR_HAIR_HAS_BACK = 201740  # bool?, hair item also has a back half
+
+# j.y.Group, read verbatim from IL (ilspycmd -t j.y). All sixteen members and
+# their integer values, so nothing here is inferred:
+#
+#   UNSET = -1, Eyes = 0, Eyebrows = 1, Face = 2, Face_prop = 3,
+#   face_makeup = 4, Facial_hair = 5, Hair = 6, Hat = 7, Jacket = 8,
+#   Trousers = 9, Mouth = 10, Nose = 11, Shirt = 12, Shoes = 13,
+#   Shape = 14, Skin_color = 15
+#
+# Every name this script emits is one of those, spelled identically, so no
+# value degrades to UNSET. Note the bundles are named avatar_0..avatar_14 but
+# that numbering is NOT the Group value - bundle avatar_7 holds only `_shoes`
+# assets while Group 7 is Hat. The bundles are arbitrary packing partitions.
+GROUP_VALUES = {
+    "UNSET": -1, "Eyes": 0, "Eyebrows": 1, "Face": 2, "Face_prop": 3,
+    "face_makeup": 4, "Facial_hair": 5, "Hair": 6, "Hat": 7, "Jacket": 8,
+    "Trousers": 9, "Mouth": 10, "Nose": 11, "Shirt": 12, "Shoes": 13,
+    "Shape": 14, "Skin_color": 15,
+}
 
 # Value encodings, matching the exporter that produced carddata/*.json and
 # server.pb_object(): 3=STRING/enum, 4=BOOL, 5=INT, 8=JSON.
@@ -167,6 +187,34 @@ def v_text(raw):
 # absent from this table means "this asset is not a wardrobe slot" - the
 # hand/handheld suffixes have no Group member at all, so those items are
 # skipped rather than guessed at.
+#
+# VERIFIED against the client's own prefabs, not inferred. AvatarItemRenderer
+# builds its asset name as `sprite.ToLower() + "_" + ItemSuffix` inside bundle
+# "avatar", and both AvatarGroup and ItemSuffix are *serialised MonoBehaviour
+# fields* - they live in the prefabs, not in any assembly. The two prefabs are
+# Resources.Load<FlatAvatarRenderer>("MaleAvatar"/"FemaleAvatar"), which sit in
+# resources.assets; reading the int at (ItemSuffix string offset - 24) recovers
+# the AvatarGroup paired with each suffix. Doing that over the whole file finds
+# exactly these pairs and no others:
+#
+#   Eyes 0        eyes                Mouth 10     mouth
+#   Eyebrows 1    eyebrows            Nose 11      nose
+#   Face_prop 3   face_prop           Shirt 12     shirtt shirtll shirtlu
+#   Facial_hair 5 facial_hair                      shirtrl shirtru
+#   Hat 7         hat                 Shoes 13     shoes
+#   Jacket 8      jackett jacketh jacketll jacketlu jacketrl jacketru
+#   Trousers 9    trousers
+#
+# Hair and Skin_color have dedicated renderer classes instead of an ItemSuffix:
+# AvatarHairRenderer requests `<sprite>fr_hair`, `<sprite>bk_hair` (only when
+# 201740 is true) and the equipped *hat's* `<sprite>_hatmask`; while
+# AvatarItemSkinRenderer only tints a texture and loads nothing.
+#
+# Three suffixes below therefore have NO renderer anywhere: "shape",
+# "face_makeup" and the "hats"/"jacketth"/"jackth"/"shirtt_b" oddities. Items
+# filed under Shape and face_makeup are still emitted - the Group values are
+# real enum members, the client accepts them, and the thumbnails do appear in
+# the wardrobe grid - but the flat avatar will never draw them.
 SUFFIX_GROUP = {
     "hair": "Hair",
     "hat": "Hat", "hatmask": "Hat", "hats": "Hat",
@@ -211,11 +259,30 @@ SENTINEL_CASE = {
 # and the visually identical choice.
 RARITY_TEXT = "Common"
 
-# createCollectionItemList() groups items into "named collections" by cutting
-# this string at its last 'm'/'f'. It skips anything empty or equal to "na",
-# and "na" is a string the client itself carries, so it is the sentinel the
-# original data must have used for "not part of a collection".
+# createCollectionItemList() reads attribute 200880 as LocalizableText and uses
+# its .ID, dropping anything empty or equal to "na" - so "na" really is the
+# "not in a collection" sentinel, but emitting it for *every* item is why the
+# collections view came back empty: CollectionItemsList and NamedItemCollections
+# were both filtered down to nothing.
+#
+# The real format is not guessed. AvatarCollectionsController carries it twice:
+#
+#   maleCollectionName   = string.Format("{0}m", collectionName)
+#   femaleCollectionName = string.Format("{0}f", collectionName)
+#
+# and its two fields are *initialised to the literals* "donphanm" / "donphanf",
+# a surviving example of a real 200880 value. Both createCollectionItemList()
+# and AvatarCollectionsController.calculateCollectionProgress() then recover the
+# collection by cutting at the last 'm' (or last 'f' when the id ends in 'f'),
+# which is safe for every id of the form <slug> + 'm'/'f'.
+#
+# The slugs themselves are shipped data too: the label is looked up as
+# L.LT("profile.avatar.collectionLabel.{0}"), and LocalizationDB-UTF16.db still
+# holds those 21 rows. So COLLECTION_SLUGS is read from the database at build
+# time rather than written out here, and "donphan" from that query matches the
+# literal in the assembly exactly.
 NO_COLLECTION = "na"
+COLLECTION_KEY_PREFIX = "profile.avatar.collectionLabel."
 
 LOC_PREFIX = "com.direwolfdigital.cake.data.products.avataritems."
 
@@ -272,6 +339,71 @@ def load_localization(path):
     return out
 
 
+def load_collection_slugs(path):
+    """The 21 real collection slugs, from profile.avatar.collectionLabel.<slug>.
+
+    Longest first, because the slugs nest: "pikachu" is a prefix of
+    "pikachuclub", "pikachucosplay", "pikachupokeball" and so on, and the
+    longest match is the specific collection.
+    """
+    if not os.path.exists(path):
+        return []
+    uri = "file:%s?mode=ro" % path.replace("\\", "/")
+    con = sqlite3.connect(uri, uri=True)
+    try:
+        rows = con.execute("select key from Lookup where key like ?",
+                           (COLLECTION_KEY_PREFIX + "%",)).fetchall()
+    finally:
+        con.close()
+    slugs = {k[len(COLLECTION_KEY_PREFIX):] for (k,) in rows}
+    return sorted((s for s in slugs if s), key=lambda s: (-len(s), s))
+
+
+def assign_collections(items, slugs):
+    """Attribute 200880: "<slug>m" / "<slug>f", else the "na" sentinel.
+
+    An item belongs to a collection when its sprite - minus the leading gender
+    letter - starts with that collection's slug. That is the same relationship
+    the shipped art already encodes (fdonphancollectionrampagehat lives in the
+    "donphan" collection), and it is checked longest-slug-first so the specific
+    collection wins over its family prefix.
+
+    Nothing is invented: an item that matches no shipped slug keeps "na" and is
+    simply absent from the collections view, exactly as before.
+    """
+    matched = 0
+    for it in items:
+        core = it.sprite.lower()
+        if core[:1] in ("f", "m"):
+            core = core[1:]
+        hit = next((s for s in slugs if core.startswith(s)), None)
+        if hit:
+            it.collection = hit + ("m" if it.gender == "Male" else "f")
+            matched += 1
+        else:
+            it.collection = NO_COLLECTION
+    return matched
+
+
+def assign_hair_backs(items, body):
+    """Attribute 201740, read by AvatarHairRenderer as `hasBack`.
+
+    When true the renderer additionally loads `<sprite>bk_hair`; when the
+    attribute is missing the Nullable is empty, hasBack stays false and the
+    back half is never drawn - which is what the catalog did until now, so
+    every long hairstyle rendered without its back. The flag is not a judgement
+    call: it is true exactly when that asset exists in the bundles.
+    """
+    marked = 0
+    for it in items:
+        if it.group != "Hair":
+            continue
+        if "hair" in body.get(it.sprite.lower() + "bk", ()):
+            it.has_back = True
+            marked += 1
+    return marked
+
+
 def load_existing_guid_halves(card_dir):
     """Every (lo, hi) already in carddata, to prove the new ids collide with
     nothing. The client does dictionary.Add() per archetype and a duplicate
@@ -298,7 +430,7 @@ def guid_halves(sprite):
 
 class Item:
     __slots__ = ("sprite", "group", "gender", "stem", "loc_key", "name",
-                 "is_default", "pair_id")
+                 "is_default", "pair_id", "collection", "has_back")
 
     def __init__(self, sprite, group, gender, stem):
         self.sprite = sprite      # value of attribute 200930
@@ -308,6 +440,8 @@ class Item:
         self.loc_key = None
         self.name = None
         self.is_default = False
+        self.collection = NO_COLLECTION   # attribute 200880
+        self.has_back = False             # attribute 201740, Hair only
 
 
 def collect_items(thumbs, body, skin_stems):
@@ -470,9 +604,11 @@ def build_attrs(item, minimal, free):
     attrs += [
         {"n": ATTR_NAME, "v": v_text(name)},
         {"n": ATTR_RARITY_TEXT, "v": v_text(RARITY_TEXT)},
-        {"n": ATTR_COLLECTION, "v": v_text(NO_COLLECTION)},
+        {"n": ATTR_COLLECTION, "v": v_text(item.collection)},
         {"n": ATTR_FREE, "v": v_bool(free)},
     ]
+    if item.has_back:
+        attrs.append({"n": ATTR_HAIR_HAS_BACK, "v": v_bool(True)})
     if item.is_default:
         attrs.append({"n": ATTR_IS_DEFAULT, "v": v_bool(True)})
     return attrs
@@ -510,11 +646,17 @@ def main(argv=None):
     loc = load_localization(args.localization_db)
     skin = sorted(s for s in loc if SKIN_KEY_RE.match(s))
 
+    slugs = load_collection_slugs(args.localization_db)
+
     items, skipped, dropped = collect_items(thumbs, body, skin)
     pairs = assign_pair_keys(items)
     resolved = resolve_names(items, loc)
     defaults = choose_defaults(items)
+    collected = assign_collections(items, slugs)
+    hair_backs = assign_hair_backs(items, body)
     catalog = build_catalog(items, args.minimal, not args.not_free)
+
+    bad_groups = sorted({i.group for i in items} - set(GROUP_VALUES))
 
     # Ids must be unique among themselves and disjoint from carddata.
     existing = load_existing_guid_halves(CARD_DIR)
@@ -529,6 +671,14 @@ def main(argv=None):
     print("  slot defaults (200940)     : %d" % defaults)
     print("names from localization      : %d" % resolved)
     print("names fell back to sprite    : %d" % (len(items) - resolved))
+    print("collection slugs shipped     : %d" % len(slugs))
+    print("  items in a collection      : %d" % collected)
+    print("  items left as '%s'         : %d" % (NO_COLLECTION,
+                                                 len(items) - collected))
+    print("hair items with a back half  : %d" % hair_backs)
+    print("groups not in j.y.Group      : %d%s"
+          % (len(bad_groups), (" " + ", ".join(bad_groups)) if bad_groups
+             else ""))
     print()
     print("%-14s %8s %8s %8s" % ("slot", "female", "male", "total"))
     for group in sorted({g for g, _ in by_group}):
@@ -554,7 +704,7 @@ def main(argv=None):
     print("thumbnail requests missing   : %d" % len(bad))
     if bad:
         print("  e.g. " + ", ".join(thumbnail_asset(i) for i in bad[:5]))
-    if collisions or dupes_internal or bad:
+    if collisions or dupes_internal or bad or bad_groups:
         print("REFUSING to write: an id collides (the client does "
               "dictionary.Add() per archetype and throws on duplicates) or a "
               "sprite does not resolve to a real asset.")

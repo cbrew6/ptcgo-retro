@@ -362,7 +362,8 @@ ATTR_AVATAR_IS_DEFAULT, ATTR_AVATAR_IS_AVATAR = 201310, 201300
 ATTR_GROUP, ATTR_GENDER, ATTR_DEFAULT_ITEM = 200890, 10220, 200940
 AVATAR_PILE = "AvatarPile"
 AVATAR_GENDER = "Female"
-_avatar_deck = None
+_avatar_items = None
+_avatar_decks = {}
 
 
 def _archetype_guid(a):
@@ -376,7 +377,8 @@ def _archetype_guid(a):
                          + a["lo"].to_bytes(8, "big")))
 
 
-def build_avatar_deck():
+def build_avatar_deck(want_gender=AVATAR_GENDER, randomize=False,
+                      deck_id=None):
     """One equipped avatar, without which the wardrobe screen cannot open.
 
     AddDecks() records DefaultAvatarDeck only for a deck carrying 201310, and
@@ -392,42 +394,66 @@ def build_avatar_deck():
     shows only items matching it, so a mixed-gender deck would hide half the
     wardrobe. Items are chosen by attribute 200940, the catalogue's own
     per-slot default, rather than by picking arbitrarily.
+
+    randomize picks a different item per slot instead, which is what the
+    Random button and the gender switch both ask for.
     """
-    global _avatar_deck
-    if _avatar_deck is None:
+    global _avatar_items
+    if _avatar_items is None:
         if not os.path.exists(AVATARS_PATH):
             log.warning("no avatars.json - avatar builder will not open")
-            return None
-        with open(AVATARS_PATH, encoding="utf-8") as fh:
-            archetypes = json.load(fh).get("archetypes") or []
-        chosen, fallback = {}, {}
-        for a in archetypes:
-            at = dict((x["n"], (x.get("v") or {})) for x in a["attrs"])
-            if at.get(ATTR_GENDER, {}).get("s") != AVATAR_GENDER:
-                continue
-            group = at.get(ATTR_GROUP, {}).get("s")
-            if not group:
-                continue
-            fallback.setdefault(group, a)
-            if at.get(ATTR_DEFAULT_ITEM, {}).get("b"):
-                chosen.setdefault(group, a)
-        for group, a in fallback.items():
-            chosen.setdefault(group, a)
-        pile = [_archetype_guid(a) for a in chosen.values()]
-        _avatar_deck = {
-            "deckID": AVATAR_DECK_ID,
-            "deckName": "Avatar",
-            "attributes": [
-                {"name": ATTR_AVATAR_IS_DEFAULT, "value": True,
-                 "originalValue": True},
-                {"name": ATTR_AVATAR_IS_AVATAR, "value": True,
-                 "originalValue": True},
-            ],
-            "piles": {AVATAR_PILE: pile},
-        }
-        log.info("built avatar deck: %d items across %s",
-                 len(pile), ", ".join(sorted(chosen)))
-    return _avatar_deck
+            _avatar_items = []
+        else:
+            with open(AVATARS_PATH, encoding="utf-8") as fh:
+                archetypes = json.load(fh).get("archetypes") or []
+            _avatar_items = []
+            for a in archetypes:
+                at = dict((x["n"], (x.get("v") or {})) for x in a["attrs"])
+                group = at.get(ATTR_GROUP, {}).get("s")
+                gender = at.get(ATTR_GENDER, {}).get("s")
+                if group and gender:
+                    _avatar_items.append((
+                        gender, group, _archetype_guid(a),
+                        bool(at.get(ATTR_DEFAULT_ITEM, {}).get("b"))))
+    if not _avatar_items:
+        return None
+
+    by_group = {}
+    for gender, group, guid, is_default in _avatar_items:
+        if gender == want_gender:
+            by_group.setdefault(group, []).append((guid, is_default))
+    if not by_group:
+        return None
+
+    pile = []
+    for group, items in sorted(by_group.items()):
+        if randomize:
+            pile.append(random.choice(items)[0])
+        else:
+            defaults = [g for g, d in items if d]
+            pile.append(defaults[0] if defaults else items[0][0])
+    return {
+        "deckID": deck_id or AVATAR_DECK_ID,
+        "deckName": "Avatar",
+        "attributes": [
+            {"name": ATTR_AVATAR_IS_DEFAULT, "value": True,
+             "originalValue": True},
+            {"name": ATTR_AVATAR_IS_AVATAR, "value": True,
+             "originalValue": True},
+        ],
+        "piles": {AVATAR_PILE: pile},
+    }
+
+
+def equipped_avatar_deck(gender=AVATAR_GENDER):
+    """The deck handed over at login, cached per gender."""
+    if gender not in _avatar_decks:
+        _avatar_decks[gender] = build_avatar_deck(gender)
+        deck = _avatar_decks[gender]
+        if deck:
+            log.info("built %s avatar deck: %d items",
+                     gender, len(deck["piles"][AVATAR_PILE]))
+    return _avatar_decks[gender]
 
 
 def build_avatar_archetypes():
@@ -1249,9 +1275,30 @@ class GameSession:
         self.send("DeckDeleted", {"deckID": deck_id}, request_id)
 
     def on_GetAvatarDeckList(self, value, request_id):
-        deck = build_avatar_deck()
+        deck = equipped_avatar_deck()
         self.send("OnlineAvatarDecksFound",
                   {"decks": [deck] if deck else []}, request_id)
+
+    def on_GetRandomAvatarDeck(self, value, request_id):
+        """Random, and also how the gender switch works.
+
+        Not answering this is not a cosmetic gap: the Random button disables
+        the NGUI input camera and only re-enables it in the reply handler, so
+        an unanswered request locks the entire UI. The gender switch sends the
+        same message, because the opposite-gender model does not exist client
+        side until the server supplies a deck for it.
+        """
+        req = value or {}
+        gender = req.get("gender") or AVATAR_GENDER
+        deck = build_avatar_deck(gender, randomize=True,
+                                 deck_id=req.get("deckID"))
+        if deck is None:                       # never leave the UI camera off
+            deck = {"deckID": req.get("deckID") or AVATAR_DECK_ID,
+                    "deckName": "Avatar", "attributes": [],
+                    "piles": {AVATAR_PILE: []}}
+        log.info("[game %s] -> RequestedRandomAvatarDeck (%s, %d items)",
+                 self.peer, gender, len(deck["piles"][AVATAR_PILE]))
+        self.send("RequestedRandomAvatarDeck", {"deck": deck}, request_id)
 
     def on_GetNotifications(self, value, request_id):
         self.send("NotificationsRequested", {"notificationList": []}, request_id)
