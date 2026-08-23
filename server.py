@@ -2112,7 +2112,9 @@ class GameSession:
         self.pending_selection = "GoFirst"
         self.send_game("GoFirstChoiceRequired", {
             "counter": self.selection_counter,
-            "prompt": "playmat.prompt.startingcoinflip.playerchoose",
+            # No banner: the Yes/No buttons under "would you like to go
+            # first" are self-explanatory. See match.PROMPT_NONE.
+            "prompt": match.PROMPT_NONE,
             "offerLength": 30,
             "startingTimestamp": int(time.time() * 1000),
             "sortType": "",

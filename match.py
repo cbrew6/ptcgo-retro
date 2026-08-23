@@ -96,6 +96,11 @@ PROMPT_CHOOSE_ACTION = (
 # these was looked up rather than guessed.
 PROMPT_COIN_FLIP = "com.direwolfdigital.cake.rules.states.startgame.coinflip"
 PROMPT_CALL_FLIP = "playmat.gamestart.prompt.coinflipchoice"
+# A prompt that draws no banner. CanShowPrompt (pie_d.cs:192338) requires
+# Prompt != null AND a non-empty DisplayText, so an empty id passes the null
+# check and fails the emptiness one - which is exactly "no banner", without
+# borrowing an unrelated suppressed key to get there.
+PROMPT_NONE = ""
 BUTTON_HEADS = "com.direwolfdigital.cake.rules.states.startgame.heads"
 BUTTON_TAILS = "com.direwolfdigital.cake.rules.states.startgame.tails"
 # The original server's own mulligan prompt, still in the shipped DB: "Your
@@ -143,6 +148,19 @@ def _option_label(option):
 
 def _loc(text):
     return {"id": text}
+
+
+def _loc_n(key, **numbers):
+    """A localization key with its {0}-style placeholders filled in.
+
+    TextVariables.substNumbers is a literal string Replace, so the map KEY is
+    the placeholder exactly as it appears in the text - "{0}", not "0". Python
+    keyword arguments cannot be called "{0}", so they are passed as n0, n1 and
+    translated here.
+    """
+    return {"id": key,
+            "textVars": {"numberMap": {"{%s}" % name[1:]: value
+                                       for name, value in numbers.items()}}}
 
 
 def _loc_key(text):
@@ -971,7 +989,10 @@ class Match:
         """
         return {
             "counter": counter,
-            "prompt": PROMPT_CALL_FLIP,
+            # Empty on purpose. PiePromptListener.CanShowPrompt requires a
+            # non-empty DisplayText, so "" draws no banner at all - and the two
+            # buttons say Heads and Tails, which is the whole question.
+            "prompt": PROMPT_NONE,
             "offerLength": 0,
             "startingTimestamp": 0,
             "sortType": "",
