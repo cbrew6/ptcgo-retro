@@ -510,6 +510,7 @@ HIDE_OPPONENT_CARDS = False
 # The AI opponent needs an account GUID distinct from the player's;
 # getPlayerEntities throws for any third account, so exactly these two.
 AI_ACCOUNT_ID = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+DEFAULT_AI_NAME = "Otis"
 
 _card_by_guid = None
 
@@ -1497,12 +1498,21 @@ class GameSession:
             log.info("[game %s] queue %r, deck %r (%d cards) -> game %s",
                      self.peer, req.get("queueName"),
                      deck.get("deckName"), len(pile), self.game_id)
+            # configureOpponent indexes gameOptions unguarded, so the client's
+            # own clientOptions have to come back: an empty dict threw
+            # KeyNotFoundException inside the match transition (F.w) and the
+            # client never left the deck builder. Only GameMode/SubMode are
+            # deliberately withheld - GameMode present without SubMode throws
+            # in the same method.
+            options = dict(req.get("clientOptions") or {})
+            options.setdefault("aiName", DEFAULT_AI_NAME)
+            options.setdefault("difficulty", "intermediate")
+            options.pop("GameMode", None)
+            options.pop("SubMode", None)
             self.send("MatchFound", {
                 "gameID": self.game_id,
                 "players": [account, AI_ACCOUNT_ID],
-                # Never GameMode without SubMode: configureOpponent indexes
-                # SubMode unguarded once GameMode is present.
-                "gameOptions": {},
+                "gameOptions": options,
             }, request_id)
         except Exception:
             log.exception("[game %s] cannot start match", self.peer)
