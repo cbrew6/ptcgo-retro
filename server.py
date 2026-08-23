@@ -1825,6 +1825,16 @@ class GameSession:
                 return self.offer_actions()
             action = ai.choose(m.state, player)
             m.state, changes = engine.apply(m.state, action)
+            # Mulligan compensation is one yes/no per mulligan, so answering
+            # it produces one single-card draw per answer - and emitting each
+            # separately made the opponent's cards arrive one at a time, with
+            # a whole Draw animation each. Run the rest of them out here and
+            # animate the lot together.
+            if isinstance(action, engine.DrawMulligans):
+                while m.state.players[player].owed_draws > 0:
+                    m.state, more = engine.apply(
+                        m.state, ai.choose(m.state, player))
+                    changes.extend(more)
             # emit_items, not a flat push: the named sequences carry the
             # choreography, and an Attack sent loose is a number changing.
             self.emit_items(m.animation_for(changes))

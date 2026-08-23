@@ -292,6 +292,7 @@ class Match:
         # the declaration (which attack, whose) and the damage that landed, and
         # those arrive as two separate Changes.
         self._attack = None
+        self._attack_id = None
         self._single_areas = None
 
     # -- identity --------------------------------------------------------
@@ -784,6 +785,8 @@ class Match:
         if detail.get("abilityID") and self._attack:
             effect = self._attack_effect(cid, change)
             source = self._attack_source()
+            title = _loc_key(self._attack.get("title"))
+            self._attack_id = self._attack.get("abilityID")
             self._attack = None
             items = []
             if source:
@@ -802,7 +805,29 @@ class Match:
                     "attribute": {"name": ATTR_ABILITY_SOURCE,
                                   "value": [source]},
                 }))
-            items.append(("seq", "Attack", [("msg",) + effect, ("msg",) + hp]))
+            children = []
+            if source:
+                # abilityBeginning() returns true only if an AbilityPlayedEffect
+                # is among the children, and it gates the branch that lifts the
+                # attacker out of its slot into the target-select area before
+                # the hit plays. Without it the attacker never moves, so the
+                # effect animates on a card still sitting on the board and
+                # clips through it.
+                children.append(("msg", "EffectPlayed", {
+                    "gameID": self.game_id,
+                    "effectMessage": {
+                        "name": "AbilityPlayedEffect",
+                        "value": {
+                            "eID": source,
+                            "abilityID": (self._attack_id or ""),
+                            "abilityTitle": _loc(title),
+                            "abilityType": "Attack",
+                        },
+                    },
+                }))
+            children.append(("msg",) + effect)
+            children.append(("msg",) + hp)
+            items.append(("seq", "Attack", children))
             return items
         return [hp]
 
