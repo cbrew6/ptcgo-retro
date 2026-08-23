@@ -118,7 +118,12 @@ reaped when that shell is torn down.
   bundles the client shipped with. It cannot read the donated **UnityFS** ones;
   `bundle_index.py` can.
 - `tools/unshadow_foils.py` — moves aside LooseArt masks that a real bundle can
-  now serve. See "Foil masks" below; running this wrongly is silent.
+  now serve. Request-driven: it enumerates what the client will ask for rather
+  than guessing a namespace from a bundle name, which is what it got wrong
+  twice. Nothing is deleted; files move to `_looseart_shadowed_foils/`.
+- `tools/foil_coverage.py` — rebuilds every card's exact foil request from the
+  decompiled client and resolves it against the real manifest. This is how to
+  answer "are the foils working" without looking at cards one at a time.
 - `build_cache.py` — writes an on-disk archetype cache. **Currently dead
   code**: it targets `WargArchetypesSource`, which nothing in this build
   constructs. Kept only as a reference for the file format. Note it is what
@@ -129,14 +134,31 @@ Gameplay, added later and deliberately layered:
 
 - `engine.py` — the rules. Pure Python, no sockets, no protocol, no client
   knowledge. `new_game`, `legal_actions`, `apply` returning `(state, changes)`.
-  Every rules assumption is a named field on `Rules`. 83 tests.
+  Every rules assumption is a named field on `Rules`.
 - `match.py` — the only place the engine and the client meet. Engine card id →
   entity GUID, engine state → `SerializedGameState` tree, engine `Change` →
   mutation messages.
+- `effects.py` — the card effects, keyed by archetype GUID and abilityID.
+  Driven by the card's ENGLISH RULES TEXT (attribute 200310 for Trainers, the
+  per-ability text in 200740 for attacks), resolved against the shipped
+  localization DB — not by card name, so one pattern covers every printing and
+  a reprint whose wording changed stays inert rather than inheriting the wrong
+  behaviour. `rules_for(db)` builds the populated `Rules`; the registries on
+  `Rules` are all empty by default so a stock engine is inert.
 - `ai.py` — the opponent. `choose(state, player, rng)` returns one legal
   action, re-checks its own answer against `legal_actions`, and falls back to
-  `Pass` rather than ever raising inside a live match. 19 tests.
-- `tests/` — `python -m unittest discover -s tests`, 102 tests. The engine is
+  `Pass` rather than ever raising inside a live match.
+- `match_client.py` — a headless client that plays a whole match over the real
+  socket and asserts on what comes back. This is the fastest way to check any
+  protocol change; see "Status / next".
+- `build_decks.py` — generates decks with real evolution lines and only
+  Trainers the engine can resolve, and proves each one by playing it out
+  before writing. Never touches the user's own decks.
+- `docs/client-protocol-notes.md` — 2,400 lines of verified client protocol:
+  selection messages, the 61 named animation sequences, which effect classes
+  are live and which are dead, end-of-game parameters. Claims are marked
+  VERIFIED / INFERRED / UNKNOWN; trust that marking.
+- `tests/` — `python -m unittest discover -s tests`, 215 tests. The engine is
   testable without the game, which is the entire point of the split.
 
 ## Protocol essentials
@@ -215,6 +237,14 @@ silently overwrite each other in per-file output.
 with ~1200 static decryptor methods. Don't reverse the cipher — load the
 assemblies by reflection and invoke the decryptors. Yields ~7,557 strings and
 makes the protocol readable. (`dumpstr.ps1` pattern.)
+
+**Resolving an obfuscated field to its attribute id.** `P.F` is a static class
+of `AttributeDefinition` fields whose names are reused dozens of times with
+different types, so no call site can be read off the decompiled text. Walk the
+`.cctor` IL for `ldc.i4 <id>; newobj AttributeDefinition; stsfld <field>` and
+join any other method's `ldsfld` operands on the metadata token. That is exact.
+Reflection cannot load the assemblies from the game directory - the path
+contains "é" and the loader mangles it - so copy them somewhere ASCII first.
 
 **Obfuscated field names.** Many fields share a name (`A`, `a`, `B`) and
 differ only by type. Aligning decompiler declaration order to reflection order
@@ -549,8 +579,12 @@ RequestQueueMatch  -> MatchFound
    (client drives VersusScreen -> Playmat unaided; no server part)
 PlayerReady        -> GoFirstChoiceRequired
 GameCustomChoice   -> SerializedGameState, the deal, ActivePlayerSet
+                   -> SelectionWithTargetsRequired   (choose Active + Bench)
+SelectionWithTargets
                    -> SelectionWithTargetsAndActionsRequired
 SelectionWithTargetsAndActions  (null selection = pass = end turn)
+   ... an effect that asks something interleaves
+                   -> SelectionWithTargetsRequired / CustomChoiceRequired
 ResignGame         -> GameEnded + GameCompletedMessage
 ```
 
@@ -592,6 +626,104 @@ through one helper that closes what it opens. Nested messages use the same
 Derive the deal from the **final state**, never by replaying the engine's
 change log - that log contains every mulligan redraw, which renders as cards
 flying out of the deck and back into it.
+
+### The LooseArt cache must be ref-counted - do not remove Track()
+
+`AssetBundleImageCache` is an LRU capped at **60**. `AddTexture()` evicts
+before inserting, and eviction calls `AssetRefCounter.RemoveReference`, which
+**throws** for anything it is not counting.
+
+The loose-art helper writes into that dictionary by reflection. The first
+version never registered what it inserted, so every LooseArt card face was an
+untracked landmine: after roughly sixty cards had been viewed the cache stayed
+full, and the next `AddTexture` - which is exactly how a real foil mask arrives
+from a bundle - hit one during eviction and threw. The throw escapes the
+loading coroutine and Unity kills it where it stood:
+
+| coroutine | dies before | symptom |
+| --- | --- | --- |
+| `CardImageRenderer.updateCardImage` | `setFoilMask()` | card keeps its face, loses its foil |
+| `AssetBundleTexture.loadAssetRoutine` | `set_mainTexture()` | deck box / sleeve / coin blank |
+| `AssetBundleMaterial` | same | 3D deck box wrap blank |
+
+One session's log carried 203. This is why foils "worked for the first few
+cards and then stopped" and read as an era-specific gap: whether a card got its
+foil depended only on how many cards had been looked at that session. It is
+also why the deck box and sleeves were missing - their assets were in the
+manifest and served correctly the whole time. See `patch/README.md`.
+
+### The attributes that make a card render
+
+| id | type | without it |
+| --- | --- | --- |
+| 10000 | ArchetypeID | no card identity |
+| 10140 | LocalizableText | `HandSort.Compare` throws; the hand empties every frame |
+| 200570 | `PokemonTypes[]` | **`getDefaultPerCardType` does `EnergyType.Value` with no `HasValue` check.** The throw unwinds `RefreshRequestData` before `getImageRequestString`, so the card never requests its texture and renders blank - for the whole match |
+| 200340 | `SpecialConditions[]` | no status markers; send the WHOLE list, it is not a delta |
+| 201040 | `{"options": [[type]]}` | wrong placeholder colour. Note carddata stores this as a JSON *string*; the wire wants the object |
+| 10020 | string | variant printings ("017a") render the plain art. A value containing "/" is an absolute product path, not a card face |
+
+Collection and deck views build cards from the local archetype DB, which has
+every attribute. Only entities the server synthesises can be missing one, which
+is why art broke in matches alone.
+
+### Selection replies
+
+Two different shapes, and they are not interchangeable:
+
+```
+SelectionWithTargetsAndActions   [[entityID, abilityID], [TargetResponse, ...]]
+SelectionWithTargets             {entityID, targetResponses: [TargetResponse]}
+```
+
+`TargetResponse` is `{"entityList": [...], "name": "..."}`. The action reply's
+second element is the TARGET the player picked - ignoring it makes one row
+standing for six Actions apply an arbitrary one, which is how attaching an
+Energy used to land on a Pokemon nobody chose.
+
+`SelectionWithTargetsRequired`'s `targetMap` is a **dict** with **exactly one
+key** - with `ignoreFirst` the root does `if (AvailableSelections.Count() != 1)
+throw`, and those selections are the targetMap keys. The **second
+TargetInformation becomes a CHILD of the first**, which is how "Active, then
+Bench" is one offer answered in one message.
+
+### Animation
+
+- **`animDuration` does not control anything you want.** It is milliseconds,
+  and its only use is delaying the game-log line. Card flight time comes from a
+  `CurveMotion` prefab chosen by the source and destination zone.
+- The animation vocabulary is the **61 named sequences** (`GroupedMove` is the
+  fan-out, `Attack`, `Knockout`, `Draw`, `Mulligan`, ...). A message sent
+  outside one gets no choreography. `match.animation_for()` keeps that
+  structure; `messages_for()` flattens it.
+- **~40 effect classes have no consumer at all** and are silently dropped -
+  `AnimationDelayEffect`, `BlinkEffect`, `PromptMessage`, `GameLogMessage`,
+  `SelectionFinished`. Check `docs/client-protocol-notes.md` before sending one.
+- `CakeAttackEffect` must be sent **before** the HP update: the client decides
+  the knockout itself as `damageAmount >= defender.currentHP`, so afterwards a
+  60 damage hit on a 100 HP Pokemon compares 60 against 40 and animates a
+  knockout that did not happen.
+- The "YOUR TURN" banner is a baked prefab driven by `ActivePlayerSet`. The
+  server never sends its text.
+
+### Localization keys
+
+The DB is the client's own `LocalizationDB-UTF16.db`: 27,550 rows, **entirely
+lowercase**, looked up case-insensitively. A key that is not in it is not an
+error - `L.LT` returns the key itself, so the UI displays
+`playmat.prompt.yourturn` as text. That exact string was on screen, from a key
+this server invented.
+
+carddata wraps its keys as `"$$$com.direwolfdigital...$$$"`; the wrapper is not
+part of the key.
+
+The DB also still carries the ORIGINAL SERVER's namespace,
+`com.direwolfdigital.cake.rules.*` - direct evidence of what was really sent.
+`tests/test_match.py` reads every key literal out of `match.py` and `server.py`
+and fails if it is not in the DB.
+
+`SelectableAction.description` is a **semantic tag, not display text**:
+`CheckHintStrength` tests `Description.Contains("BaseRetreat")`.
 
 ### Entities the client will not tolerate
 
@@ -640,32 +772,48 @@ name list) or `ValidateDecksData` bails and nothing is legal.
 
 Working: login, main menu, deck builder and deck save/load, 62 sets, 9,940
 cards with 4 of each in the collection, card art for every card, pack opening,
-the avatar wardrobe (1,333 reconstructed items), and matches - board, deal,
-go-first, action offers, an AI opponent, concede and the end-of-game screen.
+the avatar wardrobe (1,333 reconstructed items), and **a complete game** -
+the player chooses their own Active and Bench, plays Basics, evolves, attaches
+Energy, retreats, uses Abilities, plays Trainers, attacks with real hit
+effects and damage numbers, promotes after a knockout, takes prizes, and wins
+or loses.
 
-Assets: **1,818 bundles / 49,467 indexed asset names** after importing 1,585
-from a donated cache. Foils on 45 of 62 sets.
+Assets: **1,818 bundles / 45,649 indexed asset names** after importing 1,585
+from a donated cache. Foils resolve for every era except BW.
+
+Verify any change with `python match_client.py` - a headless client that plays
+a whole match over the real socket and asserts on what it receives. `--games N
+--seed S --quiet` soaks; `--deck NAME` picks a deck. It fails the run if it
+never actually played, because an earlier version read field names the offer
+does not contain, answered null to everything, and reported every game clean.
 
 Known gaps, in rough order of value:
 
-- **Setup selection.** The server auto-places the Active
-  (`Match.auto_setup`); the player should choose it, and the bench, from hand.
-  Messages are specified: `SelectionWithTargetsRequired` with
-  `ActivePokemonTargetInformation` then `InitialBenchedTargetInformation`,
-  `forced: true`, `ignoreFirst: true`, exactly one `targetMap` key.
-- **Per-card attack effects.** Attacks deal base damage only. Weakness,
-  resistance, retreat, knockouts, prizes and win conditions are all real. The
-  hook is `Rules.attack_effects`, `abilityID -> callable(state, ctx, changes)`,
-  called in `_do_attack` right after damage.
-- **Trainers and abilities** - deliberately absent from the engine, not
-  half-implemented. Adding them needs a `PlayTrainer` action, a Supporter
-  flag, a Stadium zone, and a trigger model for abilities.
-- **BW-era foil masks** - need a donor who played 2011-2013.
+- **Triggered abilities do not exist.** Everything is activated or continuous;
+  nothing fires on an event, so Rocky Helmet, Exp. Share and every "when this
+  Pokemon is Knocked Out" card is correctly unimplemented rather than
+  half-working. This is the largest remaining rules gap.
+- **Auras are not modelled** - `static_effects` sees only the Pokemon's own
+  Abilities and Tools plus the Stadium, so a benched Pokemon buffing the
+  Active does nothing.
+- **Card coverage.** 486 of 1,120 Trainer printings (80 distinct names), 4,626
+  of 12,204 attack printings, 35 activated and 28 continuous Abilities. A card
+  whose text does not match a known pattern stays inert rather than guessing.
+- **Choice shapes are a flat list.** Reordering (Pokedex), face-up prizes
+  (Town Map) and Devolution Spray need shapes the renderer does not have.
+- **BW-era foil masks** - 1,528 cards render flat. No `BW*_wp_*` bundle exists
+  in any of the 1,818 we have; only a donor who played 2011-2013 closes it.
 - **SM5-SM12 and SWSH art** is imported but unusable: no card definitions
   exist for those sets, and the donated `AttributeDB` is a search index (GUID,
   name, abilities) rather than full attributes.
-- An **"Avatar" deck leaks into the deck manager** - the avatar loadout shares
-  the card-deck model. Cosmetic.
+- The **AI is beginner strength** and will discard a good hand to a draw
+  Supporter.
+- **Retreat hangs off the bench Pokemon**, not the Active, to keep one
+  selectionType per entity. The client's own drag path looks for a
+  `BaseRetreat` action *on the Active* (`CheckHintStrength`), so dragging the
+  Active to the bench does not retreat; clicking the bench Pokemon does. Worth
+  revisiting - `dragEnded` explicitly picks the first non-`AbilitySelection`
+  action, which suggests the original server did mix the two on the Active.
 
 ## How this has gone wrong before
 
@@ -683,7 +831,14 @@ Patterns worth internalising, each of which cost a test cycle or several:
    check used the same wrong assumption as the code it was checking.
 4. **Verify the fix is actually running.** Compare the server's startup
    timestamp against the traffic it served.
-5. **Read the assemblies rather than inferring.** Nearly every real answer here
+5. **A green check can be worse than a red one.** The match harness read
+   field names the offer does not contain, found no actions, answered null to
+   every offer, and reported 65 consecutive games clean while exercising
+   nothing. Its board check ran against the pre-deal state, where every card is
+   legitimately face down, so it asserted on zero cards. Both now fail loudly
+   when they have nothing to check. Ask what a passing test would have to see
+   to pass, not just whether it passes.
+6. **Read the assemblies rather than inferring.** Nearly every real answer here
    came from IL; nearly every wrong turn came from a plausible guess. The
    obfuscator collapses distinct fields onto identical decompiled names, so
    resolve attribute ids from IL (`scratchpad/pfmap.json`) and not from source.
