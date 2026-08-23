@@ -71,6 +71,13 @@ ACTION_PROMOTE = "1e7c0b00-0000-4000-8000-000000000005"
 ACTION_SETUP_ACTIVE = "1e7c0b00-0000-4000-8000-000000000006"
 ACTION_SETUP_BENCH = "1e7c0b00-0000-4000-8000-000000000007"
 
+# The prompts the original server used, recovered from the localization DB -
+# it still carries the server's own com.direwolfdigital.cake.rules.* namespace,
+# which is direct evidence of what was sent rather than a plausible guess.
+PROMPT_SETUP_ACTIVE = (
+    "com.direwolfdigital.cake.rules.states.startgame.selectstartingpokemon")
+PROMPT_SETUP_BENCH = "playmat.gamestart.promptbenchpokemon.new"
+
 
 def _loc(text):
     return {"id": text}
@@ -570,6 +577,95 @@ class Match:
             entity, action_id, description, selection_type,
             [self._target_info(targets, prompt, selected=len(targets) > 1)]))
         decode[(entity, action_id)] = dict(by_target)
+
+    def setup_selection(self, player, counter):
+        """The real setup screen: choose an Active, then a Bench, in one offer.
+
+        This is SelectionWithTargetsRequired, not the action offer. Its shape
+        is unusual and every part of it is load-bearing:
+
+          - targetMap is a DICT here, keyed by entity, and must have EXACTLY
+            one key. With ignoreFirst set, the root node does
+            `if (AvailableSelections.Count() != 1) throw` and those selections
+            are precisely the targetMap keys, so two keys is a throw inside the
+            message pump - fatal, and silent from here.
+          - The SECOND TargetInformation becomes a CHILD of the first. That is
+            the whole mechanism by which "Active, then Bench" is one offer
+            rather than two, and it is why both answers come back together.
+          - How many may be benched is numberToSelect on the bench entry.
+            Attribute 201920 is only the layout divisor and constrains nothing.
+          - The client lights up the drop zones but does NOT move the card. The
+            server still has to send the EntityMoveds afterwards.
+
+        Returns (body, cards) where cards is the ordered list of hand card ids
+        the validTargets refer to, so the reply can be mapped back.
+        """
+        ps = self.state.players[player]
+        basics = [cid for cid in ps.hand if self.card(cid).is_basic_pokemon]
+        entities = [self.eid(cid) for cid in basics]
+        free = max(0, self.state.rules.bench_size - len(ps.bench))
+        owner = self.player_entity.get(player) or self.playmat_id
+
+        active_info = {
+            "name": "ActivePokemonTargetInformation",
+            "selected": True,
+            "accountID": None,
+            "targetPrompt": PROMPT_SETUP_ACTIVE,
+            "validTargets": list(entities),
+            "numberToSelect": 1,
+            "minimumToSelect": 1,
+            "forced": True,
+            "hintTargetMap": {},
+        }
+        bench_info = {
+            "name": "InitialBenchedTargetInformation",
+            "selected": True,
+            "accountID": None,
+            "targetPrompt": PROMPT_SETUP_BENCH,
+            "validTargets": list(entities),
+            "numberToSelect": min(5, free),
+            # Benching is optional and the Done button is always shown for this
+            # node, so a player may finish with an empty bench.
+            "minimumToSelect": 0,
+            "forced": False,
+            "hintTargetMap": {},
+        }
+        body = {
+            "counter": counter,
+            "prompt": PROMPT_SETUP_ACTIVE,
+            "offerLength": 0,
+            "startingTimestamp": 0,
+            "forced": True,
+            "ignoreFirst": True,
+            "targetType": "",              # never the node name: see the docs
+            "optimalPlayMap": [],
+            "selectionParams": {},
+            "sourceID": None,
+            "targetMap": {owner: [active_info, bench_info]},
+        }
+        return body, basics
+
+    def decode_setup_reply(self, selection, basics):
+        """(active card, [bench cards]) from a SelectionWithTargets response.
+
+        The response carries one EntityListTargetResponse per TargetInformation
+        that was marked selected, in the order the array declared them - so
+        entry 0 is the Active and entry 1 is the Bench. Returns (None, []) for
+        anything unrecognised rather than raising: this is off-machine input
+        and re-offering is recoverable where an exception is not.
+        """
+        by_entity = {self.eid(cid): cid for cid in basics}
+        responses = (selection or {}).get("targetResponses") or []
+        picked = []
+        for response in responses:
+            ids = (response or {}).get("entityList") or []
+            picked.append([by_entity[e] for e in ids if e in by_entity])
+        active = picked[0][0] if picked and picked[0] else None
+        bench = picked[1] if len(picked) > 1 else []
+        # A card cannot be both the Active and benched, and the client has been
+        # seen to echo the Active back inside the bench list.
+        bench = [cid for cid in bench if cid != active]
+        return active, bench
 
     def _setup_offer(self, player, counter):
         """Let the player choose their own Active and Bench.

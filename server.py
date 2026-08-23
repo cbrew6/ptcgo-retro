@@ -1342,6 +1342,7 @@ class GameSession:
         self.match = None
         self.deck_pile = None
         self.action_decode = None
+        self.setup_cards = None
         self.game_started = None
         self.selection_counter = 0
         self.pending_selection = None
@@ -1772,8 +1773,9 @@ class GameSession:
         both.
         """
         state = self.match.state
-        if state.players[0].active is None \
-                and state.phase != engine.PHASE_SETUP:
+        if state.phase == engine.PHASE_SETUP:
+            return self.offer_setup()
+        if state.players[0].active is None:
             owed = [a for a in engine.legal_actions(state, 0)
                     if isinstance(a, engine.Promote)]
             if not owed:
@@ -1785,6 +1787,61 @@ class GameSession:
         log.info("[game %s] -> offer (%d actions, counter %d)",
                  self.peer, len(body["targetMap"]), self.selection_counter)
         self.send_game("SelectionWithTargetsAndActionsRequired", body)
+
+    def offer_setup(self):
+        """Ask the player for their Active and Bench, on the real setup screen.
+
+        One message covers both choices: the bench TargetInformation becomes a
+        child of the active one, so the client walks the player through them in
+        order and answers both together.
+        """
+        self.selection_counter += 1
+        body, basics = self.match.setup_selection(0, self.selection_counter)
+        self.setup_cards = basics
+        self.pending_selection = "Setup"
+        log.info("[game %s] -> setup selection (%d basics, counter %d)",
+                 self.peer, len(basics), self.selection_counter)
+        self.send_game("SelectionWithTargetsRequired", body)
+
+    def on_SelectionWithTargets(self, value, request_id):
+        """The player's Active and Bench, both in one reply.
+
+        Applied as ordinary engine actions, so the same rules that govern a
+        server-side setup govern this one. An illegal or unreadable answer
+        re-offers rather than stalling - and rather than being papered over
+        with an arbitrary placement, which is what the player was complaining
+        about in the first place.
+        """
+        if self.match is None or self.pending_selection != "Setup":
+            return
+        self.pending_selection = None
+        active, bench = self.match.decode_setup_reply(
+            (value or {}).get("selection"), self.setup_cards or [])
+        if active is None:
+            log.warning("[game %s] setup reply named no Active; re-offering",
+                        self.peer)
+            return self.offer_setup()
+        log.info("[game %s] <- setup: active + %d benched",
+                 self.peer, len(bench))
+
+        changes = []
+        try:
+            for action in ([engine.SetupPlaceActive(0, active)]
+                           + [engine.SetupPlaceBench(0, c) for c in bench]
+                           + [engine.SetupDone(0)]):
+                self.match.state, made = engine.apply(self.match.state, action)
+                changes.extend(made)
+        except engine.IllegalAction as exc:
+            log.warning("[game %s] illegal setup (%s); re-offering",
+                        self.peer, exc)
+            return self.offer_setup()
+
+        # The client only lights up the drop zones - it never moves the card
+        # itself - so the placements still have to be animated from here.
+        self.emit_sequence("IntroduceInitialPokemon",
+                           [("msg", name, body)
+                            for name, body in self.match.messages_for(changes)])
+        self.advance_match()
 
     def on_SelectionWithTargetsAndActions(self, value, request_id):
         """The player chose a move, or passed with a null selection."""

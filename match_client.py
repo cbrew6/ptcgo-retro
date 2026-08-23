@@ -206,6 +206,7 @@ class Harness:
         self.problems = []
         self.revealed = 0
         self.actions_taken = 0
+        self.setups = 0
         self.revealed_pokemon = 0
         self.result = None
         self.turns = 0
@@ -349,10 +350,15 @@ class Harness:
         for _ in range(max_actions):
             name, value = self.wait_for(
                 ["SelectionWithTargetsAndActionsRequired",
+                 "SelectionWithTargetsRequired",
                  "GameCompletedMessage"], timeout=30)
             if name == "GameCompletedMessage":
                 self.result = value
                 return
+            if name == "SelectionWithTargetsRequired":
+                self.setups += 1
+                self.send("SelectionWithTargets", self._setup_reply(value))
+                continue
             self.turns += 1
             options = value.get("targetMap") or []
             # Reply shape mirrors what the real client sends: a selection
@@ -362,6 +368,49 @@ class Harness:
                       {"selection": selection,
                        "counter": value.get("counter")})
         raise ProtocolError("match did not finish in %d actions" % max_actions)
+
+    def _setup_reply(self, offer):
+        """Answer the setup screen: one Active, then some Bench, together.
+
+        targetMap here is a dict with exactly one key, and the response echoes
+        that key plus one EntityListTargetResponse per TargetInformation, in
+        the order the array declared them - Active first, Bench second.
+        """
+        target_map = offer.get("targetMap") or {}
+        if len(target_map) != 1:
+            raise ProtocolError(
+                "setup offer had %d targetMap keys; the client throws on "
+                "anything but exactly 1" % len(target_map))
+        entity_id, infos = next(iter(target_map.items()))
+        active_info = infos[0] if infos else {}
+        bench_info = infos[1] if len(infos) > 1 else {}
+
+        candidates = list(active_info.get("validTargets") or [])
+        if not candidates:
+            raise ProtocolError("setup offer listed no Basic to choose")
+        if self.rng is not None:
+            active = self.rng.choice(candidates)
+        else:
+            active = candidates[0]
+
+        rest = [e for e in (bench_info.get("validTargets") or [])
+                if e != active]
+        room = int(bench_info.get("numberToSelect") or 0)
+        if self.rng is not None:
+            self.rng.shuffle(rest)
+            bench = rest[:self.rng.randint(0, min(room, len(rest)))]
+        else:
+            bench = rest[:room]
+
+        return {"counter": offer.get("counter"),
+                "selection": {
+                    "entityID": entity_id,
+                    "targetResponses": [
+                        {"name": "EntityListTargetResponse",
+                         "entityList": [active]},
+                        {"name": "EntityListTargetResponse",
+                         "entityList": list(bench)},
+                    ]}}
 
     def _select(self, target_map):
         """Choose one offered action, or pass when there is nothing.
@@ -480,6 +529,9 @@ def report(h):
     # read field names the offer does not contain, found no choices, and
     # answered null to every offer. Every game was "clean" and no action was
     # ever exercised.
+    check("the player chose their own setup", h.setups > 0,
+          "%d setup selections; zero means the server placed the "
+          "Pokemon itself" % h.setups)
     check("the harness actually played", h.actions_taken > 0,
           "%d of %d offers answered with an action" % (h.actions_taken, h.turns))
     print("\n   %d offers, %d answered with an action"

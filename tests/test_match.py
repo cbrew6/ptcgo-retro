@@ -387,13 +387,23 @@ class LocalizationKeyTests(unittest.TestCase):
             raise unittest.SkipTest("no localization DB on this machine")
 
     def _sent_keys(self):
-        """Every playmat.* literal in the two modules that send prompts."""
+        """Every localization key literal in the modules that send prompts.
+
+        Both namespaces matter: playmat.* is the client's own, and
+        com.direwolfdigital.cake.rules.* is the ORIGINAL SERVER's, still
+        present in the shipped DB - which makes it direct evidence of what the
+        real server sent rather than something to guess at.
+        """
         here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        pattern = r'"((?:playmat|com\.direwolfdigital\.cake)[A-Za-z0-9_.]+)"'
         found = set()
         for name in ("match.py", "server.py"):
             with open(os.path.join(here, name), encoding="utf-8") as fh:
-                found.update(re.findall(r'"(playmat\.[a-z0-9_.]+)"', fh.read()))
-        return found
+                found.update(re.findall(pattern, fh.read()))
+        # Entity class names share the com.direwolfdigital prefix but are Java
+        # FQCNs, not localization keys.
+        return {k for k in found if ".entities." not in k
+                and ".game.core." not in k}
 
     def test_every_prompt_key_we_send_really_exists(self):
         sent = self._sent_keys()
