@@ -700,12 +700,50 @@ It carries the hands INLINE as attributes and introduces those entities itself,
 so cards that are back in the deck need no prior `EntityIntroduced`, and the
 sequence blocks the rest of the opening until the dialog closes.
 
+The carousel pages with its own left/right buttons; the header is the 1-based
+page index and the sub-header is `string.Format(prompt, piles.Count)`, so
+**`prompt` must not be null** or that throws. `player` does not gate rendering
+- the cards come from the inline attributes either way - it gates which cards
+are un-introduced when the dialog closes, so a wrong account can strip cards
+out of the local hand view.
+
 `MulliganChoiceRequired` is a dead end - `IMulliganChoice` has exactly one
 implementation and no caller anywhere in pie-src.
 
 Compensation ("for each of your opponent's mulligans you MAY draw a card") is
 an offer, not a debt: `PlayerState.owed_draws`, answered by `DrawMulligans`,
 ranked ahead of setup because the drawn cards may be what gets placed.
+
+### Never send an action offer while the Active is empty
+
+`CheckShouldEndTurn` does `player1Active.get_Entity().Children.get_Item(0)`
+with no guard, and an empty Active is precisely the state a promotion is asked
+in. Use `KnockoutPokemonTargetInformation` on a `SelectionWithTargetsRequired`
+instead - the client has a command registered for that kind.
+
+### An action offer is never `forced: true`
+
+`forced` makes the root's `MayCancel` false, which is the only way to get the
+button captioned "End Turn" rather than "Done" - but it makes `MayAdvance`
+false at the same time, so the button is drawn and does nothing. That is a soft
+lock, not a stricter prompt. Anything that genuinely cannot be declined gets
+its own selection message.
+
+For an offer with `forced: false` and an EMPTY `targetMap` the button does
+appear, captioned "Done", and clicking it sends `selection: null`. A row-less
+offer is therefore not a dead end.
+
+### Suppressing a banner
+
+`"prompt": ""` draws no banner: `CanShowPrompt` needs `Prompt != null` AND a
+non-empty `DisplayText`, and `L.LT("")` returns `""`. Cleaner than borrowing a
+key out of `PiePromptListener.suppressedKeys`.
+
+Send `CoinFlipChoiceRequired` BEFORE `GoFirstChoiceRequired`. If the go-first
+prompt arrives while the coin animator is still in its `Start` state the
+factory hands it to a different command whose constructor hard-sets an override
+banner - and leaks `OverrideShowPrompt`, killing the action button for the rest
+of the game.
 
 ### What may and may not hang off the Active
 
@@ -773,6 +811,20 @@ Bench" is one offer answered in one message.
   knockout that did not happen.
 - The "YOUR TURN" banner is a baked prefab driven by `ActivePlayerSet`. The
   server never sends its text.
+- **`ActivePlayerSet` as a SEQUENCE and as a MESSAGE do different things.** The
+  message (`L.Q`) sets the active player, bumps the turn counter, plays the
+  banner and clears `model.c`; it does **not** touch the coins. The sequence
+  (`l.Z`) lowers both coins and hides the coin dialog, and does that work
+  BEFORE running its children - so an `ActivePlayerSet` sequence with **zero
+  children** is a clean "put the coin away" primitive and nothing else. Only
+  that sequence and `DealInitialHands` ever lower `InitialUp`.
+- `PostActionPhaseEffect` lowers `up` but not `InitialUp`, so it cannot clear
+  the opening coin. `ForceSelectionFinished` does not clear it either - it ends
+  the offer first, which makes its own coin branches unreachable - and it hangs
+  if it is the local player's turn with no offer open.
+- **`PauseOnPromptEffect` with `doPause:false` never clears
+  `OverrideShowPrompt`**, and that flag permanently disables the action button.
+  Every one needs a matching `ClosePauseOnPromptEffect`.
 
 ### Localization keys
 

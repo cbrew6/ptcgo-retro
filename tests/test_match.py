@@ -338,9 +338,11 @@ class OfferTests(unittest.TestCase):
             self.assertEqual(len(seen), 1,
                              "entity %s mixes %s" % (entity, sorted(seen)))
 
-    def test_a_promotion_is_forced_and_still_offered(self):
-        """With no Active the engine offers only Promote. Suppressing that
-        offer - which the server used to do - hangs the match for good."""
+    def test_a_promotion_uses_its_own_selection_not_an_action_offer(self):
+        """CheckShouldEndTurn (pie_d.cs:31489) dereferences the Active's first
+        child with no guard, and an empty Active is exactly the state a
+        promotion is asked in - so an action offer there throws in the client.
+        The knockout selection kind exists for this."""
         m = self._match()
         me = m.state.players[0]
         self.assertTrue(me.bench, "fixture put nothing on the bench")
@@ -350,13 +352,35 @@ class OfferTests(unittest.TestCase):
         me.active = None
         m.state.pending_promotions.append(0)
         self.assertEqual(engine.players_to_act(m.state), [0])
-        body, decode = m.build_offer(0, 1)
-        kinds = {type(next(iter(v.values()))).__name__ for v in decode.values()}
-        self.assertEqual(kinds, {"Promote"})
-        self.assertTrue(body["forced"],
-                        "an unforced offer gives an end-turn button that "
-                        "escapes a promotion the rules say is owed")
-        self.assertTrue(body["targetMap"])
+
+        body, slots = m.promote_selection(0, 1)
+        self.assertEqual(len(slots), len(me.bench))
+        infos = next(iter(body["targetMap"].values()))
+        self.assertEqual([i["name"] for i in infos],
+                         ["KnockoutPokemonTargetInformation"])
+        self.assertTrue(body["forced"], "a new Active cannot be declined")
+        self.assertEqual(infos[0]["minimumToSelect"], 1)
+
+    def test_the_promotion_reply_names_a_bench_slot(self):
+        m = self._match()
+        me = m.state.players[0]
+        me.active = None
+        m.state.pending_promotions.append(0)
+        body, slots = m.promote_selection(0, 1)
+        entity = next(iter(body["targetMap"].values()))[0]["validTargets"][0]
+        reply = {"entityID": "x", "targetResponses": [
+            {"name": "EntityListTargetResponse", "entityList": [entity]}]}
+        self.assertEqual(m.decode_promote_reply(reply, slots), slots[0])
+        self.assertIsNone(m.decode_promote_reply(None, slots))
+
+    def test_an_action_offer_is_never_forced(self):
+        """forced:true makes MayCancel false, which is the only way to caption
+        the button "End Turn" - but it makes MayAdvance false too, so the
+        button is drawn and does nothing. That is a soft lock, not a stricter
+        prompt."""
+        m = self._match()
+        body, _decode = m.build_offer(0, 1)
+        self.assertFalse(body["forced"])
 
     def test_no_offer_row_carries_a_null_target_list(self):
         """validTargets has .Length read on it directly."""

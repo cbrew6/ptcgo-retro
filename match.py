@@ -101,6 +101,7 @@ PROMPT_CALL_FLIP = "playmat.gamestart.prompt.coinflipchoice"
 # check and fails the emptiness one - which is exactly "no banner", without
 # borrowing an unrelated suppressed key to get there.
 PROMPT_NONE = ""
+PROMPT_NEW_ACTIVE = "playmat.prompt.dragbenchtoactive"
 BUTTON_HEADS = "com.direwolfdigital.cake.rules.states.startgame.heads"
 BUTTON_TAILS = "com.direwolfdigital.cake.rules.states.startgame.tails"
 # The original server's own mulligan prompt, still in the shipped DB: "Your
@@ -999,6 +1000,67 @@ class Match:
             "kind": "",
         }, owed
 
+    def promote_selection(self, player, counter):
+        """Choose a new Active after a knockout.
+
+        NOT an action offer. CheckShouldEndTurn (pie_d.cs:31489) does
+        player1Active.get_Entity().Children.get_Item(0) with no guard, and an
+        action offer while the Active slot is empty is exactly when that
+        throws - which is the state a promotion is asked in. The client has a
+        selection kind for this, KnockoutPokemonTargetInformation, with its own
+        command in the factory, so use that instead.
+
+        Returns (body, [slot ids]) in the order of validTargets.
+        """
+        ps = self.state.players[player]
+        owner = self.player_entity.get(player) or self.playmat_id
+        slots, entities = [], []
+        for slot in ps.bench:
+            entity = self.entity_of_slot(slot)
+            if entity:
+                slots.append(slot.slot_id)
+                entities.append(entity)
+        body = {
+            "counter": counter,
+            "prompt": PROMPT_NEW_ACTIVE,
+            "offerLength": 0,
+            "startingTimestamp": 0,
+            # Compulsory: the game cannot continue without an Active, and
+            # there is no button that could decline it.
+            "forced": True,
+            "ignoreFirst": True,
+            "targetType": "",
+            "optimalPlayMap": [],
+            "selectionParams": {},
+            "sourceID": None,
+            "targetMap": {owner: [{
+                "name": "KnockoutPokemonTargetInformation",
+                "selected": True,
+                "accountID": None,
+                "targetPrompt": PROMPT_NEW_ACTIVE,
+                "validTargets": entities,
+                "numberToSelect": 1,
+                "minimumToSelect": 1,
+                "forced": True,
+                "hintTargetMap": {},
+            }]},
+        }
+        return body, slots
+
+    def decode_promote_reply(self, selection, slots):
+        """The slot id named by a promotion reply, or None."""
+        by_entity = {}
+        for slot_id in slots:
+            slot = self.resolve_slot(slot_id)
+            entity = self.entity_of_slot(slot) if slot else None
+            if entity:
+                by_entity[entity] = slot_id
+        for response in (selection or {}).get("targetResponses") or []:
+            for entity in (response or {}).get("entityList") or []:
+                if entity in by_entity:
+                    return by_entity[entity]
+        return None
+
     def call_flip_selection(self, counter):
         """Call heads or tails. Kind "CoinFlipChoice", so the client's own
         command raises both coins (InitialUp) and sets YouPickHeadsOrTails.
@@ -1351,14 +1413,19 @@ class Match:
 
         # A promotion is owed, not chosen: the turn cannot continue around it,
         # so the client must not be given an end-turn button to escape with.
-        forced = me.active is None and bool(promote)
         return {
             "counter": counter,
-            "prompt": ("playmat.prompt.dragbenchtoactive" if forced
-                       else PROMPT_CHOOSE_ACTION),
+            "prompt": PROMPT_CHOOSE_ACTION,
             "offerLength": 0,                 # no client-side auto-pass
             "startingTimestamp": 0,
-            "forced": forced,                 # false lets Next end the turn
+            # ALWAYS false. forced:true makes the root's MayCancel false, which
+            # is the only way to get the button captioned "End Turn" - but it
+            # makes MayAdvance false at the same time, so the button is drawn
+            # and does nothing ("I should be turned off right now...").
+            # forced:true on an action offer is a soft lock, not a stricter
+            # prompt. Promotions, the one thing that genuinely cannot be
+            # declined, are asked with their own selection instead.
+            "forced": False,
             "targetType": "",                 # never null: looked up as a key
             "optimalPlayMap": [],             # never null: iterated unguarded
             "selectionParams": {},

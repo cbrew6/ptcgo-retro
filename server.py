@@ -1355,6 +1355,7 @@ class GameSession:
         self.action_decode = None
         self.setup_cards = None
         self.choice_options = None
+        self.promote_slots = None
         self.player_won_flip = None
         self.game_started = None
         self.selection_counter = 0
@@ -1757,6 +1758,13 @@ class GameSession:
         # and those showed as cards flying out of the deck and back in.
         log.info("[game %s] %s goes first",
                  self.peer, "player" if player_first else "opponent")
+        # Put the coin away before anything else happens. Only two things in
+        # the client ever lower InitialUp: DealInitialHands, and the
+        # ActivePlayerSet SEQUENCE - note the sequence, not the message, which
+        # touches no coin at all. An empty one does its work before running
+        # children, so zero children is exactly "hide the coin and its dialog"
+        # and nothing else.
+        self.emit_sequence("ActivePlayerSet", [])
         self.emit_items(self.match.opening_animation())
         # No ActivePlayerSet here. It plays the "YOUR TURN" banner and
         # increments the client's own turn counter, and at this point nobody
@@ -1856,6 +1864,10 @@ class GameSession:
                     if isinstance(a, engine.Promote)]
             if not owed:
                 return
+            # Never an action offer here. CheckShouldEndTurn dereferences the
+            # Active's first child unguarded, and an empty Active is precisely
+            # the state a promotion is asked in.
+            return self.offer_promotion()
         # A row-less offer is still sent. It used to end the turn instead, on
         # the grounds that there was nothing to click - but that took the turn
         # away the moment the last Energy was attached, with no chance to look
@@ -1955,6 +1967,20 @@ class GameSession:
         self.emit_items(m.animation_for(changes))
         self.advance_match()
 
+    def offer_promotion(self):
+        """Ask for a new Active, on the client's own knockout selection."""
+        self.selection_counter += 1
+        body, slots = self.match.promote_selection(0, self.selection_counter)
+        if not slots:
+            log.warning("[game %s] promotion owed with an empty bench",
+                        self.peer)
+            return
+        self.promote_slots = slots
+        self.pending_selection = "Promote"
+        log.info("[game %s] -> promotion (%d benched, counter %d)",
+                 self.peer, len(slots), self.selection_counter)
+        self.send_game("SelectionWithTargetsRequired", body)
+
     def offer_setup(self):
         """Ask the player for their Active and Bench, on the real setup screen.
 
@@ -1981,6 +2007,23 @@ class GameSession:
         """
         if self.match is None:
             return
+        if self.pending_selection == "Promote":
+            self.pending_selection = None
+            slot = self.match.decode_promote_reply(
+                (value or {}).get("selection"), self.promote_slots or [])
+            if slot is None:
+                log.warning("[game %s] promotion named no Pokemon; re-offering",
+                            self.peer)
+                return self.offer_promotion()
+            try:
+                self.match.state, changes = engine.apply(
+                    self.match.state, engine.Promote(0, slot))
+            except engine.IllegalAction as exc:
+                log.warning("[game %s] illegal promotion: %s", self.peer, exc)
+                return self.offer_promotion()
+            log.info("[game %s] <- promoted slot %s", self.peer, slot)
+            self.emit_items(self.match.animation_for(changes))
+            return self.advance_match()
         if self.pending_selection == "Choice":
             self.pending_selection = None
             picks = self.match.decode_choice_reply(

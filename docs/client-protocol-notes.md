@@ -2403,3 +2403,517 @@ of them with `IsOverride = true`.
 | **MultiSelectEntityListTargetResponse** | `pie_d.cs:193888` | `name`:string, `entities`:List<Q.M> |
 | **RevealAssociatedEntityListTargetResponse** | `pie_d.cs:197190` | `name`:string, `associations`:List<R.D> |
 | **SlotAssociatedEntityListTargetResponse** | `pie_d.cs:197217` | `name`:string, `target`:EntityID, `associations`:List<q.Q> |
+
+
+---
+
+## 7. Opening UI - follow-up findings
+
+A second pass over the opening sequence, driven by five questions from live
+testing. Everything here was re-read for this pass; where it contradicts §2,
+§3 or `CLAUDE.md`, the correction is called out explicitly in §7.6.
+
+### 7.1 The coin: every writer of `player1Coin` / `player2Coin`
+
+The two coins are plain `Animator`s (`PlaymatProvider.player1Coin` /
+`player2Coin`, `pie_d.cs:66354`, `66356`). **Four** bools are ever written:
+`InitialUp`, `up`, `heads`, `tails`. `InitialUp` and `up` are *different*
+parameters — the opening coin is raised with `InitialUp`, in-game flips are
+raised with `up`. Nothing that clears one clears the other.
+
+Complete inventory (grep of `player1Coin` / `player2Coin` over `pie_d.cs`,
+every hit classified). **VERIFIED** — I read the enclosing class of each.
+
+| line | enclosing class | writes | reachable from |
+|---|---|---|---|
+| `30934`-`30935` | `d.D`, `[MessageCommandConstructor] D(PostActionPhaseEffect)` (ctor `pie_d.cs:30892`) | `up=false` both | **`PostActionPhaseEffect`** — a server message, no fields |
+| `32590`-`32593` | `d.n`, `[SequenceCommandConstructor("DealInitialHands")]` (`pie_d.cs:32581`) | `InitialUp=false`, `up=false` **both coins** | `StartSequence{name:"DealInitialHands"}` |
+| `137205` / `137264` | `L.x`, `[MessageCommandConstructor] x(MultipleCoinFlipWithContextEffect)` (ctor `pie_d.cs:137170`) | `up=true` at start, `up=false` at end, on **one** coin | `EffectPlayed{MultipleCoinFlipWithContextEffect}` — but see the short-circuit below |
+| `137236` / `137252` | same | `heads` / `tails` per flip | same |
+| `140682` | `l.V`, the `"CoinFlipChoice"` selection command (`pie_d.cs:140648`) | `player1Coin.InitialUp=true` | `CoinFlipChoiceRequired` |
+| `141087`-`141090` | `l.Z`, `[SequenceCommandConstructor("ActivePlayerSet")]` (`pie_d.cs:141074`) | `heads=false`, `tails=false` both — **only if `model.A` (sudden death) is set** | `StartSequence{name:"ActivePlayerSet"}` |
+| `141092`-`141093` | same | `InitialUp=false` **both coins**, unconditionally | same |
+| `141455`-`141456` | `l.h`, `[SequenceCommandConstructor("InitialCoinFlip")]` (`pie_d.cs:141441`) | `heads` **or** `tails` `=true` on **both** coins | `StartSequence{name:"InitialCoinFlip"}` |
+| `142408`/`142417` | `l.Q`, `[SequenceCommandConstructor("OpponentPickingHeadsOrTails")]` (`pie_d.cs:142402`) | `player2Coin.InitialUp=true` | that sequence, **only when it has ≥1 child** |
+| `143205`-`143217` | `m.d`, `[MessageCommandConstructor] d(ForceSelectionFinished)` (`pie_d.cs:143180`) | would clear `heads`/`InitialUp`/`up` — **DEAD, see below** | — |
+| `144861`-`144864` | `m.y`, `[MessageCommandConstructor] y(SuddenDeathGameMessage)` (ctor `pie_d.cs:144852`) | `heads=false`, `tails=false` both | `SuddenDeathGameMessage` |
+| `149108`/`149112` | match-init | `PieCoin.LoadFromArchetypeID` — cosmetic skin only | match model load |
+
+**So exactly two live writers set `InitialUp` back to false: the
+`DealInitialHands` sequence and the `ActivePlayerSet` sequence.** Nothing else
+lowers the opening coin.
+
+#### The answer: an empty `ActivePlayerSet` sequence
+
+`l.Z.executeSequence` (`pie_d.cs:141079`) does all of its work **before** it
+runs its children, and its children may be an empty list:
+
+```csharp
+initialCoinFlipAnimator.SetBool("DonePicking", false);
+initialCoinFlipAnimator.SetBool("Hidden", true);
+if (playmatProvider.get_model().A) { /* heads=false, tails=false on both */ }
+player1Coin.SetBool("InitialUp", false);
+player2Coin.SetBool("InitialUp", false);
+runAllWithGroupedMoves(WrapSequence(sequence));          // empty -> no-op
+initialCoinFlipAnimator.gameObject.SetActive(false);
+```
+
+`runAllWithGroupedMoves` is `k.z` (`pie_d.cs:134484`) over the child list; its
+`execute()` is a `for` loop over `sequence.Count`, so an empty list completes
+on the first frame. **VERIFIED.**
+
+Therefore a bare
+
+```json
+{"name":"StartSequence","value":{"sequenceID":"<new guid>","name":"ActivePlayerSet","attributes":{}}}
+{"name":"StopSequence","value":{"sequenceID":"<same guid>"}}
+```
+
+with **no children at all** is a pure "put the coin away and tear down the
+coin-flip dialog" primitive: coin down, dialog `Hidden`, dialog GameObject
+deactivated. It does not touch the turn counter, the turn banner or the game
+log, because those live in the *message* command, not the sequence (below).
+*(VERIFIED that the sequence does this; INFERRED only that an empty child list
+is acceptable to the server-side framing — the client side is verified.)*
+
+The `heads`/`tails` clear inside it is gated on `playmatProvider.get_model().A`,
+which `m.y` sets true on `SuddenDeathGameMessage` (`pie_d.cs:144857`) — i.e.
+**sudden death only**. In a normal game `ActivePlayerSet` lowers the coin but
+leaves the face showing on the (now hidden) coin object. Harmless.
+*(INFERRED — `model.A` is one of many collapsed `N.f` bools; the
+`SuddenDeathGameMessage` handler is the only other writer I found.)*
+
+#### `ActivePlayerSet` the message does NOT touch the coin
+
+`L.Q` (`pie_d.cs:136658`, `[MessageCommandConstructor] Q(ActivePlayerSet)`)
+contains **no reference to `player1Coin`, `player2Coin` or
+`initialCoinFlipAnimator`**. What it actually does (`execute()`,
+`pie_d.cs:136694`):
+
+- sets the active / inactive player flags;
+- if the *inactive* player entity is Player 1, calls
+  `SelectionUtils.ForceEndSelection()`;
+- `turnCounter++` (the double-count `CLAUDE.md` warns about);
+- **`model.c = false`** — this is the same flag the mulligan and reveal dialogs
+  set, so `ActivePlayerSet` also un-sticks a leaked dialog block (see §7.4);
+- game log `StartTurn`, plays `PlayerTurnIndicator` / `OpponentTurnIndicator`
+  and waits for the clip;
+- flushes the knockout pile.
+
+**VERIFIED.** `CLAUDE.md`'s "ActivePlayerSet hides the coin-flip dialog and
+resets both coins" is true of the **sequence** `l.Z` and false of the
+**message** `L.Q`. If the server sends the message unwrapped, the coin stays up.
+
+#### `ForceSelectionFinished` does NOT put the coin away
+
+`m.d.execute()` (`pie_d.cs:143186`) reads:
+
+```csharp
+if (A.get_selectionNode() != null) { A.ForceEndSelection(); }
+if (A.get_selectionNode() != null && Kind == "CoinFlipChoice") { ...coin... }
+else if (A.get_selectionNode() != null && Kind == "GoFirstChoice") { ...coin... }
+else { promptListener.OverrideShowPrompt = false; OverrideText = null; }
+```
+
+`ForceEndSelection()` -> `Selection.EndOffer()` (`pie_d.cs:192280`,
+`core_d.cs:72107`) -> `set_CurrentOffer(null)`, and
+`Selection.get_CurrentChoice()` returns null when `CurrentOffer` is null
+(`core_d.cs:71989`). `SelectionUtils.get_selectionNode()` is exactly
+`selection.get_CurrentChoice()` (`pie_d.cs:191667`). **So by the time the
+`Kind` tests run, `get_selectionNode()` is always null and both coin branches
+are unreachable.** The `else` branch always wins. **VERIFIED** — this is a
+client bug, and it means `ForceSelectionFinished` clears the prompt override
+but leaves the coin exactly where it was.
+
+**Second hazard in the same command.** `dismissRevealAndWaitForSelectionIfNeeded`
+(`pie_d.cs:143228`) spins
+
+```csharp
+while (A.get_selectionNode() == null) {
+    if (model.A != model.B) { yield return new WaitForSeconds(0.1f); break; }
+    yield return null;
+}
+```
+
+`model.A` is the active-player AccountID and `model.B` the local one (the same
+pair `L.x` uses at `pie_d.cs:137177` to pick a coin, and `L.Q` uses at
+`pie_d.cs:136710` to pick a turn banner). **If it is the local player's turn and
+no selection is outstanding, this loop never exits and the Queued message pump
+is dead.** Only send `ForceSelectionFinished` when you know an offer is open.
+*(VERIFIED the loop; INFERRED which collapsed field is which AccountID.)*
+
+#### `InitialCoinFlip` deliberately leaves the coin up
+
+`l.h.executeSequence` (`pie_d.cs:141447`) sets `x.A = true` on each child
+`MultipleCoinFlipWithContextEffect` command **before** running it. That field is
+the guard at the top of `L.x.execute()` (`pie_d.cs:137188`): `if (!this.A)` —
+when true the whole animation branch is skipped, which includes the
+`a.SetBool("up", false)` cleanup at `pie_d.cs:137264`. Instead the sequence
+sets `heads`/`tails` directly on **both** coins and never touches `up` or
+`InitialUp`. **VERIFIED.**
+
+Consequence: the opening flip has no cleanup of its own. The coin is up because
+`l.V` raised `InitialUp` when `CoinFlipChoiceRequired` arrived
+(`pie_d.cs:140682`), and it stays up until `DealInitialHands` or an
+`ActivePlayerSet` **sequence** runs.
+
+#### The other three named opening sequences
+
+- **`InitialPick`** (`pie_d.cs:147907`, class `j`) — `executeSequence` is a bare
+  `foreach (item in sequence) { while (item.MoveNext()) yield ... }`. **It does
+  nothing at all beyond running its children serially.** It does not lower the
+  coin. **VERIFIED.**
+- **`OpponentChoosingToGoFirst`** (`pie_d.cs:142346`, class `o`) — sets
+  `initialCoinFlipAnimator` `OpponentPicksWhoGoesFirst` (or the
+  `ObservePlayerNPicksWhoGoesFirst` spectator variants when a child
+  `ObserverCustomChoiceOfferMessage` is present), then runs children. **Never
+  touches the coins.** Does nothing at all if `sequence.Count == 0`.
+- **`OpponentPickingHeadsOrTails`** (`pie_d.cs:142402`, class `Q`) — activates
+  the dialog GameObject and **raises** `player2Coin.InitialUp`. It is a *raise*,
+  not a lower. Also a no-op when it has no children.
+
+#### `PostActionPhaseEffect` is the only *message* that lowers a coin
+
+`d.D` (`pie_d.cs:30892`) clears the pip tray and sets `up=false` on both coins.
+It does **not** touch `InitialUp`, so **it cannot lower the opening coin.** It
+is the right cleanup after an in-game flip that was interrupted, and the wrong
+tool for the opening. **VERIFIED.**
+
+#### Summary answer
+
+| goal | send |
+|---|---|
+| lower the opening coin without dealing | empty `StartSequence{name:"ActivePlayerSet"}` / `StopSequence` |
+| lower the opening coin as part of the deal | `StartSequence{name:"DealInitialHands"}` (already does it, `pie_d.cs:32590`) |
+| lower an in-game (`up`) coin left raised | `EffectPlayed{PostActionPhaseEffect}` |
+| anything else | **nothing works** — `InitialPick`, `OpponentChoosingToGoFirst`, `ForceSelectionFinished`, and the bare `ActivePlayerSet` message all leave it up |
+
+### 7.2 Prompt banner suppression — confirmation
+
+`prompt: ""` is correct and safe. Chain, all **VERIFIED**:
+
+1. `LocalizableTextVariablesAnalyzer.Analyze` (`core_d.cs:76082`) takes the
+   `Primitive` branch for any non-null string, including `""`, and builds
+   `new LocalizableTextVariables("", null)`.
+2. `LocalizableText..ctor` (`core_d.cs:76405`) throws **only** on `null`;
+   `"".Trim('$')` is `""`.
+3. `LocalizableTextVariables.get_DisplayText()` (`core_d.cs:76064`) ->
+   `L.LT("")` -> `LocalizationLookup.Localize` (`core_d.cs:76565`), whose first
+   branch is `if (get_Disabled() || string.IsNullOrEmpty(key)) value = key;` ->
+   returns `""`.
+4. `SelectionUtils.CanShowPrompt()` (`pie_d.cs:192338`) therefore fails on
+   `!string.IsNullOrEmpty(get_selectionNode().get_Prompt().get_DisplayText())`
+   and `PiePromptListener.LateUpdate` (`pie_d.cs:140853`) sets `flag3 = false`,
+   which skips the `suppressedKeys` loop entirely and drives
+   `promptController.SetBool("Dismiss", true)`.
+
+`prompt: null` also works and reaches the same result one step earlier
+(`RootSelection.get_Prompt()` returns `message.Prompt`, `core_d.cs:71333`), but
+`""` is the safer choice because it keeps the field a real object for anything
+that reads `.ID`.
+
+**No unguarded dereference exists on this path.** I enumerated all 22
+`get_Prompt()` call sites in `pie_d.cs`. The only ones a `CoinFlipChoiceRequired`
+/ `GoFirstChoiceRequired` node can reach are `CanShowPrompt` (the guard itself),
+`pie_d.cs:140872` / `140894` (both inside `if (flag3)`, which `CanShowPrompt`
+gates), and `PipTrayArea.updateCards` `pie_d.cs:95445`, which null-checks first.
+Everything else is a reveal/selection node type (`selectionRevealArea.Initialize`)
+that these two messages never construct. The selection commands themselves —
+`l.V` (`pie_d.cs:140648`), `l.p` (`pie_d.cs:140342`) — read
+`get_Buttons()`, never `get_Prompt()`. **VERIFIED, nothing throws.**
+
+Two riders:
+
+- **`pie_d.cs:95305` is `PipTrayArea.suppressedKeys`** (class at
+  `pie_d.cs:95269`), a 2-entry list used at exactly one place,
+  `pie_d.cs:95445`, which sets the **energy pip tray's own caption**. It gates
+  nothing else — not the banner, not the action button. Note the comparison
+  there is `string[].Contains(...)`: **ordinal, case-sensitive, no `$` trim** —
+  unlike `PiePromptListener`, which uses `LocalizableText.HasId`
+  (`core_d.cs:76425`): `OrdinalIgnoreCase` after `id.Trim('$')`, and with
+  empty-vs-empty counted as a match.
+- **`GoFirstChoiceRequired` has one path where `prompt` is ignored.**
+  `PieSelectionNodeCommandFactory.Update` (`pie_d.cs:155966`) checks whether
+  `initialCoinFlipAnimator` is still in its `Start` state; if it is, the node is
+  handled by `R.R` (`pie_d.cs:198782`) instead of `l.p`, and `R.R`'s
+  **constructor** (`pie_d.cs:198805`) does
+
+  ```csharp
+  promptListener.OverrideShowPrompt = true;
+  promptListener.OverrideText = new LocalizableText("playmat.prompt.startingcoinflip.playerchoose");
+  ```
+
+  which `LateUpdate` prefers over the (empty) node prompt
+  (`flag3 = flag3 || (OverrideShowPrompt && !IsNullOrEmpty(OverrideText))`).
+  So **a `GoFirstChoiceRequired` sent without a preceding
+  `CoinFlipChoiceRequired` will always show "…playerchoose" as a banner**, and
+  will render its buttons through `PiePromptListener.MakeButton` rather than the
+  coin dialog's left/right buttons. Sending the heads/tails call first (which
+  `l.V` uses to activate the dialog and set `YouPickHeadsOrTails`) avoids it.
+  *(VERIFIED that `R.R` forces the banner; INFERRED that `l.V` moves the
+  animator out of `Start` — that transition lives in the animator controller
+  asset, not in code.)* `R.R` also leaks `OverrideShowPrompt = true` — see §7.4.
+
+### 7.3 The mulligan carousel
+
+`MulliganRevealArea` (`pie_d.cs:7872`), instantiated by `b.N`
+(`[MessageCommandConstructor] N(MulliganRevealCardsEffect)`, `pie_d.cs:14779`).
+
+**One effect with N piles is one dialog that pages through them. VERIFIED.**
+
+- **Paging controls exist and are real buttons.** `MulliganPageLeftButton` /
+  `MulliganPageRightButton` are `[SerializeField]` at `pie_d.cs:7883` / `7886`
+  and are polled in `Update()` (`pie_d.cs:7975`) alongside `DoneButton`.
+  `HandleCardPaneScrollRight` / `Left` (`pie_d.cs:7948` / `7957`) step
+  `currentViewIndex` and call `UpdatePageButtons()`.
+- **`mulliganCount = entityIDPiles.Count - 1`** (`pie_d.cs:7924`) — it is the
+  maximum index, not a count. `UpdatePageButtons` (`pie_d.cs:7965`) shows the
+  left arrow when `currentViewIndex > 0` and the right arrow when
+  `currentViewIndex < mulliganCount`, so a single-pile effect shows no arrows
+  and an N-pile effect pages 1..N.
+- **Header**: `CardPaneText.Text = string.Format(L.LT("playmat.mulligan.dialog.carousel.header"), currentViewIndex + 1)`
+  (`pie_d.cs:7927`, and again on every page turn at `pie_d.cs:7968`). So
+  `"Mulligan {0}"` is formatted with the **1-based page index**, and it
+  re-renders as you page. **VERIFIED.**
+- **Sub-header**: `SubHeaderText.Text = string.Format(L.LT(prompt), entityIDPiles.Count)`
+  (`pie_d.cs:7926`). §2.6 marked this INFERRED; it is now **VERIFIED** by type —
+  `L.LT(...)` takes a `string` (via the implicit `LocalizableText -> string`
+  conversion, `core_d.cs:76461`) and `.Count` is the `List`, so there is no other
+  possible binding of the two collapsed `message.A` references.
+  **Trap: `prompt` must not be null.** A null `LocalizableText` converts to a
+  null string, `Localize(null)` returns null, and `string.Format(null, count)`
+  throws `ArgumentNullException`. It is not wrapped in a try/catch here.
+- **Whose hands / face-up rendering.** The cards render from the inline
+  `ReadOnlyAttributes` in `entityIDPiles` **regardless of `player`** —
+  `UpdatePageButtons` calls `Introduce(mulliganList[currentViewIndex])`
+  (`pie_d.cs:8043`) unconditionally, and `Introduce` re-introduces every id with
+  the supplied attributes. `player` is used only by `PopulateIntroductions`
+  (`pie_d.cs:7935`), which — **only when `player == the local account`** —
+  records which of those ids were already legitimately in your hand, so that
+  `Unintroduce` (`pie_d.cs:8060`, called for every pile on Done and on
+  `OnDestroy`) skips them. **So `player` is a safety field, not a visibility
+  field: if you set it to the wrong account and a pile contains cards that are
+  in the local player's real hand, closing the dialog will un-introduce those
+  cards out of the hand view.** This corrects §2.6's wording. **VERIFIED.**
+- **Size limits.** There is no cap on the number of piles: paging is index-based
+  and `Introduce`/`Unintroduce` are `for` loops over `mulliganList.Count`.
+  There is no cap on cards per pile either — `MulliganCarouselRenderRequester.updateCards`
+  (`pie_d.cs:7842`) iterates `carouselAnchors` and `continue`s past any index
+  beyond `cardStackContents.Count`, with its own left/right scroll buttons
+  (`pie_d.cs:7836`) for overflow within a page, and duplicates collapsed into
+  counted stacks. **A 17-pile carousel is workable; so is 59, though the reader
+  would need 58 clicks of the right arrow to reach the last page.**
+  The only cost is memory: `clonedEntities` accumulates one clone per distinct
+  entity across pages, cleared on Done (`pie_d.cs:8009`).
+- **It cannot hang.** `b.N.execute()` (`pie_d.cs:14784`) spins until the dialog
+  destroys itself **or** a timeout from the `"match"` `DWDDataManager` model
+  elapses, then forces `handleDoneClicked()`. `model.c` is set in `Awake`
+  (`pie_d.cs:7916`) and cleared in `OnDestroy` (`pie_d.cs:8015`).
+
+### 7.4 The action / end-turn button, definitively
+
+The component is **`NextButton`** (`pie_d.cs:137772`); `Update()` at
+`pie_d.cs:137880`. The click handler is a *separate* component,
+`NextButtonClickHandler` (`pie_d.cs:31371`), whose `Click()` coroutine is at
+`pie_d.cs:31414`.
+
+The two composite terms (`pie_d.cs:137888`, `137897`):
+
+```csharp
+haveZeroNonSelectionInterruptActive =
+      (!viewingPrizes || prizeException) && !zooming && !coinFlipOrGoFirstChoice
+   && !discardActive && (!prompter.OverrideShowPrompt || selections.IsInDropCardsInPrizeNode())
+   && !clickAndDrag.dragInProgress && !view.Model.c;
+
+haveZeroSelectionRelatedInterrupts = (CurrentOffer != null) && !(CurrentChoice is R.n)
+   && (showCancel || onRootAndNotCustomChoice || mayAdvanceAndNoChild);
+```
+
+with `showCancel = SelectionUtils.CanCancel()` (`pie_d.cs:192229`),
+`onRootAndNotCustomChoice = CurrentChoice == CurrentOffer && !(CurrentChoice is ICustomChoice)`,
+`mayAdvanceAndNoChild = CurrentChoice != null && MayAdvance() && NodeToAdvanceTo() == null`.
+
+`SelectingForAnAbility()` (`pie_d.cs:192178`) requires
+`CurrentChoice.Parent != null && Parent.Parent != null && Parent.Parent is IEntityListSelection && Parent is IActionSelection`
+— **it is false for any root node and false for any first-level child**, so it
+is false in both cases below.
+
+#### Case A — `SelectionWithTargetsAndActionsRequired`, `forced:false`, empty `targetMap`
+
+`SelectionWithTargetsAndActionsNode` (`core_d.cs:71455`). With an empty
+`targetMap` the ctor adds nothing, so `SelectionsMap` and `available` are empty.
+
+| term | value | why |
+|---|---|---|
+| `CurrentChoice` | the root node itself | `RootSelection..ctor` does `set_Current(this)` (`core_d.cs:71265`) and this class has no `enter()` override |
+| `get_MayAdvance()` | **true** | `core_d.cs:71499`: `forced ? selection != null : true` |
+| `get_MayCancel()` | **true** | `core_d.cs:71509`, same shape |
+| `NodeToAdvanceTo()` | **null** | `core_d.cs:71544`, `selection == null` |
+| `CurrentChoice is ICustomChoice` | **false** | the class implements `IHintedEntitySelection, IEntityListSelection, ISelectionNode` only |
+| `onRootAndNotCustomChoice` | **true** | |
+| `mayAdvanceAndNoChild` | **true** | |
+| `showCancel` | true | `CanCancel()` passes: not `ICustomChoice`, `MayCancel`, not selecting for an ability, `Kind != "InitialBenchedTargetInformation"` |
+| `haveZeroSelectionRelatedInterrupts` | **true** | |
+| `SelectingForAnAbility()` | false | root node, `Parent == null` |
+| `buttonIsActive` | **= `haveZeroNonSelectionInterruptActive`** | the ability clause collapses to true |
+
+Label (`setLabelTextFromSelectionContext`, `pie_d.cs:137970`): the node **is** an
+`IEntityListSelection`, `MayCancel()` is true, and `get_MinToSelect()` is `0`
+when `forced == false` (`core_d.cs:71508`), so it takes the branch at
+`pie_d.cs:137993`:
+`showCancel = false; text = L.LT("common.dialog.done"); labelSetEmpty = false;`
+
+`setDisplayState` (`pie_d.cs:137926`) then does
+`imageButton.gameObject.SetActive(buttonIsActive && !labelSetEmpty)`.
+
+**Verdict: the button DOES appear, and it works.** Clicking it takes the
+`MayAdvance()` branch of `Click()` (`pie_d.cs:31441`) -> `CurrentOffer.Advance()`
+-> `RootSelection.Advance()` (`core_d.cs:71283`) sees `NodeToAdvanceTo() == null`
+and writes `getResponseMessage(false)`, which for this node
+(`core_d.cs:71527`) is `SelectionWithTargetsAndActions` with `selection: null`
+— a clean pass. **No soft lock. VERIFIED.**
+
+Two riders on Case A:
+
+- **The label reads "Done", not "End Turn".** `playmat.controls.endTurnButton`
+  is only reached by the final `else` at `pie_d.cs:138013`, which needs
+  `!MayCancel && Parent == null`. For this node `MayCancel` is false only when
+  `forced: true` **and** nothing is selected — and in that state `MayAdvance()`
+  is also false, so `Click()` falls through to the `else` at `pie_d.cs:31469`
+  that logs *"I should be turned off right now..."* and does nothing. **A
+  `forced:true` empty offer therefore renders a dead "End Turn" button.**
+  `forced:false` is the correct choice; accept "Done" as the caption.
+- **`CheckShouldEndTurn()` (`pie_d.cs:31489`) dereferences
+  `player1Active.get_Entity().Children.get_Item(0)`** whenever the current choice
+  is a `SelectionWithTargetsAndActionsNode` at the root. With an empty
+  `targetMap` it then finds nothing and returns false harmlessly — but if the
+  local player has **no Active Pokémon**, `Children.get_Item(0)` throws inside
+  the click coroutine. Do not send an action offer before the Active is placed.
+
+#### Case B — `SelectionWithTargetsRequired`, current node is a chained `InitialBenchedTargetInformation`
+
+| term | value | why |
+|---|---|---|
+| `CurrentChoice` | the bench `EntityListTargetNode`, `Kind == "InitialBenchedTargetInformation"` | chained as the second `TargetInformation`, §2.2 |
+| `CurrentOffer` | the `SelectionWithTargetsNode` root | |
+| `onRootAndNotCustomChoice` | **false** | child ≠ root |
+| `MayAdvance()` | **true** with `minimumToSelect:0` / `forced:false` | `get_satisfied`, `core_d.cs:72880` |
+| `NodeToAdvanceTo()` | **null** | the bench node has no children |
+| `mayAdvanceAndNoChild` | **true** | |
+| `showCancel` | **false** | `CanCancel()` explicitly returns `Kind != "InitialBenchedTargetInformation"` (`pie_d.cs:192234`) |
+| `haveZeroSelectionRelatedInterrupts` | **true** | via `mayAdvanceAndNoChild` |
+| `SelectingForAnAbility()` | false | `Parent.Parent == null` |
+| `buttonIsActive` | **= `haveZeroNonSelectionInterruptActive`** | |
+
+Label: `IEntityListSelection` yes; if `MayCancel()` is true the
+`Kind == "InitialBenchedTargetInformation"` special case at `pie_d.cs:137991`
+gives `common.dialog.done`; if `MayCancel()` is false the
+`else if (Parent != null)` at `pie_d.cs:138008` gives `common.dialog.done` too.
+**Either way `labelSetEmpty = false` and the caption is "Done". VERIFIED.**
+
+**Verdict: the Done button DOES appear here too.** So neither case is killed by
+anything inside `haveZeroSelectionRelatedInterrupts`.
+
+#### The fields that actually kill the button
+
+Both cases reduce to `buttonIsActive == haveZeroNonSelectionInterruptActive`.
+Two of its terms are server-reachable, and both are **sticky**:
+
+1. **`prompter.OverrideShowPrompt`.** `m.l`, the `PauseOnPromptEffect` handler
+   (`pie_d.cs:143749`), sets it true at `pie_d.cs:143762` and then:
+
+   ```csharp
+   if (!msg.doPause) { yield break; }            // pie_d.cs:143765 - returns WITHOUT clearing
+   ...
+   promptListener.OverrideShowPrompt = false;    // pie_d.cs:143781, doPause:true path only
+   ```
+
+   **A `PauseOnPromptEffect{doPause:false}` — the exact "generic banner"
+   recipe recommended in §3.5 — leaves `OverrideShowPrompt` true forever and
+   silently disables the action button for the rest of the match.** The only
+   things that clear it are `ClosePauseOnPromptEffect` (`d.C`, ctor
+   `pie_d.cs:30858`: `OverrideShowPrompt = false; OverrideText = null`), the
+   `doPause:true` path of `m.l`, and the `else` branch of
+   `ForceSelectionFinished` (`pie_d.cs:143221`). `R.R` (§7.2) and the Cedric
+   Juniper handler (`pie_d.cs:30394`) leak it the same way. **VERIFIED — this is
+   the most likely cause of a "frozen, no Done button" report.** Rule: every
+   `PauseOnPromptEffect` must be paired with a `ClosePauseOnPromptEffect`.
+
+2. **`view.Model.c`** — the dialog-block flag. Set true by
+   `MulliganRevealArea.Awake` (`pie_d.cs:7916`) and by the
+   `RevealCardsToAllEffect` / `RevealCardsToPlayerEffect` handlers; cleared in
+   `OnDestroy` (`pie_d.cs:8015`), by `RevealClosed`, and — usefully — by the
+   **`ActivePlayerSet` message** (`pie_d.cs:136706`). If a reveal dialog is
+   destroyed abnormally, or a `RevealClosed` is never sent, the button stays
+   dead until the next `ActivePlayerSet`.
+   *(`PlaymatView.Model` is `N.f` (`pie_d.cs:147378`), the same type
+   `PlaymatProvider.get_model()` returns (`pie_d.cs:66519`); that they are the
+   same instance is INFERRED, though `PiePromptListener` reading `view.Model.c`
+   for exactly this purpose makes it near-certain.)*
+
+The remaining terms are local UI state the server cannot cause: `viewingPrizes`,
+`zooming`, `discardActive`, `clickAndDrag.dragInProgress`. The one other
+server-reachable term is **`coinFlipOrGoFirstChoice`** (`pie_d.cs:137884`) — if
+`targetType` on your offer happens to be the literal string `"CoinFlipChoice"`
+or `"GoFirstChoice"`, the button is suppressed by design.
+
+### 7.5 `Draw`
+
+`m.c`, `[SequenceCommandConstructor("Draw")]` (`pie_d.cs:143090`).
+
+The **constructor** (`pie_d.cs:143091`) walks the children once and sorts them:
+
+- each `m.I` (an `EntityMoved` command) gets `i.A = true` and `i.a = true`, is
+  added to the "all moves" list, and is bucketed by the moved card's type into
+  Pokémon / Trainer / Energy / other;
+- each `m.H` (an **`EntityIntroduced`** command) is collected into a separate
+  list;
+- **anything else is not collected at all.**
+
+`executeSequence` (`pie_d.cs:143123`) then runs, in order:
+
+1. **every collected `EntityIntroduced`, serially, to completion** — before
+   anything animates;
+2. builds a queue of `S.o` curve motions in bucket order Pokémon -> Trainer ->
+   Energy -> other;
+3. `ExecuteParallel` over all the `EntityMoved` commands (they were flagged not
+   to animate themselves);
+4. plays the queued curve motions **0.2 s apart** — this is the fan;
+5. **`foreach (item in sequence) { while (item.MoveNext()) ... }`** — a final
+   serial pass over the raw child list. The `m.I` / `m.H` commands are already
+   complete so they return immediately; **any child that was neither runs here,
+   last, after the fan.**
+
+So: **an `EntityIntroduced` child does not interfere with the fan — it is
+hoisted to the front and completes before the first card moves.** Introduce+move
+pairs are exactly the right shape. Non-bucketed children (effects, nested
+sequences) are not lost, they just run at the very end.
+
+Two riders, both **VERIFIED**:
+
+- `i.A = true` is the flag tested at `pie_d.cs:143578` (`if (!this.A)`), which
+  guards both the per-move animation *and*
+  `StartCoroutine(makeLogDisplayable(duration))`. **Inside a `Draw`,
+  `animDuration` on the child `EntityMoved` is ignored entirely.**
+- The `Draw` **constructor** resolves every moved entity with
+  `model.All.get_Item(entityID)`, which bottoms out in `data[key]` on a
+  `Dictionary` (`VersionedMap.get_Item`, `core_d.cs:12962`) and therefore throws
+  `KeyNotFoundException` on a miss. The sibling `EntityIntroduced` has **not**
+  executed yet at that point — `m.H` does its `Introduce` in `execute()`
+  (`pie_d.cs:143413`), not in its ctor, and `SequenceCommandFactory.GetCommand`
+  builds the whole command tree before running any of it
+  (`Sequences.ConsumeQueuedMessages`, `pie_d.cs:147842`). **So the drawn card
+  must already exist in the client's model; the `EntityIntroduced` inside a
+  `Draw` can only be a re-introduce (attribute reveal) of a card the client
+  already knows about, never a first introduction.** That is consistent with the
+  deck being introduced face-down at deal time, which is why this works today.
+
+### 7.6 Corrections to earlier sections
+
+| where | said | actually |
+|---|---|---|
+| `CLAUDE.md`, §3.2 table | "`ActivePlayerSet` hides the coin-flip dialog and resets both coins" | true of the **sequence** `l.Z` (`pie_d.cs:141074`); the **message** command `L.Q` (`pie_d.cs:136658`) never mentions the coins |
+| §3.3, `ForceSelectionFinished` | "…and tidies up the coin-flip and go-first dialogs" | those branches are unreachable — `ForceEndSelection()` nulls `get_selectionNode()` on the line above (`pie_d.cs:143196` vs `143203`). It clears the prompt override and nothing else |
+| §3.5, `PauseOnPromptEffect` | "with `doPause: false` it sets a banner and returns immediately" | correct, but it also leaves `OverrideShowPrompt` true, which disables the action / end-turn button until a `ClosePauseOnPromptEffect` |
+| §2.6, `MulliganRevealCardsEffect.player` | "the dialog only re-introduces hand cards when this is the local player" | the *pile* cards are introduced regardless of `player`; `player` gates `previouslyIntroduced`, i.e. which cards are **protected from being un-introduced** when the dialog closes |
+| §2.6, `prompt` | "used as `string.Format(L.LT(prompt), piles.Count)` *(INFERRED)*" | now **VERIFIED** by type disambiguation, and `prompt` must be non-null or `string.Format` throws |
