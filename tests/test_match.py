@@ -452,6 +452,92 @@ class SetupSelectionTests(unittest.TestCase):
         self.assertEqual(bench, [basics[1]])
 
 
+class CoinFlipTests(unittest.TestCase):
+    """The opening flip, and why it cannot be sent before the board."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.db = engine.CardDB.from_directory(CARD_DIR)
+
+    def _match(self):
+        basic = next(c for c in self.db if c.is_pokemon and c.stage == "Basic")
+        energy = next(c for c in self.db
+                      if c.is_basic_energy and c.energy_options)
+        deck = [basic.guid] * 20 + [energy.guid] * 40
+        m = match.Match("game-6", ["acct-a", "acct-b"], self.db,
+                        [deck, list(deck)], seed=2)
+        m.serialized_state(predeal=True)
+        return m
+
+    def test_the_flip_names_an_entity_the_client_already_has(self):
+        """MultipleCoinFlipWithContextEffect's command constructor does
+        All.get_Item(source) with no guard, so an unknown id throws a
+        KeyNotFoundException inside the message pump."""
+        m = self._match()
+        for winner in (0, 1):
+            items = m.coin_flip_items(winner, heads=(winner == 0))
+            effect = items[0][2][0][2]["effectMessage"]["value"]
+            self.assertIn(effect["source"], m.known)
+
+    def test_heads_is_zero(self):
+        """get_Result() reads resultLst[0]: 0 is heads, anything else tails."""
+        m = self._match()
+        self.assertEqual(
+            m.coin_flip_items(0, heads=True)[0][2][0][2]
+            ["effectMessage"]["value"]["resultLst"], [0])
+        self.assertNotEqual(
+            m.coin_flip_items(1, heads=False)[0][2][0][2]
+            ["effectMessage"]["value"]["resultLst"], [0])
+
+    def test_it_is_wrapped_in_initialcoinflip(self):
+        """That sequence is what pushes one result onto BOTH coin animators."""
+        m = self._match()
+        items = m.coin_flip_items(0, heads=True)
+        self.assertEqual(items[0][0], "seq")
+        self.assertEqual(items[0][1], "InitialCoinFlip")
+
+
+class MulliganDrawTests(unittest.TestCase):
+    """Compensation is offered, not taken."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.db = engine.CardDB.from_directory(CARD_DIR)
+
+    def _match(self, owed):
+        basic = next(c for c in self.db if c.is_pokemon and c.stage == "Basic")
+        energy = next(c for c in self.db
+                      if c.is_basic_energy and c.energy_options)
+        deck = [basic.guid] * 20 + [energy.guid] * 40
+        m = match.Match("game-7", ["acct-a", "acct-b"], self.db,
+                        [deck, list(deck)], seed=5)
+        m.serialized_state(predeal=True)
+        m.state.players[0].owed_draws = owed
+        return m
+
+    def test_the_button_index_is_the_count(self):
+        """CustomChoiceRequired replies with the button INDEX, so the buttons
+        have to be the counts in order or the answer means something else."""
+        m = self._match(3)
+        body, owed = m.mulligan_selection(0, 1)
+        self.assertEqual(owed, 3)
+        self.assertEqual(len(body["buttons"]), 4)      # 0, 1, 2, 3
+
+    def test_a_single_mulligan_is_a_yes_no_question(self):
+        m = self._match(1)
+        body, owed = m.mulligan_selection(0, 1)
+        self.assertEqual(owed, 1)
+        self.assertEqual(len(body["buttons"]), 2)      # No, then Yes
+        self.assertIn("mulliganchoicechoice2", body["buttons"][0]["id"])
+        self.assertIn("mulliganchoicechoice1", body["buttons"][1]["id"])
+
+    def test_many_mulligans_still_produce_one_button_each(self):
+        """The engine caps mulligans at 100, so the count can be large."""
+        m = self._match(40)
+        body, _ = m.mulligan_selection(0, 1)
+        self.assertEqual(len(body["buttons"]), 41)
+
+
 class LocalizationKeyTests(unittest.TestCase):
     """Every key we send must exist in the client's shipped string DB.
 

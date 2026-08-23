@@ -94,6 +94,16 @@ PROMPT_CHOOSE_ACTION = (
 # Each maps to a real key from the client's shipped DB - a key that does not
 # exist is not an error client-side, it is displayed verbatim, so every one of
 # these was looked up rather than guessed.
+PROMPT_COIN_FLIP = "com.direwolfdigital.cake.rules.states.startgame.coinflip"
+# The original server's own mulligan prompt, still in the shipped DB: "Your
+# opponent had no Basic Pokemon and had to draw a new hand. Would you like to
+# draw a card?" It asked once per mulligan, with Yes/No; asking once for a
+# total keeps the same wording honest while scaling to any number of them.
+PROMPT_MULLIGAN_DRAW = (
+    "com.direwolfdigital.cake.rules.states.startgame.mulligancustomchoice")
+BUTTON_YES = "com.direwolfdigital.cake.rules.states.startgame.mulliganchoicechoice1"
+BUTTON_NO = "com.direwolfdigital.cake.rules.states.startgame.mulliganchoicechoice2"
+
 CHOICE_PROMPT_DEFAULT = "playmat.prompt.choosecards"
 CHOICE_PROMPTS = {
     "healTarget":      "playmat.prompt.selectahurtpokemon",
@@ -533,15 +543,42 @@ class Match:
                 out.append(("seq", "DealInitialPrizeCards",
                             [("seq", "GroupedMove", moves)]))
 
+        draws = []
+
+        def flush_draws():
+            if not draws:
+                return
+            items = []
+            for change in draws:
+                destination = self.pile.get((change.player, ZONE_HAND))
+                if destination is None or change.card is None:
+                    continue
+                if change.player == 0:
+                    items.append(("msg",) + self._introduce_msg(change.card))
+                items.append(("msg",) + self._move_msg(change.card, destination))
+            del draws[:]
+            if items:
+                # Draw buckets its children by card type for the draw fan.
+                out.append(("seq", "Draw", items))
+
         for change in changes:
             if (change.kind == engine.CHANGE_MOVE
                     and change.to_zone == ZONE_PRIZES
                     and change.from_zone == ZONE_DECK):
+                flush_draws()
                 run.append(change)
                 continue
+            if (change.kind == engine.CHANGE_MOVE
+                    and change.to_zone == ZONE_HAND
+                    and change.from_zone == ZONE_DECK):
+                flush()
+                draws.append(change)
+                continue
             flush()
+            flush_draws()
             out.append(change)
         flush()
+        flush_draws()
         return out
 
     def _destination(self, change):
@@ -908,6 +945,60 @@ class Match:
     # only the asker. So a Choice the server cannot render is not a missing
     # feature, it is a hung match, which is why every option_kind has a path
     # here and the fallback answers rather than gives up.
+
+    def mulligan_selection(self, player, counter):
+        """How many of the opponent's mulligans to cash in.
+
+        A button list rather than a target list: there is nothing on the board
+        to point at, the answer is a number, and CustomChoiceRequired's reply
+        is the button INDEX - which here is the count itself, since the buttons
+        run 0, 1, 2, ...
+        """
+        owed = self.state.players[player].owed_draws
+        return {
+            "counter": counter,
+            "prompt": PROMPT_MULLIGAN_DRAW,
+            "offerLength": 0,
+            "startingTimestamp": 0,
+            "sortType": "",
+            # The button INDEX is the answer, so the buttons are the counts in
+            # order. One mulligan is a yes/no question and reads better as
+            # one; several need the numbers.
+            "buttons": ([_loc(BUTTON_NO), _loc(BUTTON_YES)] if owed == 1
+                        else [_loc(str(n)) for n in range(owed + 1)]),
+            "sourceEntity": None,
+            "kind": "",
+        }, owed
+
+    def coin_flip_items(self, winner, heads):
+        """The opening coin flip, as an InitialCoinFlip sequence.
+
+        The InitialCoinFlip sequence reads its child's result and pushes it
+        onto BOTH coin animators, which is what makes one flip show on both
+        sides of the board.
+
+        `source` is not optional and is not decorative: the effect's command
+        constructor does All.get_Item(source) with no guard, so an id the
+        client has never seen throws a KeyNotFoundException inside the message
+        pump. It has to be an entity from a board that has already been sent -
+        the player entity of whoever won the flip.
+        """
+        source = self.player_entity.get(winner) or self.playmat_id
+        effect = ("msg", "EffectPlayed", {
+            "gameID": self.game_id,
+            "effectMessage": {
+                "name": "MultipleCoinFlipWithContextEffect",
+                "value": {
+                    # 0 is heads; anything else is tails.
+                    "resultLst": [0 if heads else 1],
+                    "title": _loc(PROMPT_COIN_FLIP),
+                    "source": source,
+                    "targets": [],
+                    "gameText": _loc(PROMPT_COIN_FLIP),
+                },
+            },
+        })
+        return [("seq", "InitialCoinFlip", [effect])]
 
     def choice_selection(self, choice, counter):
         """A Choice as a client selection. Returns (name, body, decode).

@@ -267,6 +267,11 @@ class Rules:
     # engine invents nothing and always takes one.
     prizes_per_knockout: int = 1
 
+    # "For each of your opponent's mulligans you MAY draw a card." Drawing
+    # them without asking is simpler and very nearly always what a player
+    # wants, but it is not the rule, and a hand is sometimes better small.
+    optional_mulligan_draw: bool = True
+
     energy_attachments_per_turn: int = 1
     retreats_per_turn: int = 1
 
@@ -785,6 +790,10 @@ class PlayerState:
     stadiums_this_turn: int = 0
     setup_done: bool = False
     mulligans: int = 0
+    # Cards this player MAY draw because the opponent mulliganed - one per
+    # mulligan. The rule is permissive ("you may draw"), so this is an offer
+    # to be answered, not a debt to be settled automatically.
+    owed_draws: int = 0
     # Set the moment a draw is required and the deck is empty. The loss is
     # recorded rather than raised so both players' losses can land on the same
     # check and produce a tie instead of a race.
@@ -1085,6 +1094,16 @@ class Choose(Action):
 class Promote(Action):
     """Choose a new Active after the old one was knocked out."""
     slot: int
+
+
+@dataclass(frozen=True)
+class DrawMulligans(Action):
+    """Take some of the cards the opponent's mulligans entitle you to.
+
+    `count` may be zero: the rule says "you may draw", and answering nothing is
+    a legal answer that ends the offer.
+    """
+    count: int
 
 
 @dataclass(frozen=True)
@@ -1905,7 +1924,11 @@ def new_game(db: CardDB, decks, seed=0, rules: Rules = DEFAULT_RULES,
 
     for p in (0, 1):
         extra = state.players[1 - p].mulligans
-        if extra:
+        if not extra:
+            continue
+        if rules.optional_mulligan_draw:
+            state.players[p].owed_draws = extra
+        else:
             _draw(state, p, extra, changes)
 
     changes.append(Change(CHANGE_PHASE, detail={"phase": PHASE_SETUP,
@@ -1949,6 +1972,11 @@ def players_to_act(state: GameState) -> list:
         return []
     if state.pending is not None:
         return [state.pending.choice.player]
+    # Mulligan compensation is taken before any Pokemon is placed, so it
+    # outranks setup - and the drawn cards may themselves be what gets placed.
+    owed = [p.index for p in state.players if p.owed_draws > 0]
+    if owed:
+        return owed[:1]
     if state.pending_promotions:
         return [state.pending_promotions[0]]
     return [state.to_move]
@@ -2074,6 +2102,9 @@ def legal_actions(state: GameState, player: int) -> list:
 
     if state.pending is not None:
         return _choice_actions(state)
+
+    if ps.owed_draws > 0:
+        return [DrawMulligans(player, n) for n in range(ps.owed_draws + 1)]
 
     if state.pending_promotions and state.pending_promotions[0] == player:
         return [Promote(player, slot.slot_id) for slot in ps.bench]
@@ -2589,6 +2620,18 @@ def _do_pass(state, action, changes):
     _end_turn(state, changes)
 
 
+def _do_draw_mulligans(state, action, changes):
+    ps = state.players[action.player]
+    _require(ps.owed_draws > 0, "no mulligan draws are owed")
+    _require(0 <= action.count <= ps.owed_draws,
+             "may draw 0 to %d cards, not %d" % (ps.owed_draws, action.count))
+    # Cleared first, and unconditionally: declining is an answer, and leaving
+    # the offer standing after a zero would ask the same question for ever.
+    ps.owed_draws = 0
+    if action.count:
+        _draw(state, action.player, action.count, changes)
+
+
 _HANDLERS = {
     SetupPlaceActive: _do_setup_place_active,
     SetupPlaceBench: _do_setup_place_bench,
@@ -2604,6 +2647,7 @@ _HANDLERS = {
     Attack: _do_attack,
     Promote: _do_promote,
     Pass: _do_pass,
+    DrawMulligans: _do_draw_mulligans,
 }
 
 

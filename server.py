@@ -1355,6 +1355,7 @@ class GameSession:
         self.action_decode = None
         self.setup_cards = None
         self.choice_options = None
+        self.player_won_flip = None
         self.game_started = None
         self.selection_counter = 0
         self.pending_selection = None
@@ -1674,10 +1675,18 @@ class GameSession:
                         self.peer)
             return
         self.game_started = time.time()
-        self.offer_go_first()
+        self.build_match()
 
-    def start_match(self, player_first):
-        """Build the game, show the board, then animate the opening."""
+    def build_match(self):
+        """Board, then coin flip, then who goes first.
+
+        The order is forced by the coin. MultipleCoinFlipWithContextEffect's
+        command constructor does All.get_Item(source) with no guard, so the
+        flip cannot be shown until the client has a board with entities in it.
+        The board is therefore built and sent first, with a provisional first
+        player, and the real answer is written back before setup begins -
+        nothing between here and there reads it.
+        """
         deck = self.deck_pile or []
         self.match = match.Match(
             self.game_id, [self.account_id(), AI_ACCOUNT_ID],
@@ -1687,25 +1696,48 @@ class GameSession:
             # Trainers do nothing, Abilities cannot be used, and an attack is
             # only its printed damage.
             rules=match_rules(),
-            first_player=0 if player_first else 1)
+            first_player=0)
+        board = self.match.serialized_state(predeal=True)
+        log.info("[game %s] -> SerializedGameState (%d entities)",
+                 self.peer, len(self.match.known))
+        self.send("SequenceMessage", {
+            "sequenceID": EMPTY_SEQUENCE_ID,
+            "msg": {"name": "SerializedGameState", "value": board},
+        })
+
+        # A real coin decides who chooses, which is the actual rule - the
+        # player used to simply be asked.
+        heads = random.random() < 0.5
+        self.player_won_flip = heads
+        winner = 0 if heads else 1
+        log.info("[game %s] coin flip: %s, %s won",
+                 self.peer, "heads" if heads else "tails",
+                 "player" if winner == 0 else "opponent")
+        self.emit_items(self.match.coin_flip_items(winner, heads))
+
+        if self.player_won_flip:
+            self.offer_go_first()
+        else:
+            # The opponent won and takes the first turn, as any player would.
+            self.start_match(player_first=False)
+
+    def start_match(self, player_first):
+        """Fix the turn order the coin decided, then animate the opening."""
+        state = self.match.state
+        state.first_player = 0 if player_first else 1
+        state.to_move = state.first_player
         # Setup is no longer done for the player. The board arrives dealt but
         # unplaced, and advance_match then offers them their Active and Bench
         # like any other decision - which is what "I don't have an option to
         # select a basic to start" was asking for. The opponent still places
         # itself, through the AI, in advance_match.
         #
-        # The board is sent with every card still in its deck, face down, and
-        # the deal is then animated from the FINAL state rather than replayed
-        # from the engine's change log - that log contains every mulligan
-        # redraw, which showed as cards flying out of the deck and back in.
-        board = self.match.serialized_state(predeal=True)
-        log.info("[game %s] -> SerializedGameState (%d entities), %s first",
-                 self.peer, len(self.match.known),
-                 "player" if player_first else "opponent")
-        self.send("SequenceMessage", {
-            "sequenceID": EMPTY_SEQUENCE_ID,
-            "msg": {"name": "SerializedGameState", "value": board},
-        })
+        # The board went out with every card still in its deck, face down; the
+        # deal is animated from the FINAL state rather than replayed from the
+        # engine's change log, because that log contains every mulligan redraw
+        # and those showed as cards flying out of the deck and back in.
+        log.info("[game %s] %s goes first",
+                 self.peer, "player" if player_first else "opponent")
         self.emit_items(self.match.opening_animation())
         # No ActivePlayerSet here. It plays the "YOUR TURN" banner and
         # increments the client's own turn counter, and at this point nobody
@@ -1796,6 +1828,8 @@ class GameSession:
         state = self.match.state
         if state.pending is not None:
             return self.offer_choice()
+        if state.players[0].owed_draws > 0:
+            return self.offer_mulligan_draws()
         if state.phase == engine.PHASE_SETUP:
             return self.offer_setup()
         if state.players[0].active is None:
@@ -1861,6 +1895,20 @@ class GameSession:
             return self.offer_choice()
         self.emit_items(self.match.animation_for(changes))
         self.advance_match()
+
+    def offer_mulligan_draws(self):
+        """Ask how many of the opponent's mulligans to cash in.
+
+        The rule is "you MAY draw", so the count is the player's to pick. The
+        engine records the entitlement rather than spending it, and refuses to
+        move on until it is answered - answering zero is an answer.
+        """
+        self.selection_counter += 1
+        body, owed = self.match.mulligan_selection(0, self.selection_counter)
+        self.pending_selection = "MulliganDraw"
+        log.info("[game %s] -> mulligan draw offer (0-%d, counter %d)",
+                 self.peer, owed, self.selection_counter)
+        self.send_game("CustomChoiceRequired", body)
 
     def offer_setup(self):
         """Ask the player for their Active and Bench, on the real setup screen.
@@ -2135,6 +2183,21 @@ class GameSession:
         counter = req.get("counter")
         log.info("[game %s] <- GameCustomChoice selection=%r counter=%r (%s)",
                  self.peer, choice, counter, self.pending_selection)
+        if self.pending_selection == "MulliganDraw":
+            self.pending_selection = None
+            owed = self.match.state.players[0].owed_draws
+            count = choice if isinstance(choice, int) and 0 <= choice <= owed else 0
+            log.info("[game %s] <- mulligan draw: %d of %d",
+                     self.peer, count, owed)
+            try:
+                self.match.state, changes = engine.apply(
+                    self.match.state, engine.DrawMulligans(0, count))
+            except engine.IllegalAction as exc:
+                log.warning("[game %s] illegal mulligan draw: %s",
+                            self.peer, exc)
+                return self.offer_mulligan_draws()
+            self.emit_items(self.match.animation_for(changes))
+            return self.advance_match()
         if self.pending_selection == "Choice":
             self.pending_selection = None
             options = self.choice_options or []

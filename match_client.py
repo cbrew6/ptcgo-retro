@@ -208,6 +208,9 @@ class Harness:
         self.actions_taken = 0
         self.setups = 0
         self.choices = 0
+        self.coin_flips = 0
+        self.mulligan_offers = 0
+        self.went_first = None
         self.revealed_pokemon = 0
         self.result = None
         self.turns = 0
@@ -249,6 +252,10 @@ class Harness:
             self.sequence_depth -= 1
             if self.sequence_depth < 0:
                 self.sequence_errors.append("StopSequence with no StartSequence")
+        if name == "EffectPlayed":
+            inner = (value or {}).get("effectMessage") or {}
+            if inner.get("name") == "MultipleCoinFlipWithContextEffect":
+                self.coin_flips += 1
         if name == "SerializedGameState":
             self.state_seen += 1
             self.board = (value or {}).get("entities")
@@ -342,21 +349,31 @@ class Harness:
         return value["gameID"]
 
     def play(self, go_first=True, max_actions=400):
-        """Answer the coin call, then respond to offers until the game ends."""
+        """Respond to whatever the server asks until the game ends.
+
+        The go-first call is NOT guaranteed: a coin decides who chooses, and
+        when the opponent wins it takes the first turn without asking. Waiting
+        unconditionally for GoFirstChoiceRequired hung every game the coin went
+        the other way, which is half of them.
+        """
         self.send("PlayerReady", {})
-        self.wait_for(["GoFirstChoiceRequired"])
-        self.send("GameCustomChoice", {"selection": 0 if go_first else 1,
-                                       "counter": 1})
 
         for _ in range(max_actions):
             name, value = self.wait_for(
-                ["SelectionWithTargetsAndActionsRequired",
+                ["GoFirstChoiceRequired",
+                 "SelectionWithTargetsAndActionsRequired",
                  "SelectionWithTargetsRequired",
                  "CustomChoiceRequired",
                  "GameCompletedMessage"], timeout=30)
             if name == "GameCompletedMessage":
                 self.result = value
                 return
+            if name == "GoFirstChoiceRequired":
+                self.went_first = go_first
+                self.send("GameCustomChoice",
+                          {"selection": 0 if go_first else 1,
+                           "counter": value.get("counter")})
+                continue
             if name == "SelectionWithTargetsRequired":
                 # Setup and every effect Choice share this message. Tell them
                 # apart by the node NAME, not by how many nodes there are: a
@@ -372,6 +389,10 @@ class Harness:
                 self.send("SelectionWithTargets", self._targets_reply(value))
                 continue
             if name == "CustomChoiceRequired":
+                # The mulligan offer's buttons ARE the counts, so any index is
+                # a valid answer; everything else is an ordinary button list.
+                if "mulligancustomchoice" in (value.get("prompt") or ""):
+                    self.mulligan_offers += 1
                 self.choices += 1
                 self.send("GameCustomChoice", self._custom_choice_reply(value))
                 continue
@@ -557,8 +578,11 @@ def report(h):
           "Pokemon itself" % h.setups)
     check("the harness actually played", h.actions_taken > 0,
           "%d of %d offers answered with an action" % (h.actions_taken, h.turns))
-    print("\n   %d offers, %d answered with an action"
-          % (h.turns, h.actions_taken))
+    check("the opening coin was flipped", h.coin_flips > 0,
+          "%d MultipleCoinFlipWithContextEffect seen" % h.coin_flips)
+    print("\n   %d offers, %d answered with an action, %d choices, "
+          "%d mulligan offers"
+          % (h.turns, h.actions_taken, h.choices, h.mulligan_offers))
     return ok
 
 

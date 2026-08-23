@@ -432,9 +432,39 @@ class SetupTests(unittest.TestCase):
         self.assertEqual(len(kinds(changes, engine.CHANGE_MULLIGAN)), 1)
         self.assertTrue(any(state.card(c).is_basic_pokemon
                             for c in state.players[0].hand))
-        # The mulliganing player keeps seven; the opponent is paid one extra.
+        # The mulliganing player keeps seven. The opponent is OFFERED one
+        # extra rather than given it - "you may draw" - so the hand is still
+        # seven until the offer is answered.
         self.assertEqual(len(state.players[0].hand), 7)
+        self.assertEqual(len(state.players[1].hand), 7)
+        self.assertEqual(state.players[1].owed_draws, 1)
+        self.assertEqual(engine.players_to_act(state), [1])
+
+        state, _ = engine.apply(state, engine.DrawMulligans(1, 1))
         self.assertEqual(len(state.players[1].hand), 8)
+        self.assertEqual(state.players[1].owed_draws, 0)
+
+    def test_mulligan_compensation_may_be_declined(self):
+        """The rule is permissive, and a small hand is sometimes better."""
+        deck0 = self.deck(("FireEnergy", 7), ("Pipsqueak", 1), ("FireEnergy", 22))
+        deck1 = self.deck(("Pipsqueak", 2), ("FireEnergy", 28))
+        state, _ = engine.new_game(DB, [deck0, deck1],
+                                   rng=ScriptedRandom(), first_player=0)
+        self.assertEqual(state.players[1].owed_draws, 1)
+        state, changes = engine.apply(state, engine.DrawMulligans(1, 0))
+        self.assertEqual(len(state.players[1].hand), 7)
+        # Answered, not deferred: leaving it owed would re-ask for ever.
+        self.assertEqual(state.players[1].owed_draws, 0)
+        self.assertNotIn(1, [p.index for p in state.players if p.owed_draws])
+
+    def test_compensation_can_be_taken_automatically_by_rule(self):
+        rules = engine.Rules(optional_mulligan_draw=False)
+        deck0 = self.deck(("FireEnergy", 7), ("Pipsqueak", 1), ("FireEnergy", 22))
+        deck1 = self.deck(("Pipsqueak", 2), ("FireEnergy", 28))
+        state, _ = engine.new_game(DB, [deck0, deck1], rules=rules,
+                                   rng=ScriptedRandom(), first_player=0)
+        self.assertEqual(len(state.players[1].hand), 8)
+        self.assertEqual(state.players[1].owed_draws, 0)
 
     def test_deck_with_no_basic_is_rejected_rather_than_looping(self):
         deck = self.deck(("FireEnergy", 30))
@@ -1208,7 +1238,12 @@ class RandomGameTests(unittest.TestCase):
                 doing = [a for a in actions if not isinstance(a, engine.Pass)]
                 action = rng.choice(doing if doing and rng.random() < 0.9 else actions)
                 state, changes = engine.apply(state, action)
-                self.assertTrue(changes or isinstance(action, engine.SetupDone))
+                # Two actions legitimately change nothing visible: finishing
+                # setup, and declining the mulligan compensation.
+                silent = (isinstance(action, engine.SetupDone)
+                          or (isinstance(action, engine.DrawMulligans)
+                              and action.count == 0))
+                self.assertTrue(changes or silent)
                 self.check_invariants(state)
             self.assertTrue(state.over, "game %d did not finish" % seed)
             self.assertIn(state.winner, (0, 1, engine.WINNER_TIE))
