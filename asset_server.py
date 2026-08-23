@@ -37,7 +37,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 PORT = 8081
 # Bump when the manifest contents change - the client caches the manifest by
 # version number and won't re-fetch otherwise.
-MANIFEST_VERSION = 4
+MANIFEST_VERSION = 5
 
 log = logging.getLogger("assets")
 

@@ -11,13 +11,32 @@ Ship an empty `assets[]` and the client never requests a single bundle -
 backgrounds, sleeves, deck boxes and card art all silently render black.
 
 The names live in the AssetBundle object's m_Container map inside each bundle.
-Bundles are UnityWeb (Unity 5.2.4f1) containers:
+Two container formats appear in StreamingAssets:
+
+  * UnityWeb (Unity 5.2.4f1) - the 233 bundles that shipped with the client.
+  * UnityFS  (Unity 2018.4.11f1) - bundles recovered from a donated
+    LocalLow bundleCache. The client reads both, so they are served as-is;
+    only the name extraction below has to understand each layout.
+
+UnityWeb layout:
 
     "UnityWeb\\0", int32BE format, cstr unityVersion, cstr unityRevision,
     int32BE minimumStreamedBytes, int32BE headerSize,
     int32BE levelsBeforeStreaming, int32BE levelCount,
     per level: int32BE compressed, int32BE uncompressed
     ... then at headerSize: an LZMA-alone stream
+
+UnityFS layout:
+
+    "UnityFS\0", int32BE version, cstr unityVersion, cstr unityRevision,
+    int64BE size, int32BE compressedBlocksInfoSize,
+    int32BE uncompressedBlocksInfoSize, int32BE flags
+    blocksInfo (at end of file when flags & 0x80, else inline), compressed
+    per flags & 0x3f; it holds a 16-byte hash, an int32BE block count and
+    then (uncompressedSize, compressedSize, flags) per block. Concatenating
+    the decompressed blocks yields the same SerializedFile payload the
+    UnityWeb path produces. The donated bundles use uncompressed blocksInfo
+    and LZ4 data blocks.
 
 Inside, m_Container entries are little-endian length-prefixed ASCII strings
 padded to a 4-byte boundary.
@@ -56,17 +75,99 @@ def _cstr(b, o):
     return b[o:e].decode("ascii", "replace"), e + 1
 
 
-def decompress(path):
-    d = open(path, "rb").read()
-    if not d.startswith(b"UnityWeb"):
-        return None
+def _lzma_alone(b):
+    return lzma.LZMADecompressor(format=lzma.FORMAT_ALONE).decompress(b)
+
+
+try:
+    from lz4.block import decompress as _lz4_block
+
+    def _lz4(src, size):
+        return _lz4_block(src, uncompressed_size=size)
+except ImportError:
+    def _lz4(src, size):
+        """Minimal LZ4 block decoder, so this script needs no dependencies."""
+        dst, i, n = bytearray(), 0, len(src)
+        while i < n:
+            token = src[i]; i += 1
+            ln = token >> 4
+            if ln == 15:
+                while True:
+                    b = src[i]; i += 1; ln += b
+                    if b != 255:
+                        break
+            dst += src[i:i + ln]; i += ln
+            if i >= n:
+                break
+            off = src[i] | (src[i + 1] << 8); i += 2
+            ml = token & 0x0F
+            if ml == 15:
+                while True:
+                    b = src[i]; i += 1; ml += b
+                    if b != 255:
+                        break
+            ml += 4
+            start = len(dst) - off
+            if off >= ml:
+                dst += dst[start:start + ml]
+            else:                       # overlapping run
+                for k in range(ml):
+                    dst.append(dst[start + k])
+        return bytes(dst)
+
+
+def _unpack(mode, blob, size):
+    if mode == 0:
+        return blob
+    if mode == 1:
+        return _lzma_alone(blob)
+    if mode in (2, 3):
+        return _lz4(blob, size)
+    raise ValueError("unknown compression mode %d" % mode)
+
+
+def unityweb_payload(d):
     o = 0
     _, o = _cstr(d, o)
     o += 4                      # format
     _, o = _cstr(d, o)          # unity version
     _, o = _cstr(d, o)          # unity revision
     _, header_size = struct.unpack_from(">2i", d, o)
-    return lzma.LZMADecompressor(format=lzma.FORMAT_ALONE).decompress(d[header_size:])
+    return _lzma_alone(d[header_size:])
+
+
+def unityfs_payload(d):
+    o = 0
+    _, o = _cstr(d, o)
+    version = struct.unpack_from(">i", d, o)[0]; o += 4
+    _, o = _cstr(d, o)          # unity version
+    _, o = _cstr(d, o)          # unity revision
+    _size, c_info, u_info, flags = struct.unpack_from(">qiii", d, o); o += 20
+    if version >= 7:
+        o = (o + 15) & ~15      # 16-byte alignment was added in v7
+    if flags & 0x80:            # blocksInfo lives at the end of the file
+        info, data_off = d[len(d) - c_info:], o
+    else:
+        info, data_off = d[o:o + c_info], o + c_info
+    info = _unpack(flags & 0x3F, info, u_info)
+
+    q = 16                      # skip uncompressedDataHash
+    count = struct.unpack_from(">i", info, q)[0]; q += 4
+    out = []
+    for _ in range(count):
+        usize, csize, bflags = struct.unpack_from(">iih", info, q); q += 10
+        out.append(_unpack(bflags & 0x3F, d[data_off:data_off + csize], usize))
+        data_off += csize
+    return b"".join(out)
+
+
+def decompress(path):
+    d = open(path, "rb").read()
+    if d.startswith(b"UnityWeb"):
+        return unityweb_payload(d)
+    if d.startswith(b"UnityFS"):
+        return unityfs_payload(d)
+    return None
 
 
 def asset_names(raw):

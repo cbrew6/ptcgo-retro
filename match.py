@@ -468,7 +468,7 @@ class Match:
                 decode[(entity, action.ability_id)] = ("attack", action)
         return {
             "counter": counter,
-            "prompt": "playmat.prompt.yourturn",
+            "prompt": "playmat.prompt.chooseaction",
             "offerLength": 0,                 # no client-side auto-pass
             "startingTimestamp": 0,
             "forced": False,                  # so the Next button can end turn
@@ -493,3 +493,85 @@ class Match:
             return None
         found = decode.get((entity_id, action_id))
         return found[1] if found else None
+
+    # -- the opening animation --------------------------------------------
+
+    def opening_animation(self):
+        """A clean deal derived from the final board, not from the change log.
+
+        Replaying the engine's opening Changes looked wrong for three separate
+        reasons, all of which this avoids:
+
+          - Mulligans are in that log. A deck thin on Basics redraws many
+            times, so cards visibly flew out of the deck and straight back
+            into it. The real game never animated that; it showed a summary
+            afterwards. Here the churn is simply not shown - only the hand the
+            player actually ends up with.
+          - Every move arrived as its own message and played one at a time.
+            The named sequences run their nested GroupedMoves in parallel with
+            a small stagger, which is what makes a hand fan out instead of
+            trickling.
+          - Order. Working from the final state means each card is dealt once,
+            to where it actually ended up.
+
+        Returns items for emit_sequence: ("seq", name, [...]) or ("msg", ...).
+        """
+        items = []
+        for index in range(len(self.state.players)):
+            items.append(("msg", "Shuffled", {
+                "gameID": self.game_id,
+                "entityID": self.pile[(index, ZONE_DECK)],
+            }))
+
+        hands = []
+        for index, player in enumerate(self.state.players):
+            moves = []
+            for cid in player.hand:
+                if index == 0:                      # only our own hand is open
+                    moves.append(("msg",) + self._introduce_msg(cid))
+                moves.append(("msg",) + self._move_msg(
+                    cid, self.pile[(index, ZONE_HAND)]))
+            if moves:
+                hands.append(("seq", "GroupedMove", moves))
+        if hands:
+            items.append(("seq", "DealInitialHands", hands))
+
+        reveal = []
+        for index, player in enumerate(self.state.players):
+            for slot, _pile, is_active in self.slot_entities(index):
+                if not slot.stack:
+                    continue
+                cid = slot.stack[-1]
+                zone = ZONE_ACTIVE if is_active else ZONE_BENCH
+                reveal.append(("msg",) + self._introduce_msg(cid, slot))
+                reveal.append(("msg",) + self._move_msg(
+                    cid, self.pile[(index, zone)]))
+        if reveal:
+            items.append(("seq", "IntroduceInitialPokemon", reveal))
+
+        prizes = []
+        for index, player in enumerate(self.state.players):
+            moves = [("msg",) + self._move_msg(cid, self.pile[(index, ZONE_PRIZES)])
+                     for cid in player.prizes]
+            if moves:
+                prizes.append(("seq", "GroupedMove", moves))
+        if prizes:
+            items.append(("seq", "DealInitialPrizeCards", prizes))
+        return items
+
+    def _introduce_msg(self, cid, slot=None):
+        return ("EntityIntroduced", {
+            "gameID": self.game_id,
+            "entityID": self.eid(cid),
+            "entityName": self.card_kind(cid),
+            "attributeMap": self.card_attributes(cid, slot),
+        })
+
+    def _move_msg(self, cid, destination, duration=300):
+        return ("EntityMoved", {
+            "gameID": self.game_id,
+            "entityID": self.eid(cid),
+            "destinationID": destination,
+            "positionInParent": -1,
+            "animDuration": duration,
+        })

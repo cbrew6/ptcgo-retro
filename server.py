@@ -1662,25 +1662,12 @@ class GameSession:
             card_db(), [deck, list(deck)],
             seed=random.randrange(1 << 30),
             first_player=0 if player_first else 1)
-        opening = list(self.match.opening) + self.match.auto_setup()
-        # Render first: messages_for resolves destinations through the pile map
-        # that rendering assigns, so measuring the animation before there is a
-        # board silently drops every move.
+        self.match.auto_setup()
+        # The board is sent with every card still in its deck, face down, and
+        # the deal is then animated from the FINAL state rather than replayed
+        # from the engine's change log - that log contains every mulligan
+        # redraw, which showed as cards flying out of the deck and back in.
         board = self.match.serialized_state(predeal=True)
-        animation = self.match.messages_for(opening)
-
-        # A deck thin on Basics mulligans repeatedly, and replaying every
-        # redraw is hundreds of messages of shuffling that reads as a bug
-        # rather than as dealing. Past a threshold, snap to the dealt board
-        # instead: the game is identical, only the theatre is skipped.
-        animate = len(animation) <= MAX_DEAL_MESSAGES
-        if not animate:
-            log.info("[game %s] %d deal messages (%d mulligans) - "
-                     "showing the dealt board instead", self.peer,
-                     len(animation),
-                     sum(1 for c in opening if c.kind == "mulligan"))
-        if not animate:
-            board = self.match.serialized_state(predeal=False)
         log.info("[game %s] -> SerializedGameState (%d entities), %s first",
                  self.peer, len(self.match.known),
                  "player" if player_first else "opponent")
@@ -1688,14 +1675,42 @@ class GameSession:
             "sequenceID": EMPTY_SEQUENCE_ID,
             "msg": {"name": "SerializedGameState", "value": board},
         })
-        if animate:
-            for name, body in animation:
-                self.send_game(name, body)
-        else:
-            # The board already shows the result, so only the turn is left.
-            self.send_game("ActivePlayerSet", {
-                "accountID": self.match.account(self.match.state.to_move)})
+        self.emit_items(self.match.opening_animation())
+        self.send_game("ActivePlayerSet", {
+            "accountID": self.match.account(self.match.state.to_move)})
         self.advance_match()
+
+    def _in_sequence(self, sequence_id, name, value):
+        self.send("SequenceMessage", {
+            "sequenceID": sequence_id,
+            "msg": {"name": name, "value": value},
+        })
+
+    def emit_sequence(self, name, items):
+        """StartSequence / children / StopSequence, always balanced.
+
+        Mis-bracketing throws out of the client's message-pump coroutine and
+        that coroutine is never restarted, so one bad pair freezes the board
+        for the rest of the game. One emitter, always closing what it opens.
+        """
+        sid = str(uuid.uuid4())
+        self._in_sequence(sid, "StartSequence", {
+            "gameID": self.game_id, "sequenceID": sid,
+            "name": name, "attributes": None})
+        for kind, a, b in items:
+            if kind == "seq":
+                self.emit_sequence(a, b)
+            else:
+                self._in_sequence(sid, a, b)
+        self._in_sequence(sid, "StopSequence", {
+            "gameID": self.game_id, "sequenceID": sid, "name": name})
+
+    def emit_items(self, items):
+        for kind, a, b in items:
+            if kind == "seq":
+                self.emit_sequence(a, b)
+            else:
+                self.send_game(a, b)
 
     def advance_match(self):
         """Play out the opponent until the player has a decision to make.
