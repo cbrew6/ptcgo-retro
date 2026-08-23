@@ -839,6 +839,47 @@ every match used, because the client's own `clientOptions` are only
 `{"Timers": "false"}` and we forwarded them unchanged. The values are already
 on the deck as attributes 200680 / 200670 / 200690.
 
+### The real opening, from gameplay footage
+
+Confirmed against a recording, and every banner it shows is a key already in
+the shipped DB under the ORIGINAL server's namespace - which is why they are
+worth matching exactly rather than approximating:
+
+```
+coin call -> flip -> winner chooses
+DealInitialHands            both decks riffle WHILE the seven fly out
+Mulligan                    revealed
+opponent's Active           placed FACE DOWN
+  "...startgame.opponentselectstartingpokemon"
+your Active                 Basics glow green, drag to centre
+  "...startgame.selectstartingpokemon"
+opponent's Bench
+  "playmat.gamestart.opponentpromptbenchpokemon"
+your Bench, then Done
+  "playmat.gamestart.promptbenchpokemon.new"          if any can be benched
+  "playmat.gamestart.prompt.novalidbenchselections"   if none can
+prizes placed
+opponent's Active turns over
+first player draws          no "your turn" banner
+```
+
+Two things this settles. The **shuffle belongs inside the deal**, not before
+it - one animation, decks riffling as the cards fly out - and
+`DealInitialHands` lowers both coins as its first act, so the coin clears
+exactly as the deal starts. And **setup is hidden**: the opponent's Pokemon go
+down with `attributes: null` and are turned over only after the prizes, which
+is the rule as much as the presentation, since you must choose your Active
+without seeing theirs.
+
+Decide face-down from a latch (`Match.setup_hidden`), never from
+`state.phase`: `animation_for` runs AFTER `engine.apply`, so by the time the
+last SetupDone is animated the state has already left `PHASE_SETUP` and a
+phase test turns those placements face up a beat early.
+
+`playmat.gamestart.prompt.playermulligandone` - "Your opponent has finished
+setting up to play. Select Done to take a mulligan." - independently confirms
+that compensation comes after setup, which is what the engine already does.
+
 ### A sequence runs its children WHILE it animates
 
 So a sequence is a container for one beat, never for "everything that happened

@@ -106,6 +106,14 @@ ACTION_SETUP_DONE = "1e7c0b00-0000-4000-8000-00000000000b"
 PROMPT_SETUP_ACTIVE = (
     "com.direwolfdigital.cake.rules.states.startgame.selectstartingpokemon")
 PROMPT_SETUP_BENCH = "playmat.gamestart.promptbenchpokemon.new"
+# "You have no additional Basic Pokemon to start on your Bench. Select Done to
+# continue." The real game swaps to this when the hand holds nothing benchable,
+# so the Done button stops looking like a choice the player is declining.
+PROMPT_SETUP_BENCH_NONE = "playmat.gamestart.prompt.novalidbenchselections"
+# The two waiting banners, both the original server's own keys.
+PROMPT_OPPONENT_ACTIVE = (
+    "com.direwolfdigital.cake.rules.states.startgame.opponentselectstartingpokemon")
+PROMPT_OPPONENT_BENCH = "playmat.gamestart.opponentpromptbenchpokemon"
 
 # The action offer deliberately uses a prompt the client SUPPRESSES.
 # PiePromptListener.suppressedKeys holds eight ids it refuses to draw a banner
@@ -321,6 +329,10 @@ class Match:
         self.playmat_id = str(uuid.uuid4())
         self.playmat_zone = {}                  # playmat-level zone -> GUID
         self.player_entity = {}                 # player index -> entity GUID
+        # Setup is hidden: the opponent's Pokemon are placed face down and
+        # stay that way until reveal_setup_items turns them over. See
+        # _change_move.
+        self.setup_hidden = True
         self.known = set()                      # every entity the client has
         # The attack currently being resolved. The client's hit effect needs
         # the declaration (which attack, whose) and the damage that landed, and
@@ -797,15 +809,24 @@ class Match:
         # and face up means "has attributes" - so this is an introduction.
         reveal = (change.to_zone in OPEN_ZONES
                   and (change.player == 0 or change.to_zone != ZONE_HAND))
+        # During SETUP the opponent's Pokemon go down FACE DOWN, and stay that
+        # way until both boards are finished and the prizes are out. That is
+        # the actual rule - setup is simultaneous and hidden, so neither player
+        # may see what the other led with - and it is what the real client
+        # shows: a card back in their Active while you choose yours, flipped
+        # over only after the prizes are placed.
+        face_down = (self.setup_hidden
+                     and change.player != 0
+                     and change.to_zone in (ZONE_ACTIVE, ZONE_BENCH))
         # A prize is face down on the board, so introducing it BEFORE the move
         # flipped it over on the prize pile and only then flew it across. You
         # take a prize and then see what you got, not the other way round.
         after = change.from_zone == ZONE_PRIZES
         if reveal and not after:
-            msgs.append(self._introduce_msg(change.card))
+            msgs.append(self._introduce_msg(change.card, face_down=face_down))
         msgs.append(self._move_msg(change.card, destination))
         if reveal and after:
-            msgs.append(self._introduce_msg(change.card))
+            msgs.append(self._introduce_msg(change.card, face_down=face_down))
         return msgs
 
     def _change_attach(self, change):
@@ -1644,9 +1665,14 @@ class Match:
                 self._offer_group(rows, decode, active_entity,
                                   ACTION_SETUP_DONE, "EndTurn", "Ability",
                                   {active_entity: action})
+        # Which banner depends on whether anything can actually be benched.
+        # With an empty bench list the real game says so outright rather than
+        # inviting a choice that is not there.
+        benchable = any(r for r in rows
+                        if r["selectableAction"]["actionID"] == ACTION_SETUP_BENCH)
         return {
             "counter": counter,
-            "prompt": "playmat.prompt.choosepokemonforbench",
+            "prompt": PROMPT_SETUP_BENCH if benchable else PROMPT_SETUP_BENCH_NONE,
             "offerLength": 0,
             "startingTimestamp": 0,
             "forced": False,
@@ -1974,16 +2000,35 @@ class Match:
             }))
         return [("seq", "Mulligan", items)] if items else []
 
-    def shuffle_animation(self):
-        """Both decks shuffling, sent before the coin is ever raised.
+    def reveal_setup_items(self, player=1):
+        """Turn a player's setup Pokemon face up, after the prizes are out.
 
-        Its own method because placement is the whole point. These animate the
-        two deck piles - top left and bottom right - and every later position
-        in the opening has something else on screen for them to play over: run
-        behind the flip they were "puddles" either side of a coin still in the
-        air, and behind the go-first answer they did it again. Before the coin
-        nothing else is moving, and it is the real order anyway: shuffle,
-        flip, deal.
+        The counterpart to the face-down placement in _change_move: those
+        entities were introduced with a null attribute map, so this is the
+        same EntityIntroduced again, this time carrying the attributes. No
+        move is needed - the cards are already where they belong.
+        """
+        items = []
+        for slot, _pile, _is_active in self.slot_entities(player):
+            if not slot.stack:
+                continue
+            items.append(("msg",) + self._introduce_msg(slot.stack[-1], slot))
+        # From here on their Pokemon are public, so ordinary play introduces
+        # them face up. This is a flag rather than a phase test because
+        # animation_for runs AFTER engine.apply: by the time the last
+        # SetupDone is being animated the state has already left PHASE_SETUP,
+        # so a phase test turned the last placements face up a beat early.
+        self.setup_hidden = False
+        return items
+
+    def shuffle_items(self):
+        """Both decks riffling. Belongs INSIDE the deal.
+
+        Sent on their own these animate the two deck piles - top left and
+        bottom right - over whatever else is on screen, which is what the
+        "puddles" beside a coin still in the air were. In the real opening the
+        shuffle and the deal are one animation: the decks riffle while the
+        cards fly out into the hands.
         """
         return [("msg", "Shuffled", {
             "gameID": self.game_id,
@@ -2026,7 +2071,12 @@ class Match:
             if moves:
                 hands.append(("seq", "GroupedMove", moves))
         if hands:
-            deal = ("seq", "DealInitialHands", hands)
+            # The shuffle is part of the deal, not a beat before it: the real
+            # animation riffles both decks WHILE the cards fly out into the
+            # hands. DealInitialHands also lowers both coins as the very first
+            # thing it does, so the coin clears exactly as the deal begins and
+            # the shuffle never plays over it.
+            deal = ("seq", "DealInitialHands", self.shuffle_items() + hands)
             if opponent_chose:
                 # "Your opponent will go first". OpponentChoosingToGoFirst
                 # sets OpponentPicksWhoGoesFirst on the coin dialog - but ONLY
@@ -2068,12 +2118,19 @@ class Match:
         # DealInitialPrizeCards by animation_for.
         return items
 
-    def _introduce_msg(self, cid, slot=None):
+    def _introduce_msg(self, cid, slot=None, face_down=False):
+        """Put an entity on the board, face up or face down.
+
+        "Face down" is not a flag on the card - it is `attributes: null`. The
+        client draws a card back for an entity with no attribute map, and
+        revealing it later is just another EntityIntroduced carrying them.
+        """
         return ("EntityIntroduced", {
             "gameID": self.game_id,
             "entityID": self.eid(cid),
             "entityName": self.card_kind(cid),   # never null, or Introduce throws
-            "attributeMap": self.card_attributes(cid, slot),
+            "attributeMap": (None if face_down
+                             else self.card_attributes(cid, slot)),
         })
 
     def _move_msg(self, cid, destination, duration=300, position=None):

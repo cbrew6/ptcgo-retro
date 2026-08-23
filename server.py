@@ -1401,6 +1401,8 @@ class GameSession:
         self.account = None
         self.game_id = None
         self.match = None
+        # Latch for the end-of-setup reveal; see reveal_setup_if_ready.
+        self.setup_revealed = False
         self.deck_pile = None
         self.action_decode = None
         self.setup_cards = None
@@ -1731,6 +1733,7 @@ class GameSession:
                         self.peer)
             return
         self.game_started = time.time()
+        self.setup_revealed = False
         self.build_match()
 
     def build_match(self):
@@ -1760,15 +1763,6 @@ class GameSession:
             "sequenceID": EMPTY_SEQUENCE_ID,
             "msg": {"name": "SerializedGameState", "value": board},
         })
-        # Shuffle here, with the board freshly on screen and the coin still
-        # lying down. These animate BOTH decks - top left and bottom right -
-        # and anywhere later in the opening they play over something: behind
-        # the flip they were the "puddles" either side of a coin still in the
-        # air, and behind the go-first answer they did it again. Before the
-        # coin is the one place nothing else is moving, and it is also the
-        # real order: you shuffle, then you flip, then you deal.
-        self.emit_items(self.match.shuffle_animation())
-
         self.offer_call_flip()
 
     def offer_call_flip(self):
@@ -1919,7 +1913,13 @@ class GameSession:
                     changes.extend(more)
             # emit_items, not a flat push: the named sequences carry the
             # choreography, and an Attack sent loose is a number changing.
-            self.emit_items(m.animation_for(changes))
+            if (m.state.phase != engine.PHASE_SETUP
+                    and not self.setup_revealed):
+                # The AI was the one to finish setting up, so its own batch
+                # carries the prizes and the first draw.
+                self.emit_setup_completion(changes)
+            else:
+                self.emit_items(m.animation_for(changes))
         log.error("[game %s] match did not settle; stopping", self.peer)
 
     def offer_actions(self):
@@ -2178,9 +2178,52 @@ class GameSession:
                            self.match.animation_for(placements))
         # A separate beat, at top level: animation_for folds the prize moves
         # into DealInitialPrizeCards and the turn start into its own messages.
-        if started:
-            self.emit_items(self.match.animation_for(started))
+        self.emit_setup_completion(started)
         self.advance_match()
+
+    def emit_setup_completion(self, changes):
+        """SetupDone's changes, with the reveal in its right place.
+
+        The real order is prizes, THEN the opponent's card turns over, THEN
+        the first player draws. SetupDone produces all of that in one batch -
+        the prize moves, the turn start and its draw - so emitting the batch
+        and revealing afterwards put the reveal after the draw. Split on the
+        last prize move instead.
+        """
+        if not changes:
+            return self.reveal_setup_if_ready()
+        last_prize = -1
+        for i, change in enumerate(changes):
+            if (change.kind == engine.CHANGE_MOVE
+                    and change.to_zone == engine.ZONE_PRIZES):
+                last_prize = i
+        if last_prize < 0:
+            self.emit_items(self.match.animation_for(changes))
+            return self.reveal_setup_if_ready()
+        self.emit_items(self.match.animation_for(changes[:last_prize + 1]))
+        self.reveal_setup_if_ready()
+        rest = changes[last_prize + 1:]
+        if rest:
+            self.emit_items(self.match.animation_for(rest))
+
+    def reveal_setup_if_ready(self):
+        """Flip the opponent's setup face up, once, after the prizes.
+
+        Their Pokemon were placed face down (see _change_move) because setup is
+        hidden - you must choose your own Active without seeing theirs. The
+        reveal is the last beat of the opening: prizes out, then their card
+        turns over, then the first player draws.
+
+        Latched, because both the player's reply and the AI's own turn in
+        advance_match can be the thing that completes setup, and revealing
+        twice would re-introduce entities that are already face up.
+        """
+        if self.match is None or self.setup_revealed:
+            return
+        if not all(p.setup_done for p in self.match.state.players):
+            return
+        self.setup_revealed = True
+        self.emit_items(self.match.reveal_setup_items(1))
 
     def on_SelectionWithTargetsAndActions(self, value, request_id):
         """The player chose a move, or passed with a null selection."""
