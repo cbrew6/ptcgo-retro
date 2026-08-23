@@ -549,27 +549,33 @@ def _entity(eid, parent, owner, name, attrs, children=None):
     }
 
 
-def _card_entity(guid, parent, owner, introduced=True):
+def _card_kind(guid):
     at = card_index().get(guid) or {}
     if ATTR_ENERGY_A in at or ATTR_ENERGY_B in at:
-        kind = ENTITY_ENERGY
-    elif ATTR_STAGE in at:
-        kind = ENTITY_POKEMON
-    else:
-        kind = ENTITY_TRAINER
-    attrs = None
-    if introduced:
-        attrs = [{"name": ATTR_ARCHETYPE_ID, "value": guid}]
-        name_key = (at.get(ATTR_NAME_KEY, {}).get("s") or "").strip('"')
-        if name_key:
-            attrs.append({"name": ATTR_NAME_KEY,
-                          "value": _loc(name_key.strip("$"))})
-        for attr_id, key in ((ATTR_SET, "s"), (ATTR_CARD_NUM, "i"),
-                             (ATTR_CARD_NAME, "s")):
-            val = at.get(attr_id, {}).get(key)
-            if val is not None:
-                attrs.append({"name": attr_id, "value": val})
-    return _entity(str(uuid.uuid4()), parent, owner, kind, attrs)
+        return ENTITY_ENERGY
+    if ATTR_STAGE in at:
+        return ENTITY_POKEMON
+    return ENTITY_TRAINER
+
+
+def _card_attributes(guid):
+    """What makes a card render face up. Absent, it draws as a card back."""
+    at = card_index().get(guid) or {}
+    attrs = [{"name": ATTR_ARCHETYPE_ID, "value": guid}]
+    name_key = (at.get(ATTR_NAME_KEY, {}).get("s") or "").strip('"')
+    if name_key:
+        attrs.append({"name": ATTR_NAME_KEY, "value": _loc(name_key.strip("$"))})
+    for attr_id, key in ((ATTR_SET, "s"), (ATTR_CARD_NUM, "i"),
+                         (ATTR_CARD_NAME, "s")):
+        val = at.get(attr_id, {}).get(key)
+        if val is not None:
+            attrs.append({"name": attr_id, "value": val})
+    return attrs
+
+
+def _card_entity(guid, parent, owner, introduced=True):
+    return _entity(str(uuid.uuid4()), parent, owner, _card_kind(guid),
+                   _card_attributes(guid) if introduced else None)
 
 
 def _is_basic_pokemon(guid):
@@ -579,56 +585,82 @@ def _is_basic_pokemon(guid):
 
 
 def build_game_state(game_id, local_account, opponent_account, pile):
-    """The whole board as one SerializedGameState body.
+    """The board as one SerializedGameState, plus the plan to deal it out.
 
-    Deck order IS the shuffle - the client renders the array as given - so the
-    server decides it here and no Shuffled message is needed for a static board.
+    Every card starts face down in its owner's deck. The opening hand, prizes
+    and active are then animated into place with EntityMoved, which is the
+    difference between a game starting and a finished board appearing at once.
+
+    Deck order IS the shuffle: the client renders the array as given, so the
+    server decides the order here and no Shuffled message is needed.
     """
-    cards = list(pile)
-    random.shuffle(cards)
-
     playmat_id = str(uuid.uuid4())
     children = [_entity(str(uuid.uuid4()), playmat_id, local_account,
                         ENTITY_AREA, [{"name": ATTR_NAME_KEY, "value": _loc(z)}])
                 for z in PLAYMAT_ZONES]
+    plan = {"playmat": playmat_id, "players": []}
 
-    for owner, hidden in ((local_account, False),
-                          (opponent_account, HIDE_OPPONENT_CARDS)):
-        deck = list(cards)
+    for owner in (local_account, opponent_account):
+        deck = list(pile)
         random.shuffle(deck)
-        # An active Pokemon has to be a Basic; without one the board is a
+        # The active has to be a Basic. Without one the real game is a
         # mulligan, which is a rule we are deliberately not implementing yet.
-        active = next((c for c in deck if _is_basic_pokemon(c)), None)
+        active = next((g for g in deck if _is_basic_pokemon(g)), None)
         if active is not None:
             deck.remove(active)
-        hand, deck = deck[:HAND_SIZE], deck[HAND_SIZE:]
-        prizes, deck = deck[:PRIZE_COUNT], deck[PRIZE_COUNT:]
+        hand, rest = deck[:HAND_SIZE], deck[HAND_SIZE:]
+        prizes, rest = rest[:PRIZE_COUNT], rest[PRIZE_COUNT:]
+        # Dealt cards sit on top so the deal draws from where a player expects.
+        order = ([active] if active else []) + hand + prizes + rest
 
         player_id = str(uuid.uuid4())
-        piles = []
-        contents = {ZONE_DECK: deck, ZONE_HAND: hand, ZONE_PRIZES: prizes,
-                    ZONE_ACTIVE: [active] if active else []}
+        pile_ids, pile_entities, dealt = {}, [], []
         for zone in PLAYER_ZONES:
             pile_id = str(uuid.uuid4())
+            pile_ids[zone] = pile_id
             kind = ENTITY_SLOTTED if zone == ZONE_BENCH else ENTITY_AREA
-            kids = [_card_entity(g, pile_id, owner, not hidden)
-                    for g in contents.get(zone, [])]
-            piles.append(_entity(pile_id, player_id, owner, kind,
-                                 [{"name": ATTR_NAME_KEY, "value": _loc(zone)}],
-                                 kids))
+            kids = []
+            if zone == ZONE_DECK:
+                for guid in order:
+                    card = _entity(str(uuid.uuid4()), pile_id, owner,
+                                   _card_kind(guid), None)   # face down
+                    kids.append(card)
+                    dealt.append((card["entityID"], guid))
+            pile_entities.append(
+                _entity(pile_id, player_id, owner, kind,
+                        [{"name": ATTR_NAME_KEY, "value": _loc(zone)}], kids))
         children.append(_entity(player_id, playmat_id, owner, ENTITY_PLAYER,
                                 [{"name": ATTR_NAME_KEY, "value": _loc(owner)}],
-                                piles))
+                                pile_entities))
+
+        at = 0
+        seat = {"account": owner, "playerID": player_id, "piles": pile_ids}
+        if active is not None:
+            seat["active"] = dealt[0]
+            at = 1
+        seat["hand"] = dealt[at:at + HAND_SIZE]
+        seat["prizes"] = dealt[at + HAND_SIZE:at + HAND_SIZE + PRIZE_COUNT]
+        # Only the local player's hand is turned face up.
+        seat["revealHand"] = (owner == local_account)
+        plan["players"].append(seat)
 
     playmat = _entity(playmat_id, None, local_account, ENTITY_PLAYMAT,
                       [{"name": ATTR_NAME_KEY, "value": _loc(ZONE_PLAYMAT)}],
                       children)
-    return {
+    state = {
         "gameID": game_id,
         "playerAccounts": [local_account, opponent_account],
         "gameOptions": {"Timers": "false"},
         "entities": playmat,
     }
+    return state, plan
+
+
+def collect_entity_ids(entity, out):
+    out.add(entity["entityID"])
+    for child in entity["children"]:
+        collect_entity_ids(child, out)
+    return out
 
 
 def build_avatar_archetypes():
@@ -1278,6 +1310,8 @@ class GameSession:
         self.account = None
         self.game_id = None
         self.game_state = None
+        self.game_plan = None
+        self.board_entities = set()
         self.game_started = None
         self.selection_counter = 0
         self.pending_selection = None
@@ -1548,8 +1582,10 @@ class GameSession:
                 raise ValueError("deck has no CakePile")
             account = (self.account or {}).get("accountID") or ZERO_GUID
             self.game_id = str(uuid.uuid4())
-            self.game_state = build_game_state(
+            self.game_state, self.game_plan = build_game_state(
                 self.game_id, account, AI_ACCOUNT_ID, pile)
+            self.board_entities = collect_entity_ids(
+                self.game_state["entities"], set())
             log.info("[game %s] queue %r, deck %r (%d cards) -> game %s",
                      self.peer, req.get("queueName"),
                      deck.get("deckName"), len(pile), self.game_id)
@@ -1590,6 +1626,14 @@ class GameSession:
         self.send("SerializedGameState", self.game_state, request_id)
         self.game_started = time.time()
 
+        # Everything starts face down in the decks; deal it out so the game
+        # visibly begins instead of arriving already set up.
+        try:
+            self.deal_board(self.game_plan)
+        except Exception:
+            log.exception("[game %s] deal failed; board stays as dealt",
+                          self.peer)
+
         # Whose turn it is. Sent bare, NOT wrapped in a SequenceMessage: the
         # sequence parser throws if a SequenceMessage with a non-empty
         # sequenceID arrives outside an open sequence, and that exception kills
@@ -1619,6 +1663,101 @@ class GameSession:
         payload = dict(body)
         payload["gameID"] = self.game_id
         self.send(name, payload)
+
+    # -- sequences -------------------------------------------------------
+    #
+    # Sequences exist only to get the named animations. Getting the bracketing
+    # wrong is the worst failure available on this path: the parser throws out
+    # of the client's message-pump coroutine, which is never restarted, so
+    # every later game message is dropped in silence with the board frozen.
+    # Hence one emitter that always closes what it opens, rather than
+    # hand-written Start/Stop pairs.
+    #
+    # A nested message uses the same envelope as a top-level one and "name"
+    # must be its first key, which is why these dicts are built name-first.
+
+    def _in_sequence(self, sequence_id, name, value):
+        self.send("SequenceMessage", {
+            "sequenceID": sequence_id,
+            "msg": {"name": name, "value": value},
+        })
+
+    def emit_sequence(self, name, items):
+        """items: ("msg", name, value) or ("seq", name, [items])."""
+        sid = str(uuid.uuid4())
+        self._in_sequence(sid, "StartSequence", {
+            "gameID": self.game_id, "sequenceID": sid,
+            "name": name, "attributes": None})
+        for kind, a, b in items:
+            if kind == "seq":
+                self.emit_sequence(a, b)      # inner closes before we continue
+            else:
+                self._in_sequence(sid, a, b)
+        self._in_sequence(sid, "StopSequence", {
+            "gameID": self.game_id, "sequenceID": sid, "name": name})
+
+    def _introduce(self, entity_id, guid):
+        return ("msg", "EntityIntroduced", {
+            "gameID": self.game_id,
+            "entityID": entity_id,
+            "entityName": _card_kind(guid),   # never null, or Introduce throws
+            "attributeMap": _card_attributes(guid),
+        })
+
+    def _move(self, entity_id, destination, duration=300):
+        return ("msg", "EntityMoved", {
+            "gameID": self.game_id,
+            "entityID": entity_id,
+            "destinationID": destination,
+            "positionInParent": -1,           # negative means append
+            "animDuration": duration,         # milliseconds
+        })
+
+    def deal_board(self, plan):
+        """Animate the opening deal out of the decks.
+
+        Both hands go out as one GroupedMove each: DealInitialHands runs every
+        nested GroupedMove in parallel, which is what made the two hands fan
+        out together. Only the local hand is introduced - the opponent's stays
+        face down, which is simply an entity with no attributes.
+        """
+        known = self.board_entities
+
+        def move(entity_id, destination):
+            # Neither endpoint is null-checked inside a sequence; an unknown id
+            # throws and takes the message pump with it.
+            if entity_id not in known or destination not in known:
+                raise ValueError("move %s -> %s: unknown entity"
+                                 % (entity_id, destination))
+            return self._move(entity_id, destination)
+
+        hands = []
+        for seat in plan["players"]:
+            moves = []
+            for entity_id, guid in seat["hand"]:
+                if seat["revealHand"]:
+                    moves.append(self._introduce(entity_id, guid))
+                moves.append(move(entity_id, seat["piles"][ZONE_HAND]))
+            hands.append(("seq", "GroupedMove", moves))
+        self.emit_sequence("DealInitialHands", hands)
+
+        # Both actives turn face up together.
+        reveal = []
+        for seat in plan["players"]:
+            if "active" not in seat:
+                continue
+            entity_id, guid = seat["active"]
+            reveal.append(self._introduce(entity_id, guid))
+            reveal.append(move(entity_id, seat["piles"][ZONE_ACTIVE]))
+        if reveal:
+            self.emit_sequence("IntroduceInitialPokemon", reveal)
+
+        prizes = []
+        for seat in plan["players"]:
+            moves = [move(e, seat["piles"][ZONE_PRIZES])
+                     for e, _ in seat["prizes"]]
+            prizes.append(("seq", "GroupedMove", moves))
+        self.emit_sequence("DealInitialPrizeCards", prizes)
 
     def offer_go_first(self):
         self.selection_counter += 1
@@ -1685,6 +1824,8 @@ class GameSession:
         # SerializedGameState while one is loaded throws.
         self.game_id = None
         self.game_state = None
+        self.game_plan = None
+        self.board_entities = set()
         self.pending_selection = None
 
     def on_ResignGame(self, value, request_id):
