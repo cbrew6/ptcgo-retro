@@ -1386,26 +1386,32 @@ class Match:
         sequence, which blocks the rest of the opening until the dialog is
         dismissed - otherwise the deal animates behind it.
         """
-        items = []
+        # Grouped BY PLAYER, not one per mulligan. entityIDPiles is a list of
+        # hands and the dialog is a carousel that pages through them, so one
+        # effect carrying all of a player's mulligans is ONE dialog with next
+        # and back. Sending one effect each meant fifteen mulligans were
+        # fifteen separate dialogs to dismiss.
+        piles = {}
         for change in self.opening:
             if change.kind != engine.CHANGE_MULLIGAN:
                 continue
             hand = (change.detail or {}).get("hand") or []
             pile = {self.eid(cid): self.card_attributes(cid) for cid in hand}
-            if not pile:
-                continue
+            if pile:
+                piles.setdefault(change.player, []).append(pile)
+
+        items = []
+        for player, hands in sorted(piles.items()):
             items.append(("msg", "EffectPlayed", {
                 "gameID": self.game_id,
                 "effectMessage": {
                     "name": "MulliganRevealCardsEffect",
                     "value": {
-                        "player": self.account(change.player),
-                        # One dict per mulliganed hand; the carousel pages
-                        # through them and counts them.
-                        "entityIDPiles": [pile],
+                        "player": self.account(player),
+                        "entityIDPiles": hands,
                         "prompt": _loc(PROMPT_MULLIGAN_REVEAL),
                         "revealTitle": _loc(PROMPT_MULLIGAN_TITLE),
-                        "revealSource": self.player_entity.get(change.player),
+                        "revealSource": self.player_entity.get(player),
                     },
                 },
             }))
@@ -1441,7 +1447,6 @@ class Match:
                 "gameID": self.game_id,
                 "entityID": self.pile[(index, ZONE_DECK)],
             }))
-        items.extend(self.mulligan_items())
 
         hands = []
         for index, player in enumerate(self.state.players):
@@ -1455,6 +1460,11 @@ class Match:
                 hands.append(("seq", "GroupedMove", moves))
         if hands:
             items.append(("seq", "DealInitialHands", hands))
+        # After the deal, deliberately. DealInitialHands is what lowers both
+        # coins, so a reveal before it leaves the coin sitting on screen behind
+        # the dialog - and the mulligans read as a summary of what happened
+        # rather than an interruption, which is how the real game showed them.
+        items.extend(self.mulligan_items())
 
         reveal = []
         for index, player in enumerate(self.state.players):

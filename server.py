@@ -1856,22 +1856,14 @@ class GameSession:
                     if isinstance(a, engine.Promote)]
             if not owed:
                 return
-        body, decode = self.match.build_offer(0, self.selection_counter + 1)
-        if not body["targetMap"]:
-            # Nothing is legal, so the only move left is to end the turn. An
-            # offer with no rows is a dead end: there is nothing to click, and
-            # whether the client draws its own end-turn button is not something
-            # the server can guarantee. Ending it here cannot soft-lock.
-            log.info("[game %s] no legal action; ending the turn", self.peer)
-            try:
-                self.match.state, changes = engine.apply(
-                    self.match.state, engine.Pass(0))
-            except engine.IllegalAction as exc:
-                log.error("[game %s] cannot even pass: %s", self.peer, exc)
-                return
-            self.emit_items(self.match.animation_for(changes))
-            return self.advance_match()
+        # A row-less offer is still sent. It used to end the turn instead, on
+        # the grounds that there was nothing to click - but that took the turn
+        # away the moment the last Energy was attached, with no chance to look
+        # at the board or read the Active. The client draws its own end-turn
+        # button, which the player has confirmed appears, so an empty offer is
+        # "your turn, nothing left to do" rather than a dead end.
         self.selection_counter += 1
+        body, decode = self.match.build_offer(0, self.selection_counter)
         self.action_decode = decode
         self.pending_selection = "Actions"
         log.info("[game %s] -> offer (%d actions, counter %d)",
