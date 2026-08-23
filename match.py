@@ -47,6 +47,9 @@ ATTR_ARCHETYPE_ID = 10000
 ATTR_NAME_KEY = 10140
 ATTR_HP = 200490                 # value = current, originalValue = max
 ATTR_SET, ATTR_CARD_NAME, ATTR_CARD_NUM = 200580, 200630, 200780
+ATTR_CARD_TYPE, ATTR_TRAINER_TYPE = 200300, 200270
+ATTR_STAGE, ATTR_RETREAT, ATTR_FAMILY = 200540, 200800, 200260
+ATTR_BENCH_SLOTS = 201920          # BenchLayout divides by this: 0 gives NaN
 
 # Zones whose contents the owner may see. Everything else stays face down.
 OPEN_ZONES = (ZONE_HAND, ZONE_ACTIVE, ZONE_BENCH, ZONE_DISCARD)
@@ -130,6 +133,26 @@ class Match:
         """
         card = self.card(cid)
         attrs = [{"name": ATTR_ARCHETYPE_ID, "value": card.guid}]
+        # 10140 is load-bearing, not decoration. The hand's comparator does
+        # GetOne<NameLookup>().Name.CompareTo(...) with no null check, so a card
+        # without it throws inside List.Sort - and EntityChildRenderer clears
+        # the layout BEFORE sorting, so the whole hand is emptied every frame
+        # and never refilled. Cards then end up unparented at the world origin,
+        # which is the "in the middle of the board, behind it" symptom.
+        if card.name_key:
+            attrs.append({"name": ATTR_NAME_KEY, "value": _loc(card.name_key)})
+        if card.card_types:
+            attrs.append({"name": ATTR_CARD_TYPE, "value": card.card_types[0]})
+        if card.stage:
+            attrs.append({"name": ATTR_STAGE, "value": card.stage})
+        if card.trainer_types:
+            attrs.append({"name": ATTR_TRAINER_TYPE,
+                          "value": card.trainer_types[0]})
+        if card.is_pokemon:
+            if card.retreat_cost:
+                attrs.append({"name": ATTR_RETREAT, "value": card.retreat_cost})
+            if card.family_id is not None:
+                attrs.append({"name": ATTR_FAMILY, "value": card.family_id})
         if card.name:
             attrs.append({"name": ATTR_CARD_NAME, "value": card.name})
         if card.set_code:
@@ -159,8 +182,11 @@ class Match:
         engine's own opening Changes can then animate the deal. Without it the
         board arrives already set up and the game appears rather than starts.
         """
+        # owningPlayerID is how IntroduceEntity routes an area: anything owned
+        # by a player goes into that player's piles, so a playmat-level area
+        # with an owner is never bound to its layout and throws on the way.
         children = [
-            _entity(str(uuid.uuid4()), self.playmat_id, self.account(0),
+            _entity(str(uuid.uuid4()), self.playmat_id, None,
                     ENTITY_AREA, [{"name": ATTR_NAME_KEY, "value": _loc(z)}])
             for z in PLAYMAT_ZONES
         ]
@@ -178,14 +204,19 @@ class Match:
                 kids = [self._card_entity(cid, pile_id, owner,
                                           ZONE_DECK if predeal else zone, index)
                         for cid in contents]
-                piles.append(_entity(
-                    pile_id, player_id, owner, kind,
-                    [{"name": ATTR_NAME_KEY, "value": _loc(zone)}], kids))
+                pile_attrs = [{"name": ATTR_NAME_KEY, "value": _loc(zone)}]
+                if zone == ZONE_BENCH:
+                    # BenchLayout computes width as sqrt(k / slots); absent it
+                    # reads 0, every transform becomes NaN or Infinity, and
+                    # Unity spams collider warnings for each benched card.
+                    pile_attrs.append({"name": ATTR_BENCH_SLOTS, "value": 5})
+                piles.append(_entity(pile_id, player_id, owner, kind,
+                                     pile_attrs, kids))
             children.append(_entity(
                 player_id, self.playmat_id, owner, ENTITY_PLAYER,
                 [{"name": ATTR_NAME_KEY, "value": _loc(owner)}], piles))
 
-        playmat = _entity(self.playmat_id, None, self.account(0),
+        playmat = _entity(self.playmat_id, None, None,
                           ENTITY_PLAYMAT,
                           [{"name": ATTR_NAME_KEY, "value": _loc(ZONE_PLAYMAT)}],
                           children)

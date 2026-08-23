@@ -306,6 +306,10 @@ class Card:
     set_code: Optional[str]
     collector_number: Optional[int]
     trainer_types: tuple
+    # The localization key for the card's display name. Not used by the rules,
+    # but the client's hand comparator dereferences it unguarded, so the
+    # protocol layer needs it and this is where archetypes are already parsed.
+    name_key: Optional[str] = None
 
     @classmethod
     def from_archetype(cls, archetype: Mapping[str, Any]) -> "Card":
@@ -363,6 +367,8 @@ class Card:
             family_id=at.get(ATTR_FAMILY_ID, {}).get("i"),
             set_code=_str(at, ATTR_SET),
             collector_number=at.get(ATTR_COLLECTOR_NUMBER, {}).get("i"),
+            # stored as a JSON string: "\"$$$com...Name$$$\""
+            name_key=(_str(at, 10140) or "").strip('"').strip("$") or None,
             trainer_types=_strings(at, ATTR_TRAINER_TYPES),
         )
 
