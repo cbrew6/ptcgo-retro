@@ -512,9 +512,6 @@ HIDE_OPPONENT_CARDS = False
 AI_ACCOUNT_ID = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
 DEFAULT_AI_NAME = "Otis"
 
-# Real localization key: a missing one is returned verbatim rather than
-# erroring, so the end-of-game panel would show the raw key.
-END_OF_GAME_TEXT = "playmat.endgame.wincondition.opponent.resigned"
 
 _card_by_guid = None
 
@@ -1281,6 +1278,7 @@ class GameSession:
         self.account = None
         self.game_id = None
         self.game_state = None
+        self.game_started = None
         self.selection_counter = 0
         self.pending_selection = None
         self.authenticated = False
@@ -1590,6 +1588,7 @@ class GameSession:
         log.info("[game %s] -> SerializedGameState (%d top-level entities)",
                  self.peer, len(entities["children"]))
         self.send("SerializedGameState", self.game_state, request_id)
+        self.game_started = time.time()
 
         # Whose turn it is. Sent bare, NOT wrapped in a SequenceMessage: the
         # sequence parser throws if a SequenceMessage with a non-empty
@@ -1641,29 +1640,46 @@ class GameSession:
         log.info("[game %s] -> GoFirstChoiceRequired (counter %d)",
                  self.peer, self.selection_counter)
 
-    def end_game(self, winner, loser, reason):
-        """Finish a game. Both messages matter, for different reasons.
+    def end_game(self, winner, loser, reason, player_won=False):
+        """Finish a game.
 
-        GameEnded records the result; GameCompletedMessage is what actually
-        sets the client's gameEnded flag and stops its two message-consumer
-        coroutines, so without it the client stays in the match.
+        GameCompletedMessage is the entire mechanism - GameEnded is inert in
+        this build (its only listener is in a matchmaking class pie-src never
+        constructs), kept because it costs nothing and documents the result.
 
-        rewardList must be a list, never null: RewardsList foreach-es it.
+        additionalParameters is where the real content lives, and an empty one
+        is what made concede appear to do nothing: the summary dialog indexes
+        ["GameResult"] with no guard, throwing inside the animation coroutine.
+        Unity kills the coroutine, the completion callback never fires, and the
+        client sits on the playmat behind a modal shield forever.
+
+        Only "Win" is ever compared against, so any other value reads as a
+        loss. The result line the player sees comes from
+        "playmat.endgame.stat.gameresult", which is formatted into
+        playmat.endgame.wincondition.{player,opponent}.{value} - one of a fixed
+        set, anything else silently degrading to SpecialCard.
+
+        Neither message may be wrapped in a SequenceMessage: the sequence path
+        would never construct the command that ends the game.
         """
+        elapsed = int((time.time() - (self.game_started or time.time())) * 1000)
         self.send_game("GameEnded", {
             "winnerList": [winner],
             "loserMap": {loser: reason},
             "draw": False,
         })
         self.send_game("GameCompletedMessage", {
-            "coins": 0,
-            "exp": 0,
-            "share": False,
-            "endOfGameText": END_OF_GAME_TEXT,
-            "rewardList": [],
+            # coins/exp/share/endOfGameText have no load sites anywhere in the
+            # client; the summary reads additionalParameters instead.
+            "rewardList": [],                 # foreach-ed unguarded; never null
             "winner": winner,
             "loser": loser,
-            "additionalParameters": {},
+            "additionalParameters": {
+                "GameResult": "Win" if player_won else "Loss",
+                "playmat.endgame.stat.gameresult": reason,
+                # double.Parse is culture-sensitive - integer string only.
+                "GameDuration": str(elapsed),
+            },
         })
         # Drop the board so the next match is not refused: applying a second
         # SerializedGameState while one is loaded throws.
@@ -1679,7 +1695,7 @@ class GameSession:
             return
         me = self.account_id()
         log.info("[game %s] player conceded game %s", self.peer, self.game_id)
-        self.end_game(AI_ACCOUNT_ID, me, "Concede")
+        self.end_game(AI_ACCOUNT_ID, me, "Resigned")
 
     def on_ResignMatch(self, value, request_id):
         self.on_ResignGame(value, request_id)
