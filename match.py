@@ -59,6 +59,22 @@ ATTR_CONDITIONS = 200340           # SpecialConditions[]; the whole list, not a
 ATTR_BENCH_SLOTS = 201920          # BenchLayout divides by this: 0 gives NaN
 ATTR_ABILITY_SOURCE = 201870       # EntityID[] on the PLAYMAT: who is acting.
                                    # The Attack sequence reads [0] unguarded.
+ATTR_ABILITIES = 200740            # PieAbilityDescription[]; without it the
+                                   # card has no attack buttons at all
+
+# PieAbilityDescription is [TypeHinting("abilityType")], so that field names a
+# subclass and an unknown value throws in the message pump. These are the
+# classes that actually exist; every abilityType in carddata is one of them,
+# and anything else is dropped rather than gambled on.
+ABILITY_TYPES = frozenset((
+    "Attack", "PokeAbility", "PokePower", "PokeBody", "AncientTrait",
+    "TechnicalMachine", "EnergyAbility", "StadiumAbility", "TrainerAbility",
+    "PlayAbility", "RetreatAbility",
+))
+
+#: Returned by decode_reply for an attack the Pokemon cannot pay for. Not None,
+#: because None means "the player pressed Next" and would end the turn.
+UNAFFORDABLE = "unaffordable"
 
 # Zones whose contents the owner may see. Everything else stays face down.
 OPEN_ZONES = (ZONE_HAND, ZONE_ACTIVE, ZONE_BENCH, ZONE_DISCARD)
@@ -155,6 +171,35 @@ def _option_label(option):
 
 def _loc(text):
     return {"id": text}
+
+
+def _ability_description(ability):
+    """One engine Ability as the client's PieAbilityDescription.
+
+    carddata's ability JSON is already almost this shape - cost, damage,
+    amountOperator and conditionExceptions are the Attack subclass's own
+    fields - so only the localization wrappers have to come off.
+    """
+    described = {
+        # "name" is not the discriminator here: PieAbilityDescription is
+        # [TypeHinting("abilityType")], an INLINE field, not an envelope.
+        "abilityType": ability.ability_type,
+        "abilityID": ability.ability_id,
+        "title": _loc(_loc_key(ability.title)),
+        "gameText": _loc(_loc_key(ability.game_text)),
+        "sortOrder": None,
+        "buttonOverride": None,
+        "bonusInfo": None,
+        "ignoreInFiltering": False,
+    }
+    if ability.ability_type == "Attack":
+        described.update({
+            "cost": dict(ability.cost or {}),
+            "damage": int(ability.damage or 0),
+            "amountOperator": ability.amount_operator or "",
+            "conditionExceptions": [],
+        })
+    return described
 
 
 def _loc_n(key, **numbers):
@@ -336,6 +381,14 @@ class Match:
             current = card.max_hp - (slot.damage if slot else 0)
             attrs.append({"name": ATTR_HP, "value": max(0, current),
                           "originalValue": card.max_hp})
+        # Without this the card has no abilities client-side, and
+        # CreateButtons only makes a button when the offered action id appears
+        # in the ENTITY's own ability list - so no attack ever rendered,
+        # whether it was affordable or not.
+        abilities = [_ability_description(a) for a in card.abilities
+                     if a.ability_type in ABILITY_TYPES]
+        if abilities:
+            attrs.append({"name": ATTR_ABILITIES, "value": abilities})
         # A Pokemon re-introduced while Asleep - promoted after a knockout,
         # say - would otherwise lose its markers, because introducing replaces
         # the whole attribute map rather than merging into it.
@@ -863,7 +916,7 @@ class Match:
         }
 
     def _action_row(self, entity_id, action_id, description, selection_type,
-                    targets):
+                    targets, hint="Optimal"):
         return {
             "entityID": entity_id,
             "selectableAction": {
@@ -871,7 +924,9 @@ class Match:
                 "actionID": action_id,
                 "description": description,
                 "selectionType": selection_type,
-                "actionHint": "Optimal",      # never "Unselectable": it throws
+                # Never "Unselectable" - PreferenceToStrength throws on it.
+                # "Depleted" is the one that means "shown, but not usable".
+                "actionHint": hint,
             },
             "targetInfoLst": targets,
         }
@@ -882,7 +937,8 @@ class Match:
                 if slot.stack]
 
     def _offer_group(self, rows, decode, entity, action_id, description,
-                     selection_type, by_target, prompt=None, selected=True):
+                     selection_type, by_target, prompt=None, selected=True,
+                     hint="Optimal"):
         """One offered move, and how to read the answer back.
 
         by_target maps a target entity id to the engine Action that choosing it
@@ -913,7 +969,7 @@ class Match:
             return
         rows.append(self._action_row(
             entity, action_id, description, selection_type,
-            [self._target_info(targets, prompt, selected=selected)]))
+            [self._target_info(targets, prompt, selected=selected)], hint=hint))
         decode[(entity, action_id)] = dict(by_target)
 
     def setup_selection(self, player, counter):
@@ -1426,16 +1482,24 @@ class Match:
         # attacks silently ended the turn instead. Ending the turn is the
         # client's own button, which does appear during a turn.
         active_entity = self.entity_of_slot(me.active) if me.active else None
-        if opp_active:
-            for action in attacks:
-                if not active_entity:
-                    continue
-                attack = self.card(me.active.stack[-1]).attack(action.ability_id)
+        if opp_active and active_entity:
+            # EVERY attack the Active has, not only the ones it can pay for.
+            # The client builds one button per offered action id that also
+            # appears in the card's own ability list, so an attack left out of
+            # the offer is an attack the player cannot even see - and "why is
+            # there no attack button" is indistinguishable from "the game is
+            # broken". Unaffordable ones are marked Depleted rather than
+            # hidden, and refused if chosen.
+            payable = {a.ability_id: a for a in attacks}
+            for attack in self.card(me.active.stack[-1]).attacks:
+                action = payable.get(attack.ability_id)
                 self._offer_group(
-                    rows, decode, active_entity, action.ability_id,
-                    _loc_key(attack.title) if attack else action.ability_id,
-                    "AbilitySelection", {opp_active: action},
-                    selected=False)
+                    rows, decode, active_entity, attack.ability_id,
+                    _loc_key(attack.title) or attack.ability_id,
+                    "AbilitySelection",
+                    {opp_active: action if action is not None else UNAFFORDABLE},
+                    selected=False,
+                    hint="Optimal" if action is not None else "Depleted")
 
         # A promotion is owed, not chosen: the turn cannot continue around it,
         # so the client must not be given an end-turn button to escape with.
@@ -1488,6 +1552,8 @@ class Match:
         for response in _target_entities(selection):
             if response in by_target:
                 return by_target[response]
+        # Fall through to the single-candidate case below, which also covers
+        # an attack offered only to be refused.
         # A forced single target is sent unselected, so the client may answer
         # with no target at all. With one candidate that is unambiguous; with
         # several it is not, and guessing would silently play the wrong move.

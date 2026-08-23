@@ -427,15 +427,28 @@ class SetupTests(unittest.TestCase):
                                    rng=_NoShuffle(), first_player=0)
         self.assertEqual(state.players[0].owed_draws, 2)
 
+        # Compensation is asked only once both boards are set - the Active has
+        # to come from the original seven - so walk setup first.
+        for _ in range(64):
+            if state.phase != engine.PHASE_SETUP:
+                break
+            acting = engine.players_to_act(state)
+            if not acting:
+                break
+            legal = engine.legal_actions(state, acting[0])
+            if any(isinstance(a, engine.DrawMulligans) for a in legal):
+                break
+            state, _ = engine.apply(state, ai.choose(state, acting[0]))
+
+        before = len(state.players[0].hand)
         for _ in range(2):
             action = ai.choose(state, 0)
             self.assertEqual(action, engine.DrawMulligans(0, True))
             state, _ = engine.apply(state, action)
 
         self.assertEqual(state.players[0].owed_draws, 0)
-        self.assertEqual(len(state.players[0].hand), 9)
-        # Both answered, so the ladder falls through to placing a Pokemon.
-        self.assertIsInstance(ai.choose(state, 0), engine.SetupPlaceActive)
+        # Relative: setting up already moved a Basic out of the hand.
+        self.assertEqual(len(state.players[0].hand), before + 2)
 
     def test_leads_with_an_attacker_rather_than_a_filler(self):
         state, _ = engine.new_game(

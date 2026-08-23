@@ -2000,11 +2000,17 @@ def players_to_act(state: GameState) -> list:
         return []
     if state.pending is not None:
         return [state.pending.choice.player]
-    # Mulligan compensation is taken before any Pokemon is placed, so it
-    # outranks setup - and the drawn cards may themselves be what gets placed.
-    owed = [p.index for p in state.players if p.owed_draws > 0]
-    if owed:
-        return owed[:1]
+    # Mulligan compensation is taken AFTER both boards are set up, and only
+    # then. The rulebook is explicit: while one player is mulliganing the other
+    # "sets his Active Pokemon, and as many Benched Pokemon as desired", and
+    # only "when that player no longer has a mulligan" does the opponent draw.
+    # A Basic among those cards "cannot replace your Active Pokemon" - the
+    # Active must come from the original seven - so drawing first would let a
+    # compensation card become the Active, which is exactly wrong.
+    if state.phase != PHASE_SETUP or all(p.setup_done for p in state.players):
+        owed = [p.index for p in state.players if p.owed_draws > 0]
+        if owed:
+            return owed[:1]
     if state.pending_promotions:
         return [state.pending_promotions[0]]
     return [state.to_move]
@@ -2131,7 +2137,11 @@ def legal_actions(state: GameState, player: int) -> list:
     if state.pending is not None:
         return _choice_actions(state)
 
-    if ps.owed_draws > 0:
+    # Only once both boards are placed - the same gate players_to_act uses.
+    # Asking sooner would let a compensation card become the Active, and the
+    # rulebook is explicit that the Active comes from the original seven.
+    if ps.owed_draws > 0 and (state.phase != PHASE_SETUP
+                              or all(p.setup_done for p in state.players)):
         # One offer, two answers, however many are outstanding. Both are always
         # legal because either one spends exactly one offer, so the player is
         # asked owed_draws times and can decline any of them separately.
@@ -2290,6 +2300,19 @@ def _do_setup_done(state, action, changes):
 
     if not all(p.setup_done for p in state.players):
         state.to_move = 1 - action.player
+        return
+
+    _finish_setup(state, changes)
+
+
+def _finish_setup(state, changes):
+    """Leave setup, once nothing is still owed.
+
+    Compensation draws sit between the last SetupDone and the prizes, so this
+    is reached twice when anyone is owed: once to stop and ask, and again from
+    _do_draw_mulligans when the last one is answered.
+    """
+    if any(p.owed_draws > 0 for p in state.players):
         return
 
     # Prizes come off the deck after both boards are set, which is the real
@@ -2665,6 +2688,11 @@ def _do_draw_mulligans(state, action, changes):
     ps.owed_draws -= 1
     if action.take:
         _draw(state, action.player, 1, changes)
+
+    # These are answered between the last SetupDone and the prizes, so the
+    # last answer is what actually starts the game.
+    if state.phase == PHASE_SETUP and all(p.setup_done for p in state.players):
+        _finish_setup(state, changes)
 
 
 _HANDLERS = {

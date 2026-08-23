@@ -419,6 +419,32 @@ class SetupTests(unittest.TestCase):
         with self.assertRaises(engine.IllegalAction):
             engine.apply(state, engine.SetupPlaceActive(0, bigmouth))
 
+    def _complete_setup(self, state):
+        """Place both Actives so the game reaches the compensation step.
+
+        Compensation is asked only once both boards are set, per the rulebook:
+        the Active must come from the original seven, so a card drawn as
+        compensation must never be able to become it.
+        """
+        for _ in range(64):
+            if state.phase != engine.PHASE_SETUP:
+                break
+            acting = engine.players_to_act(state)
+            if not acting:
+                break
+            player = acting[0]
+            legal = engine.legal_actions(state, player)
+            if any(isinstance(a, engine.DrawMulligans) for a in legal):
+                break
+            pick = (next((a for a in legal
+                          if isinstance(a, engine.SetupPlaceActive)), None)
+                    or next((a for a in legal
+                             if isinstance(a, engine.SetupDone)), None))
+            if pick is None:
+                break
+            state, _ = engine.apply(state, pick)
+        return state
+
     def test_mulligan_redeals_and_pays_the_opponent(self):
         # No Basic in the first seven, one waiting at position 8: with shuffle
         # disabled the redeal is forced to find it.
@@ -440,14 +466,19 @@ class SetupTests(unittest.TestCase):
         self.assertEqual(state.players[1].owed_draws, 1)
         self.assertEqual(state.players[1].owed_draws_total, 1)
         self.assertEqual(state.players[1].mulligan_draw_number, 1)
+        # Not yet: setup comes first, and it is not player 1's to answer until
+        # both boards are placed.
+        self.assertNotEqual(engine.players_to_act(state), [1])
+        state = self._complete_setup(state)
         self.assertEqual(engine.players_to_act(state), [1])
         # Yes or no, never a list of counts.
         self.assertEqual(engine.legal_actions(state, 1),
                          [engine.DrawMulligans(1, True),
                           engine.DrawMulligans(1, False)])
 
+        before = len(state.players[1].hand)
         state, _ = engine.apply(state, engine.DrawMulligans(1, True))
-        self.assertEqual(len(state.players[1].hand), 8)
+        self.assertEqual(len(state.players[1].hand), before + 1)
         self.assertEqual(state.players[1].owed_draws, 0)
         self.assertEqual(state.players[1].mulligan_draw_number, 0)
         self.assertEqual(engine.players_to_act(state), [0])
@@ -459,14 +490,22 @@ class SetupTests(unittest.TestCase):
         state, _ = engine.new_game(DB, [deck0, deck1],
                                    rng=ScriptedRandom(), first_player=0)
         self.assertEqual(state.players[1].owed_draws, 1)
+        state = self._complete_setup(state)
+        # Relative, not absolute: setting up moved a Basic out of the hand.
+        before = len(state.players[1].hand)
         state, changes = engine.apply(state, engine.DrawMulligans(1, False))
-        self.assertEqual(len(state.players[1].hand), 7)
+        self.assertEqual(len(state.players[1].hand), before)
         # Answered, not deferred: leaving it owed would re-ask for ever.
         self.assertEqual(state.players[1].owed_draws, 0)
         self.assertNotIn(1, [p.index for p in state.players if p.owed_draws])
-        # Nothing moved, so nothing is reported - which is why the random-game
-        # invariant below has to allow this one action to be silent.
-        self.assertEqual(changes, [])
+        # No CARD moved for the decline itself. Changes are not empty, because
+        # answering the last offer is what finishes setup - prizes come off the
+        # deck and the first turn begins - but none of them is a draw for
+        # player 1.
+        drawn = [c for c in changes
+                 if c.kind == engine.CHANGE_MOVE and c.player == 1
+                 and c.to_zone == engine.ZONE_HAND]
+        self.assertEqual(drawn, [])
 
     def test_each_mulligan_is_offered_separately(self):
         """Three mulligans is three yes/no questions, numbered, not one total.
@@ -483,14 +522,16 @@ class SetupTests(unittest.TestCase):
         self.assertEqual(state.players[0].mulligans, 3)
         self.assertEqual(state.players[1].owed_draws, 3)
         self.assertEqual(state.players[1].owed_draws_total, 3)
+        state = self._complete_setup(state)
+        before = len(state.players[1].hand)
 
         for number in (1, 2, 3):
             self.assertEqual(engine.players_to_act(state), [1])
             self.assertEqual(state.players[1].mulligan_draw_number, number)
-            self.assertEqual(len(state.players[1].hand), 6 + number)
+            self.assertEqual(len(state.players[1].hand), before + number - 1)
             state, _ = engine.apply(state, engine.DrawMulligans(1, True))
 
-        self.assertEqual(len(state.players[1].hand), 10)
+        self.assertEqual(len(state.players[1].hand), before + 3)
         self.assertEqual(state.players[1].owed_draws, 0)
         self.assertEqual(state.players[1].mulligan_draw_number, 0)
         self.assertEqual(engine.players_to_act(state), [0])
@@ -503,11 +544,13 @@ class SetupTests(unittest.TestCase):
         state, _ = engine.new_game(DB, [deck0, deck1],
                                    rng=ScriptedRandom(), first_player=0)
         self.assertEqual(state.players[1].owed_draws, 3)
+        state = self._complete_setup(state)
+        before = len(state.players[1].hand)
         # The answers need not agree with one another; each spends exactly one
         # offer whichever way it goes.
         for take in (True, False, True):
             state, _ = engine.apply(state, engine.DrawMulligans(1, take))
-        self.assertEqual(len(state.players[1].hand), 9)
+        self.assertEqual(len(state.players[1].hand), before + 2)
         self.assertEqual(state.players[1].owed_draws, 0)
         self.assertEqual(engine.players_to_act(state), [0])
 
@@ -525,6 +568,8 @@ class SetupTests(unittest.TestCase):
                                    rng=ScriptedRandom(), first_player=0)
         self.assertEqual(state.players[0].mulligans, 15)
         self.assertEqual(state.players[1].owed_draws_total, 15)
+        state = self._complete_setup(state)
+        before = len(state.players[1].hand)
 
         asked = []
         while state.players[1].owed_draws:
@@ -533,7 +578,8 @@ class SetupTests(unittest.TestCase):
             state, _ = engine.apply(state, engine.DrawMulligans(1, False))
 
         self.assertEqual(asked, list(range(1, 16)))
-        self.assertEqual(len(state.players[1].hand), 7)
+        # Declined every one, so the hand is exactly what setup left it.
+        self.assertEqual(len(state.players[1].hand), before)
         self.assertEqual(engine.players_to_act(state), [0])
 
     def test_compensation_can_be_taken_automatically_by_rule(self):

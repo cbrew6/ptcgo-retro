@@ -1855,7 +1855,13 @@ class GameSession:
         state = self.match.state
         if state.pending is not None:
             return self.offer_choice()
-        if state.players[0].owed_draws > 0:
+        # Ask the ENGINE what is legal rather than reading owed_draws directly.
+        # Compensation is owed from the moment the mulligans resolve, but it is
+        # not ASKED until both boards are set up - the Active has to come from
+        # the original seven - and routing on the raw field put the draw offer
+        # before the setup screen.
+        legal = engine.legal_actions(state, 0)
+        if any(isinstance(a, engine.DrawMulligans) for a in legal):
             return self.offer_mulligan_draws()
         if state.phase == engine.PHASE_SETUP:
             return self.offer_setup()
@@ -2069,6 +2075,13 @@ class GameSession:
         self.pending_selection = None
         action = self.match.decode_reply(req.get("selection"),
                                          self.action_decode or {})
+        if action == match.UNAFFORDABLE:
+            # An attack the Pokemon cannot pay for. It is offered so the
+            # player can SEE it - the client only draws a button for an
+            # action the server offered - and refused here. Re-offering is the
+            # whole response: nothing about the board has changed.
+            log.info("[game %s] <- unaffordable attack; re-offering", self.peer)
+            return self.offer_actions()
         if action is None:
             # A null selection is the Next button. During a turn that means
             # "end it"; during setup it means "I have benched enough", and
