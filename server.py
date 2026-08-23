@@ -1633,6 +1633,49 @@ class GameSession:
         log.info("[game %s] -> GoFirstChoiceRequired (counter %d)",
                  self.peer, self.selection_counter)
 
+    def end_game(self, winner, loser, reason):
+        """Finish a game. Both messages matter, for different reasons.
+
+        GameEnded records the result; GameCompletedMessage is what actually
+        sets the client's gameEnded flag and stops its two message-consumer
+        coroutines, so without it the client stays in the match.
+
+        rewardList must be a list, never null: RewardsList foreach-es it.
+        """
+        self.send_game("GameEnded", {
+            "winnerList": [winner],
+            "loserMap": {loser: reason},
+            "draw": False,
+        })
+        self.send_game("GameCompletedMessage", {
+            "coins": 0,
+            "exp": 0,
+            "share": False,
+            "endOfGameText": "playmat.endofgame.concede",
+            "rewardList": [],
+            "winner": winner,
+            "loser": loser,
+            "additionalParameters": {},
+        })
+        # Drop the board so the next match is not refused: applying a second
+        # SerializedGameState while one is loaded throws.
+        self.game_id = None
+        self.game_state = None
+        self.pending_selection = None
+
+    def on_ResignGame(self, value, request_id):
+        """Concede. Unhandled, the client waits in the match indefinitely."""
+        if not self.game_id:
+            log.warning("[game %s] ResignGame with no game in progress",
+                        self.peer)
+            return
+        me = self.account_id()
+        log.info("[game %s] player conceded game %s", self.peer, self.game_id)
+        self.end_game(AI_ACCOUNT_ID, me, "Concede")
+
+    def on_ResignMatch(self, value, request_id):
+        self.on_ResignGame(value, request_id)
+
     def on_GameCustomChoice(self, value, request_id):
         """Reply to a button prompt; `selection` indexes the button list."""
         req = value or {}
