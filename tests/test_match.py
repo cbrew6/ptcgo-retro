@@ -136,6 +136,64 @@ class CardAttributeTests(unittest.TestCase):
             self.assertIn(match.ATTR_NAME_KEY, _attrs(entity))
 
 
+class ConditionTests(unittest.TestCase):
+    """Special conditions reach the board as one whole array.
+
+    No attack inflicts a condition yet - Rules.attack_effects is empty - so
+    live play never exercises this. That is exactly why it is tested directly:
+    the handler would otherwise sit dormant and unverified until the first card
+    effect landed on it.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.db = engine.CardDB.from_directory(CARD_DIR)
+
+    def _match_with_active(self):
+        basic = next(c for c in self.db if c.is_pokemon and c.stage == "Basic")
+        energy = next(c for c in self.db
+                      if c.is_basic_energy and c.energy_options)
+        deck = [basic.guid] * 20 + [energy.guid] * 40
+        m = match.Match("game-3", ["acct-a", "acct-b"], self.db,
+                        [deck, list(deck)], seed=11)
+        m.auto_setup()
+        return m
+
+    def test_conditions_are_sent_as_the_complete_list(self):
+        m = self._match_with_active()
+        slot = m.state.players[0].active
+        self.assertIsNotNone(slot, "auto_setup left no Active to condition")
+        slot.conditions.update({engine.ASLEEP, engine.POISONED})
+        change = engine.Change(engine.CHANGE_CONDITION, player=0,
+                               slot=slot.slot_id)
+        messages = m.messages_for([change])
+        self.assertEqual(len(messages), 1)
+        name, body = messages[0]
+        self.assertEqual(name, "AttributeModified")
+        self.assertEqual(body["attribute"]["name"], match.ATTR_CONDITIONS)
+        # Both, not just the one that changed: the attribute IS the list, so a
+        # delta would silently cure everything else.
+        self.assertEqual(body["attribute"]["value"], ["Asleep", "Poisoned"])
+
+    def test_condition_names_match_the_clients_enum(self):
+        """The client binds 200340 to SpecialConditions[]. A name outside the
+        enum does not parse, and the attribute is dropped on arrival."""
+        allowed = {"Asleep", "Burned", "Confused", "Paralyzed", "Poisoned"}
+        engine_names = {engine.ASLEEP, engine.BURNED, engine.CONFUSED,
+                        engine.PARALYZED, engine.POISONED}
+        self.assertEqual(engine_names, allowed)
+
+    def test_a_conditioned_pokemon_keeps_its_markers_when_reintroduced(self):
+        """Introducing replaces the whole attribute map rather than merging,
+        so a promoted Pokemon would otherwise be silently cured."""
+        m = self._match_with_active()
+        slot = m.state.players[0].active
+        slot.conditions.add(engine.CONFUSED)
+        attrs = {a["name"]: a["value"]
+                 for a in m.card_attributes(slot.stack[-1], slot)}
+        self.assertEqual(attrs.get(match.ATTR_CONDITIONS), ["Confused"])
+
+
 class CardImageTests(unittest.TestCase):
     """textureLookup prefers 10020 over the padded collector number."""
 

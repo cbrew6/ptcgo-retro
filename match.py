@@ -53,6 +53,8 @@ ATTR_POKEMON_TYPES = 200570        # PokemonTypes[]; CardImageRenderer throws
                                    # without it - see card_attributes
 ATTR_ENERGY_PROVIDED = 201040      # {"options": [[type, ...], ...]}
 ATTR_ASSET_NAME = 10020            # art-variant suffix, preferred over 200780
+ATTR_CONDITIONS = 200340           # SpecialConditions[]; the whole list, not a
+                                   # delta - see _change_condition
 ATTR_BENCH_SLOTS = 201920          # BenchLayout divides by this: 0 gives NaN
 
 # Zones whose contents the owner may see. Everything else stays face down.
@@ -186,6 +188,12 @@ class Match:
             current = card.max_hp - (slot.damage if slot else 0)
             attrs.append({"name": ATTR_HP, "value": max(0, current),
                           "originalValue": card.max_hp})
+        # A Pokemon re-introduced while Asleep - promoted after a knockout,
+        # say - would otherwise lose its markers, because introducing replaces
+        # the whole attribute map rather than merging into it.
+        if slot is not None and slot.conditions:
+            attrs.append({"name": ATTR_CONDITIONS,
+                          "value": sorted(slot.conditions)})
         return attrs
 
     # -- the board -------------------------------------------------------
@@ -429,6 +437,31 @@ class Match:
             "entityID": self.eid(cid),
             "attribute": {"name": ATTR_HP, "value": current,
                           "originalValue": card.max_hp},
+        })]
+
+    def _change_condition(self, change):
+        """Special conditions are one array attribute, not a flag per state.
+
+        The engine's condition names were chosen to match the client's
+        SpecialConditions enum exactly (Asleep, Burned, Confused, Paralyzed,
+        Poisoned), so the set is sent through as-is. It is sent WHOLE rather
+        than as a delta because the attribute is the complete list: sending
+        only the condition that changed would clear every other one, and a
+        Pokemon can be Asleep and Poisoned at once.
+
+        Without this the engine was already applying poison damage between
+        turns and refusing to let a Paralyzed Pokemon attack, while the board
+        showed no marker at all - the rules were running invisibly.
+        """
+        slot = self.resolve_slot(change.slot)
+        if slot is None or not slot.stack:
+            return []
+        cid = slot.stack[-1]
+        return [("AttributeModified", {
+            "gameID": self.game_id,
+            "entityID": self.eid(cid),
+            "attribute": {"name": ATTR_CONDITIONS,
+                          "value": sorted(slot.conditions)},
         })]
 
     def _change_prize(self, change):

@@ -38,6 +38,7 @@ import argparse
 import collections
 import hashlib
 import json
+import random
 import socket
 import ssl
 import struct
@@ -189,8 +190,12 @@ def check_entities(root):
 # --------------------------------------------------------------------------
 
 class Harness:
-    def __init__(self, verbose=False):
+    def __init__(self, verbose=False, rng=None):
         self.verbose = verbose
+        # A deterministic first-action policy drives the server down one narrow
+        # path. Soaking wants variety, so an rng may be supplied to pick among
+        # the offered actions instead.
+        self.rng = rng
         self.sock = None
         self.counts = collections.Counter()
         self.sequence_depth = 0
@@ -339,25 +344,35 @@ class Harness:
             options = value.get("targetMap") or []
             # Reply shape mirrors what the real client sends: a selection
             # naming one offered action, or null to end the turn.
-            selection = self._first_selection(options)
+            selection = self._select(options)
             self.send("SelectionWithTargetsAndActions",
                       {"selection": selection,
                        "counter": value.get("counter")})
         raise ProtocolError("match did not finish in %d actions" % max_actions)
 
-    @staticmethod
-    def _first_selection(target_map):
-        """Take the first offered action, or pass when there is nothing.
+    def _select(self, target_map):
+        """Choose one offered action, or pass when there is nothing.
 
         The harness is not trying to play well - it is trying to drive the
-        server through as much of its own code as possible.
+        server through as much of its own code as possible. With an rng it
+        picks at random, which is what makes a soak explore more than the one
+        path a fixed policy walks; without one it is deterministic so a
+        failure can be re-run.
         """
-        for entry in target_map:
-            actions = (entry or {}).get("actions") or []
-            if actions:
-                return {"targetID": entry.get("targetID"),
-                        "actionID": actions[0].get("actionID")}
-        return None
+        choices = [(entry.get("targetID"), action.get("actionID"))
+                   for entry in target_map
+                   for action in ((entry or {}).get("actions") or [])]
+        if not choices:
+            return None
+        if self.rng is not None:
+            # Passing is a legal move the server must handle too, so it stays
+            # in the pool rather than being unreachable.
+            if self.rng.random() < 0.1:
+                return None
+            target, action = self.rng.choice(choices)
+        else:
+            target, action = choices[0]
+        return {"targetID": target, "actionID": action}
 
     def close(self):
         if self.sock:
@@ -369,13 +384,13 @@ class Harness:
 
 # --------------------------------------------------------------------------
 
-def run_one(verbose=False, dump=None):
-    h = Harness(verbose=verbose)
+def run_one(verbose=False, dump=None, rng=None, go_first=True):
+    h = Harness(verbose=verbose, rng=rng)
     try:
         h.login()
         deck = h.pick_deck()
         h.queue(deck)
-        h.play()
+        h.play(go_first=go_first)
     finally:
         h.close()
     if dump and h.board:
@@ -429,20 +444,42 @@ def main(argv=None):
     ap.add_argument("--verbose", action="store_true")
     ap.add_argument("--games", type=int, default=1)
     ap.add_argument("--dump", help="write the served board to this file")
+    ap.add_argument("--seed", type=int,
+                    help="play randomly from this seed instead of always "
+                         "taking the first offered action")
+    ap.add_argument("--quiet", action="store_true",
+                    help="only report failures (for soaking)")
     args = ap.parse_args(argv)
 
     failures = 0
+    problems = collections.Counter()
     for i in range(args.games):
-        if args.games > 1:
+        rng = random.Random(args.seed + i) if args.seed is not None else None
+        if args.games > 1 and not args.quiet:
             print("\n=== game %d/%d ===" % (i + 1, args.games))
         try:
-            h = run_one(verbose=args.verbose, dump=args.dump)
+            h = run_one(verbose=args.verbose, dump=args.dump, rng=rng,
+                        go_first=(i % 2 == 0))
         except (ProtocolError, OSError) as exc:
-            print("   ERROR: %s" % exc)
+            print("   game %d ERROR: %s" % (i + 1, exc))
             failures += 1
             continue
-        if not report(h):
+        for problem in h.problems:
+            problems[problem.split(":", 1)[-1].strip()[:90]] += 1
+        if args.quiet:
+            bad = (h.problems or h.result is None or h.sequence_depth != 0
+                   or h.bare_state or h.state_seen != 1)
+            if bad:
+                print("   game %d FAILED" % (i + 1))
+                report(h)
+                failures += 1
+        elif not report(h):
             failures += 1
+
+    if problems:
+        print("\n--- distinct board problems seen ---")
+        for text, count in problems.most_common(20):
+            print("   %4d  %s" % (count, text))
     print("\n%d/%d games clean" % (args.games - failures, args.games))
     return 1 if failures else 0
 
