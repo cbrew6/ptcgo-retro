@@ -774,28 +774,78 @@ ZERO_GUID = "00000000-0000-0000-0000-000000000000"
 # to disk, and the UI simply never advances - exactly the "sits in the deck
 # builder" symptom.
 #
-# The format name it looks for is an encrypted string constant, so rather than
-# decrypt it we answer for every format name the client knows about (the
-# DeckType and FormatType enums, unioned). FirstOrDefault then matches
-# whichever one it wanted. Extra names are inert: every lookup in that
-# coroutine is a by-name search, not an iteration over what we sent.
-DECK_FORMAT_NAMES = ("Standard", "Modified", "Expanded", "Legacy", "Unlimited",
-                     "ThemeDeck", "TrainerChallengeDeck", "Intermediate",
-                     "Unfinished")
+# Formats are identified by GUID, not by name, and the client hard-codes them
+# as plain literals in F.L - it never asks us for the list. `format` is the key
+# for both dictionaries the validation popup builds (updateValidations calls
+# ToString() on it), so sending the zero GUID for every entry collapsed all of
+# them onto one key. DeckValidationCategoryButton.Validate() then indexes five
+# specific keys UNGUARDED, which is the KeyNotFoundException in isValidThemeDeck.
+#
+# formatName is a separate vocabulary (K.w.FormatName) matched by exact string.
+# "Standard", "TrainerChallengeDeck", "Intermediate" and "Unfinished" match
+# nothing in it - the old list was inert rather than correct.
+DECK_FORMATS = (
+    ("6402e830-7fed-4cd1-b172-2a320047c2bb", "Modified"),        # UI: Standard
+    ("1414fd67-a632-4e38-ae04-0adf0074ac16", "ThemeDeck"),
+    ("6a1dec5a-34db-4cee-a503-4ee759304136", "TrainerChallenge"),
+    ("6a1dec5a-34db-4cee-a503-4ee759304135", "Unlimited"),       # note: ...135
+    ("98c83df9-ec82-4193-84a8-104115ce4e25", "Expanded"),
+    ("6b33d420-73cc-40d4-ada5-88a7d68063a9", "Legacy"),
+)
+
+ATTR_IS_THEME_DECK = 201290       # bool?,    read by Deck.IsThemeDeck()
+ATTR_DECK_FORMATS = 10860         # string[], the formats ValidateDecksData reads
+
+# ValidateDecksData bails out entirely when 10860 is absent, leaving every
+# format flag false - which is why a freshly-listed deck was legal for nothing
+# and the Play button stayed dead until a save round-tripped it. Nothing in the
+# client ever writes this attribute, so it was always server-supplied.
+DECK_FORMAT_ATTRIBUTE = ["Standard", "Modified", "Expanded", "Legacy",
+                         "Unlimited"]
 
 
-def deck_validation(deck_id):
-    """Every format, valid, no failure details - consistent with legality."""
+def deck_attribute(deck, name):
+    for attr in (deck or {}).get("attributes") or []:
+        if attr.get("name") == name:
+            return attr.get("value")
+    return None
+
+
+def deck_validation(deck_id, deck=None):
+    """One result per real format, keyed by the GUID the client looks up.
+
+    TrainerChallenge must be false: ValidFor(Modified/Expanded/Legacy) is
+    `isValid<X> && !isValidTheme && !isValidTrainerChallenge`, so claiming it
+    would invalidate the formats that actually matter. The old spelling
+    ("TrainerChallengeDeck") was accidentally harmless because it matched no
+    enum member at all.
+    """
+    is_theme = deck_attribute(deck, ATTR_IS_THEME_DECK) is True
+    overrides = {"ThemeDeck": is_theme, "TrainerChallenge": False}
     return [
         {
             "deckID": deck_id,
-            "format": ZERO_GUID,
+            "format": format_id,
             "formatName": name,
-            "valid": True,
-            "results": [],
+            "valid": overrides.get(name, True),
+            "results": [],          # never null: parseValidationDetails reads .Length
         }
-        for name in DECK_FORMAT_NAMES
+        for format_id, name in DECK_FORMATS
     ]
+
+
+def deck_for_client(deck):
+    """A deck as served, carrying the format list the client validates against."""
+    if not deck or not (deck.get("piles") or {}).get("CakePile"):
+        return deck                          # avatar decks have no CakePile
+    attributes = [a for a in (deck.get("attributes") or [])
+                  if a.get("name") != ATTR_DECK_FORMATS]
+    attributes.append({"name": ATTR_DECK_FORMATS,
+                       "value": list(DECK_FORMAT_ATTRIBUTE),
+                       "originalValue": list(DECK_FORMAT_ATTRIBUTE)})
+    served = dict(deck)
+    served["attributes"] = attributes
+    return served
 
 _decks = None
 _decks_lock = threading.Lock()
@@ -1324,7 +1374,7 @@ class GameSession:
         self.send("CurrentWallet", {"currencies": []}, request_id)
 
     def on_GetDeckList(self, value, request_id):
-        decks = load_decks()
+        decks = [deck_for_client(d) for d in load_decks()]
         log.info("[game %s] -> OnlineDecksFound (%d decks)",
                  self.peer, len(decks))
         write_frame(self.sock, msg("OnlineDecksFound", {"decks": decks}),
@@ -1358,8 +1408,8 @@ class GameSession:
                  len(load_decks()))
         write_frame(self.sock, msg("DeckSaved", {
             "deckID": deck_id,
-            "deck": deck,
-            "validationResults": deck_validation(deck_id),
+            "deck": deck_for_client(deck),
+            "validationResults": deck_validation(deck_id, deck),
         }), request_id)
 
     def _item(self, archetype_guid, name=None):
@@ -1429,7 +1479,8 @@ class GameSession:
         decks = (value or {}).get("decks") or []
         results = []
         for deck in decks:
-            results.extend(deck_validation(deck.get("deckID") or ZERO_GUID))
+            results.extend(
+                deck_validation(deck.get("deckID") or ZERO_GUID, deck))
         log.info("[game %s] -> DecksValidated (%d deck(s), %d results)",
                  self.peer, len(decks), len(results))
         write_frame(self.sock, msg("DecksValidated", {"results": results}),
