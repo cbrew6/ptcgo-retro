@@ -50,6 +50,7 @@ ATTR_HP = 200490                 # value = current, originalValue = max
 ATTR_SET, ATTR_CARD_NAME, ATTR_CARD_NUM = 200580, 200630, 200780
 ATTR_CARD_TYPE, ATTR_TRAINER_TYPE = 200300, 200270
 ATTR_STAGE, ATTR_RETREAT, ATTR_FAMILY = 200540, 200800, 200260
+ATTR_FOIL_EFFECT, ATTR_FOIL_MASK = 200610, 200620
 ATTR_POKEMON_TYPES = 200570        # PokemonTypes[]; CardImageRenderer throws
                                    # without it - see card_attributes
 ATTR_ENERGY_PROVIDED = 201040      # {"options": [[type, ...], ...]}
@@ -372,6 +373,19 @@ class Match:
         # padded collector number; without it they render the plain printing.
         if card.card_image:
             attrs.append({"name": ATTR_ASSET_NAME, "value": card.card_image})
+        # Foils, and the reason they worked everywhere EXCEPT in a match.
+        # CardImageRenderer only asks for a foil mask when the entity's own art
+        # data reports IsFoil, and that is computed solely from these two
+        # attributes - mask non-None, or a non-None effect. Collection and deck
+        # views build their cards from the local archetype DB, which carries
+        # both; a match entity carries only what this method sends, so every
+        # card on the playmat claimed to be non-foil and no mask was ever
+        # requested. 5,331 of 9,940 archetypes are foil. Same shape of bug as
+        # 200570 and 200740: an attribute the renderer reads and we never sent.
+        if card.foil_mask:
+            attrs.append({"name": ATTR_FOIL_MASK, "value": card.foil_mask})
+        if card.foil_effect:
+            attrs.append({"name": ATTR_FOIL_EFFECT, "value": card.foil_effect})
         if card.name:
             attrs.append({"name": ATTR_CARD_NAME, "value": card.name})
         if card.set_code:
@@ -1073,9 +1087,14 @@ class Match:
     # the two lands in a fallback with no UI, so rows are grouped per entity
     # and kept consistent.
 
-    def _target_info(self, valid, prompt, selected=True, minimum=1):
+    def _target_info(self, valid, prompt, selected=True, minimum=1,
+                     kind="EntityListTargetInformation"):
+        # `kind` is the TargetInformation subclass, which becomes the selection
+        # node's Kind and so picks the command that renders it. The bare
+        # subclasses (ActivePokemon/Knockout/RetreatNewActive) add no fields -
+        # they exist purely to select a renderer.
         return {
-            "name": "EntityListTargetInformation",
+            "name": kind,
             "selected": selected,
             "accountID": None,
             "targetPrompt": prompt,
@@ -1109,7 +1128,7 @@ class Match:
 
     def _offer_group(self, rows, decode, entity, action_id, description,
                      selection_type, by_target, prompt=None, selected=True,
-                     hint="Optimal"):
+                     hint="Optimal", target_kind="EntityListTargetInformation"):
         """One offered move, and how to read the answer back.
 
         by_target maps a target entity id to the engine Action that choosing it
@@ -1140,7 +1159,8 @@ class Match:
             return
         rows.append(self._action_row(
             entity, action_id, description, selection_type,
-            [self._target_info(targets, prompt, selected=selected)], hint=hint))
+            [self._target_info(targets, prompt, selected=selected,
+                               kind=target_kind)], hint=hint))
         decode[(entity, action_id)] = dict(by_target)
 
     def setup_selection(self, player, counter):
@@ -1541,8 +1561,8 @@ class Match:
         which decides how they are laid out:
 
           hand cards    "Ability"           play, evolve, attach
-          bench Pokemon "Ability"           retreat into, promote
-          the Active    "AbilitySelection"  its attacks
+          bench Pokemon "Ability"           promote
+          the Active    "AbilitySelection"  its attacks, and retreat
 
         That split is not cosmetic. "AbilitySelection" draws a button per
         ability and only draws it when the action id really appears in that
@@ -1579,11 +1599,16 @@ class Match:
             elif isinstance(action, engine.PlayBasic):
                 play[action.card] = action
             elif isinstance(action, engine.Retreat):
-                # Retreat names the Pokemon coming IN, so the row hangs off the
-                # bench Pokemon being switched to rather than off the Active.
-                # That also keeps it away from the Active's attack rows.
+                # Retreat names the Pokemon coming IN, so the destination is
+                # what the player picks. Several Retreats can share one
+                # destination and differ only in which Energy pays the cost;
+                # keep the one discarding the fewest cards so the choice is at
+                # least deterministic. Letting the player choose needs the pip
+                # tray - see the note where this is emitted.
                 target = self.entity_of_slot(self.resolve_slot(action.slot))
-                retreat[target] = action
+                current = retreat.get(target)
+                if current is None or len(action.energy) < len(current.energy):
+                    retreat[target] = action
             elif isinstance(action, engine.Promote):
                 target = self.entity_of_slot(self.resolve_slot(action.slot))
                 promote[target] = action
@@ -1621,9 +1646,6 @@ class Match:
                     spots[entity] = action
             self._offer_group(rows, decode, self.eid(card), ACTION_PLAY_BASIC,
                               "PlayBasic", "Ability", spots)
-        for target, action in retreat.items():
-            self._offer_group(rows, decode, target, ACTION_RETREAT,
-                              "BaseRetreat", "Ability", {target: action})
         for target, action in promote.items():
             self._offer_group(rows, decode, target, ACTION_PROMOTE,
                               "Promote", "Ability", {target: action})
@@ -1647,12 +1669,35 @@ class Match:
                     _loc_key(printed.title) if printed else ability_id,
                     "AbilitySelection", {target: action})
 
-        # NOTHING but attacks goes on the Active during a turn. An end-turn row
+        active_entity = self.entity_of_slot(me.active) if me.active else None
+
+        # Retreat belongs on the ACTIVE, in the very same AbilitySelection node
+        # as the attacks, because that is the one place the client looks for
+        # it. `CreateButtons` tests `item.Description == "BaseRetreat"` BEFORE
+        # it asks the card for a PieAbilityDescription, so retreat needs no
+        # entry in attribute 200740 and does not have to be a printed ability -
+        # it is pulled out of the ability list and drawn from its own prefab,
+        # `retreatButtonPrefab`, rendered with the Pokemon's retreat cost and
+        # Energy type.
+        #
+        # It used to hang off the bench Pokemon being switched to. That kept
+        # one selectionType per entity, which is a real constraint, but it put
+        # retreat somewhere nothing ever reads: `IsRetreat()` is
+        # `Description == "BaseRetreat"` and every caller asks the ACTIVE.
+        # There was simply no way to retreat. Attacks and retreat are both
+        # "AbilitySelection", so this mixes nothing.
+        if active_entity and retreat:
+            self._offer_group(
+                rows, decode, active_entity, ACTION_RETREAT, "BaseRetreat",
+                "AbilitySelection", retreat,
+                "playmat.prompt.selectapokemon",
+                target_kind="RetreatNewActiveTargetInformation")
+
+        # NOTHING ELSE goes on the Active during a turn. An end-turn row
         # here hijacked the click that asks for the attack menu: with no Energy
         # attached there were no attack rows, so clicking the Active to see its
         # attacks silently ended the turn instead. Ending the turn is the
         # client's own button, which does appear during a turn.
-        active_entity = self.entity_of_slot(me.active) if me.active else None
         if opp_active and active_entity:
             # Only attacks that can actually be used.
             #

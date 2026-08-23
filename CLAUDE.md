@@ -158,7 +158,7 @@ Gameplay, added later and deliberately layered:
   selection messages, the 61 named animation sequences, which effect classes
   are live and which are dead, end-of-game parameters. Claims are marked
   VERIFIED / INFERRED / UNKNOWN; trust that marking.
-- `tests/` — `python -m unittest discover -s tests`, 215 tests. The engine is
+- `tests/` — `python -m unittest discover -s tests`, 240 tests. The engine is
   testable without the game, which is the entire point of the split.
 
 ## Protocol essentials
@@ -668,6 +668,7 @@ manifest and served correctly the whole time. See `patch/README.md`.
 | 200340 | `SpecialConditions[]` | no status markers; send the WHOLE list, it is not a delta |
 | 201040 | `{"options": [[type]]}` | wrong placeholder colour. Note carddata stores this as a JSON *string*; the wire wants the object |
 | 10020 | string | variant printings ("017a") render the plain art. A value containing "/" is an absolute product path, not a card face |
+| 200620 / 200610 | FoilMasks / FoilEffects | **the card renders FLAT.** `IsFoil` is computed from these two and nothing else, and only a card that says it is foil ever requests a mask. 5,331 of 9,940 archetypes are foil |
 
 Collection and deck views build cards from the local archetype DB, which has
 every attribute. Only entities the server synthesises can be missing one, which
@@ -753,10 +754,20 @@ of the game.
 
 ### What may and may not hang off the Active
 
-Only attacks. Clicking the Active is how a player asks for its attack menu, so
-any other row there hijacks that click - an end-turn row on an Active with no
-Energy attached meant clicking it silently ended the turn instead of showing
-anything. Ending a turn is the client's own button.
+Attacks and **retreat**, both `"AbilitySelection"`, and nothing else. Clicking
+the Active is how a player asks for its menu, so any other row there hijacks
+that click - an end-turn row on an Active with no Energy attached meant
+clicking it silently ended the turn instead of showing anything. Ending a turn
+is the client's own button.
+
+Retreat has exactly one home and this is it. `SelectableActionUtil.IsRetreat`
+is `Description == "BaseRetreat"`, and every caller asks the ACTIVE. Retreat
+used to hang off the bench Pokemon being switched to, which kept one
+selectionType per entity and was completely invisible - there was no way to
+retreat at all. It does not need to be a printed ability: `CreateButtons`
+pulls it out by description BEFORE it looks for a `PieAbilityDescription`, so
+it wants no entry in attribute 200740 and is drawn from its own prefab
+(`retreatButtonPrefab`) using the Pokemon's retreat cost and Energy type.
 
 During SETUP the Active carries no attacks, so a "done benching" row there is
 safe, and that is where it goes.
@@ -944,12 +955,13 @@ Known gaps, in rough order of value:
   the server can only guarantee the cases where nothing is legal. If it stops
   appearing, look at `buttonIsActive` in the playmat action-button component
   (`pie_d.cs:137899`) before changing message shapes.
-- **Retreat hangs off the bench Pokemon**, not the Active, to keep one
-  selectionType per entity. The client's own drag path looks for a
-  `BaseRetreat` action *on the Active* (`CheckHintStrength`), so dragging the
-  Active to the bench does not retreat; clicking the bench Pokemon does. Worth
-  revisiting - `dragEnded` explicitly picks the first non-`AbilitySelection`
-  action, which suggests the original server did mix the two on the Active.
+- **Retreat does not ask which Energy pays.** The row carries only
+  `RetreatNewActiveTargetInformation` (where to retreat to), and the server
+  picks the payment discarding the fewest cards. That is only visible when a
+  Pokemon holds genuinely different Energy - `_retreat_payments` already
+  collapses interchangeable ones. The authentic flow chains
+  `RetreatCostEntityListTargetInformation`, the pip tray, which carries
+  `valueToSelect` and is registered behind `isPipTrayRetreatSelection`.
 
 ## How this has gone wrong before
 

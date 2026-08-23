@@ -102,6 +102,39 @@ class CardAttributeTests(unittest.TestCase):
             for entry in at[match.ATTR_POKEMON_TYPES]["value"]:
                 self.assertIsInstance(entry, str)
 
+    def test_a_foil_card_says_so_on_the_playmat(self):
+        """Foils rendered everywhere except in a match, and this is why.
+
+        CardImageRenderer asks for a foil mask only when the entity's own art
+        data reports IsFoil, and IsFoil is computed from attribute 200620 (the
+        mask) and 200610 (the effect) and nothing else. Collection and deck
+        views build their cards from the local archetype DB, which carries
+        both. A match entity carries only what card_attributes() sends, so
+        every card on the board claimed to be non-foil - no mask was ever
+        requested, and no error was logged either. Same shape as 200570 and
+        200740 before it: an attribute the renderer reads and we never sent.
+        """
+        db = engine.CardDB.from_directory(CARD_DIR)
+        foils = [c for c in db if c.foil_mask or c.foil_effect]
+        self.assertGreater(len(foils), 1000,
+                           "carddata itself has no foil attributes - the "
+                           "export, not the wire format, is what broke")
+        m = self._match()
+        seen = 0
+        for cid in m.all_cards(m.state.players[0]):
+            card = m.card(cid)
+            if not (card.foil_mask or card.foil_effect):
+                continue
+            attrs = {a["name"]: a["value"] for a in m.card_attributes(cid)}
+            if card.foil_mask:
+                self.assertEqual(attrs.get(match.ATTR_FOIL_MASK),
+                                 card.foil_mask)
+            if card.foil_effect:
+                self.assertEqual(attrs.get(match.ATTR_FOIL_EFFECT),
+                                 card.foil_effect)
+            seen += 1
+        self.assertGreater(seen, 0, "no foil card in the fixture deck")
+
     def test_energy_provided_is_an_options_object(self):
         """201040 binds to a class whose only field is [JsonName("options")]
         PokemonTypes[][]. carddata stores it as a JSON *string*; the wire
@@ -337,6 +370,60 @@ class OfferTests(unittest.TestCase):
         for entity, seen in kinds.items():
             self.assertEqual(len(seen), 1,
                              "entity %s mixes %s" % (entity, sorted(seen)))
+
+    def test_retreat_is_offered_on_the_active(self):
+        """Retreat has exactly one home: the Active, described "BaseRetreat".
+
+        The client finds retreat only by asking the ACTIVE for an action whose
+        Description is "BaseRetreat" (SelectableActionUtil.IsRetreat, and every
+        caller of it). Hanging the row off the bench Pokemon being switched to
+        is well-formed, decodes correctly, and is completely invisible - there
+        was no way to retreat at all, and no test noticed because none of them
+        asked WHERE the row was.
+        """
+        m = self._match()
+        me = m.state.players[0]
+        # Retreat costs Energy, so an Active with none attached cannot retreat
+        # and would make this test assert on an empty list.
+        cost = engine.retreat_cost(m.state, me.active)
+        self.assertGreater(cost, 0, "fixture Pokemon retreats for free")
+        paid = 0
+        for cid in list(me.hand):
+            if paid >= cost:
+                break
+            if m.state.card(cid).is_energy:
+                me.hand.remove(cid)
+                me.active.energy.append(cid)
+                paid += m.state.card(cid).energy_units
+        self.assertGreaterEqual(paid, cost, "fixture had too little Energy")
+        self.assertTrue(me.bench and any(s.stack for s in me.bench),
+                        "fixture put nothing on the bench to retreat into")
+
+        body, _decode = m.build_offer(0, 1)
+        active = m.entity_of_slot(me.active)
+        rows = [r for r in body["targetMap"]
+                if r["selectableAction"]["description"] == "BaseRetreat"]
+        self.assertEqual(len(rows), 1,
+                         "expected exactly one retreat row, got %d" % len(rows))
+        row = rows[0]
+        self.assertEqual(row["entityID"], active,
+                         "retreat must hang off the Active, not %s"
+                         % row["entityID"])
+        # Sits in the same node as the attacks; CreateButtons pulls it out by
+        # description before it ever looks for a PieAbilityDescription, so it
+        # needs no entry in attribute 200740.
+        self.assertEqual(row["selectableAction"]["selectionType"],
+                         "AbilitySelection")
+        self.assertEqual([i["name"] for i in row["targetInfoLst"]],
+                         ["RetreatNewActiveTargetInformation"])
+        # The destinations are the benched Pokemon, which is what the player
+        # picks - retreat names the Pokemon coming IN.
+        bench = {m.entity_of_slot(sl) for sl in me.bench if sl.stack}
+        offered = set(row["targetInfoLst"][0]["validTargets"])
+        self.assertTrue(offered, "retreat offered with nowhere to go")
+        self.assertTrue(offered <= bench,
+                        "retreat targets something that is not a benched "
+                        "Pokemon: %s" % sorted(offered - bench))
 
     def test_a_promotion_uses_its_own_selection_not_an_action_offer(self):
         """CheckShouldEndTurn (pie_d.cs:31489) dereferences the Active's first

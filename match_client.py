@@ -206,6 +206,10 @@ class Harness:
         self.problems = []
         self.revealed = 0
         self.actions_taken = 0
+        # Counted by DESCRIPTION, not by action id, because "BaseRetreat" is
+        # the string the client itself matches on. A soak that never retreats
+        # says nothing about whether retreat works.
+        self.retreats = 0
         self.setups = 0
         self.choices = 0
         self.coin_flips = 0
@@ -496,7 +500,8 @@ class Harness:
             targets = []
             for info in row.get("targetInfoLst") or []:
                 targets.extend((info or {}).get("validTargets") or [])
-            choices.append((entity_id, action_id, targets))
+            choices.append((entity_id, action_id, targets,
+                            action.get("description")))
         if not choices:
             return None
         if self.rng is not None:
@@ -504,13 +509,15 @@ class Harness:
             # in the pool rather than being unreachable.
             if self.rng.random() < 0.1:
                 return None
-            entity_id, action_id, targets = self.rng.choice(choices)
+            entity_id, action_id, targets, desc = self.rng.choice(choices)
             target = self.rng.choice(targets) if targets else None
         else:
-            entity_id, action_id, targets = choices[0]
+            entity_id, action_id, targets, desc = choices[0]
             target = targets[0] if targets else None
 
         self.actions_taken += 1
+        if desc == "BaseRetreat":
+            self.retreats += 1
         responses = []
         if target is not None:
             responses.append({"entityList": [target],
@@ -592,8 +599,9 @@ def report(h):
           "%d calls, %d flips - the call is what raises the coins"
           % (h.flip_calls, h.coin_flips))
     print("\n   %d offers, %d answered with an action, %d choices, "
-          "%d mulligan offers"
-          % (h.turns, h.actions_taken, h.choices, h.mulligan_offers))
+          "%d mulligan offers, %d retreats"
+          % (h.turns, h.actions_taken, h.choices, h.mulligan_offers,
+             h.retreats))
     return ok
 
 

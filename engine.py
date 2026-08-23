@@ -133,6 +133,10 @@ ATTR_ASSET_NAME = 10020            # art override; absolute when it contains "/"
 # LOCALIZATION KEY, not English - resolving it needs the client's shipped
 # LocalizationDB, whose keys are lowercase where these are mixed case.
 ATTR_GAME_TEXT = 200310
+# Foil treatment. Cosmetic - no rule reads either - but the client computes
+# "is this card foil" from exactly these two and requests a mask only if so.
+ATTR_FOIL_EFFECT = 200610          # enum FoilEffects,  e.g. "Rainbow"
+ATTR_FOIL_MASK = 200620            # enum FoilMasks,    e.g. "Reverse"
 
 # --------------------------------------------------------------------------
 # vocabulary
@@ -513,6 +517,13 @@ class Card:
     # how a reprint whose wording changed stays unimplemented instead of
     # quietly inheriting the wrong behaviour.
     game_text_key: Optional[str] = None
+    # How this printing is foiled. No rule reads either, but a card entity
+    # that omits them renders flat: the client's art data derives IsFoil from
+    # the mask and the effect together, and only a card that says it is foil
+    # ever asks for a foil mask. Parsed here because this is the one place
+    # archetype attributes are read.
+    foil_mask: Optional[str] = None
+    foil_effect: Optional[str] = None
 
     @classmethod
     def from_archetype(cls, archetype: Mapping[str, Any]) -> "Card":
@@ -580,6 +591,8 @@ class Card:
             # Same "\"$$$key$$$\"" wrapping as ATTR_NAME_KEY above.
             game_text_key=(_str(at, ATTR_GAME_TEXT) or "").strip('"').strip("$")
             or None,
+            foil_mask=_str(at, ATTR_FOIL_MASK),
+            foil_effect=_str(at, ATTR_FOIL_EFFECT),
         )
 
     # -- classification ----------------------------------------------------
