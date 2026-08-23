@@ -9,26 +9,31 @@ crash here does not fail a test, it hangs a real player's game, so `choose`
 catches everything, re-checks its own answer against legal_actions(), and
 falls back to Pass rather than let a bug in a heuristic escape.
 
-This is a priority ladder, not a search. A theme-deck game has a small number
-of genuinely different decisions per turn and a beginner-strength opponent is
-the target, so the whole thing is "look at the board, ask eight questions in
-order, take the first one that answers yes". Everything a tuner would want to
-change is a named constant at the top of the file rather than a number buried
-in a comparison.
+This is a priority ladder, not a search. A game has a small number of
+genuinely different decisions per turn and a beginner-strength opponent is the
+target, so the whole thing is "look at the board, ask a fixed list of
+questions in order, take the first one that answers yes". Everything a tuner
+would want to change is a named constant at the top of the file rather than a
+number buried in a comparison.
 
 The ladder, in the order it is asked:
 
-    0. A promotion is owed  - forced; send up the best attacker.
-    1. Setup                - an Active that can realistically power an
+    0. A Choice is pending  - forced; an effect is half way through and
+                              nothing else in the game may happen.
+    1. A promotion is owed  - forced; send up the best attacker.
+    2. Setup                - an Active that can realistically power an
                               attack, then a small bench.
-    2. Attach an Energy     - to whatever it most advances.
-    3. Evolve               - only when strictly better.
-    4. Play a Basic         - while the bench is thin.
-    5. Retreat              - when the Active cannot act, or is nearly dead
+    3. Use an Ability       - free, once per turn, so always worth trying.
+    4. Play a Trainer       - judged by playing it on a copy of the board and
+                              looking at what changed.
+    5. Attach an Energy     - to whatever it most advances.
+    6. Evolve               - only when strictly better.
+    7. Play a Basic         - while the bench is thin.
+    8. Retreat              - when the Active cannot act, or is nearly dead
                               and the bench is better.
-    6. Attack               - a knockout if one exists (cheapest such),
+    9. Attack               - a knockout if one exists (cheapest such),
                               otherwise the most damage.
-    7. Pass.
+   10. Pass.
 
 Two deliberate departures from the obvious reading of that list:
 
@@ -51,12 +56,22 @@ just do not know its order). It never reads the opponent's hand, deck or
 prizes, and it never touches state.rng - the game's randomness belongs to the
 game, and drawing from it here would mutate the caller's state.
 
-Known limitations, all inherited from the engine's scope rather than chosen
-here: Trainers cannot be played, PokePowers/Abilities do not exist, and attack
-game text is inert, so printed damage really is the whole of an attack's
-value. Special Conditions are handled where they would change a decision
-(evolving cures Asleep/Paralyzed; Confusion makes a non-lethal attack risky)
-but nothing in scope inflicts them, so that code is currently unreachable.
+Trainers and Abilities are the one place this stops being a pure heuristic.
+Their text is data - a registry of callables on Rules - so there is nothing to
+read and no way to score "Professor Sycamore" by looking at it. Instead the
+card is PLAYED on a copy of the board and the two positions are compared,
+which is cheap because apply() already deep-copies and because a theme-deck
+position is a few hundred integers. A card whose effect stops to ask a
+question is answered by the same _plan_choice() the real game would use, so
+the position that gets scored is the one that would actually happen.
+
+That trade is deliberate: a table of card names would be brittle, would go
+stale every time effects.py grew, and would be wrong for exactly the cards
+nobody remembered to add.
+
+Known limitations: the position score is shallow (hand, board Energy, damage
+dealt and taken), so the AI will happily discard a good hand to Professor
+Sycamore and cannot see a two-card combo. Beginner strength is the target.
 """
 
 from __future__ import annotations
@@ -66,14 +81,17 @@ from engine import (
     COLORLESS,
     Attack,
     AttachEnergy,
+    AttachTool,
     Evolve,
     Pass,
     PlayBasic,
+    PlayTrainer,
     Promote,
     Retreat,
     SetupDone,
     SetupPlaceActive,
     SetupPlaceBench,
+    UseAbility,
     can_pay_cost,
     damage_after_weakness,
     legal_actions,
@@ -106,6 +124,16 @@ ESCAPE_VALUE = 30            # what saving a nearly-dead Pokemon is worth
 CURE_BONUS = 40              # evolving cures Asleep/Paralyzed; worth a lot
 
 MAX_SHORTFALL = 4            # stop counting past this many missing Energy
+
+# Position scoring, used only to decide whether playing a card was worth it.
+# All in damage-equivalent units so they can be added to one another.
+CARD_IN_HAND = 8             # a card you have not spent yet
+ENERGY_IN_PLAY = 22          # an Energy on a Pokemon is a turn already spent
+BENCH_BODY = 12              # a Pokemon in play, up to BENCH_TARGET
+PRIZE_VALUE = 120            # a prize taken is most of the game
+TRAINER_MARGIN = 1           # play a card only if it strictly improves things
+MAX_TRAINER_TRIALS = 14      # cap the lookahead; a hand is small but not free
+MAX_CHOICE_DEPTH = 6         # an effect that asks more than this is not ours
 
 
 # --------------------------------------------------------------------------
@@ -236,6 +264,200 @@ def _best(actions, key, rng=None):
 # --------------------------------------------------------------------------
 # the individual decisions
 # --------------------------------------------------------------------------
+
+def _position_score(state, player):
+    """How good this board looks for `player`, in damage-equivalent units.
+
+    Deliberately shallow and deliberately symmetric: it exists to compare two
+    positions that differ by one card, not to evaluate a game. Everything in
+    it is something a beginner would count - cards in hand, Energy on the
+    board, bodies, damage on their side minus damage on ours, prizes left.
+    """
+    me, them = state.players[player], state.players[1 - player]
+    score = 0.0
+
+    score += CARD_IN_HAND * len(me.hand) - CARD_IN_HAND * len(them.hand)
+    score += PRIZE_VALUE * (len(them.prizes) - len(me.prizes))
+
+    for side, sign in ((me, 1), (them, -1)):
+        bodies = min(len(side.in_play), BENCH_TARGET)
+        score += sign * BENCH_BODY * bodies
+        for slot in side.in_play:
+            score += sign * ENERGY_IN_PLAY * len(slot.energy)
+            # Damage on our own Pokemon is bad for us; on theirs, good.
+            score -= sign * slot.damage
+            # A Pokemon about to fall over is worth less than its HP says.
+            if slot.damage >= state.max_hp(slot):
+                score -= sign * PRIZE_VALUE
+    return score
+
+
+def _choice_score(state, player, choice, picks):
+    """How good one answer to a Choice looks. Higher is better.
+
+    Prompts are the stable ids effects.py hands out; anything unrecognised
+    falls through to zero, which makes every answer equal and lets the
+    tiebreak in _best() pick one. That is the safe failure: an unknown prompt
+    costs the AI quality, never legality.
+    """
+    prompt = choice.prompt
+    kind = choice.option_kind
+
+    if kind == engine.CHOICE_SLOT:
+        return sum(_slot_choice_value(state, player, prompt, sid)
+                   for sid in picks)
+    if kind == engine.CHOICE_CARD:
+        return sum(_card_choice_value(state, player, prompt, cid)
+                   for cid in picks)
+    return 0.0
+
+
+def _slot_choice_value(state, player, prompt, slot_id):
+    found = state.slot(slot_id)
+    if found is None:
+        return 0.0
+    owner, slot, _ = found
+    mine = owner == player
+    defender = state.players[1 - player].active
+
+    if prompt == "healTarget":
+        return slot.damage
+    if prompt in ("snipeTarget",):
+        # Finish something off rather than spreading damage around.
+        return -(state.max_hp(slot) - slot.damage)
+    if prompt == "gustTarget":
+        # Drag up whatever we most want to be hitting: least HP left, and
+        # least able to hit back.
+        now, _ = _attacker_value(state, slot, state.players[player].active)
+        return -(state.max_hp(slot) - slot.damage) - now
+    if prompt in ("switchTo", "evolveTarget", "energyTarget"):
+        now, potential = _attacker_value(state, slot,
+                                         defender if mine else None)
+        base = now + 0.5 * potential + 0.1 * (state.max_hp(slot) - slot.damage)
+        return base if mine else -base
+    if prompt == "scoopTarget":
+        # Worth taking back the one that is nearly dead, never a healthy one.
+        return slot.damage - (state.max_hp(slot) - slot.damage)
+    return 0.0
+
+
+def _card_choice_value(state, player, prompt, cid):
+    card = state.card(cid)
+    ps = state.players[player]
+    mine = state.owner_of(cid) == player
+
+    wants_body = len(ps.in_play) < BENCH_TARGET
+    useful = _own_energy_symbols(state, player)
+
+    if prompt in ("discardFromHand", "shuffleFromHand"):
+        # Give up the least useful thing: spare Energy beyond what the board
+        # can use, then duplicates, and never the last Basic in hand.
+        if card.is_basic_pokemon:
+            basics = sum(1 for c in ps.hand if state.card(c).is_basic_pokemon)
+            return -60.0 if basics <= 1 else -20.0
+        if card.is_energy:
+            return -10.0
+        return -5.0
+
+    if prompt == "discardEnergy":
+        # Ours: throw away the least useful symbol. Theirs: the most useful.
+        value = 10.0 * card.energy_units
+        if any(t in useful for option in card.energy_options for t in option):
+            value += 5.0
+        return -value if mine else value
+
+    if prompt in ("searchDeck", "lookAtTop", "fromDiscard", "fromHand",
+                  "moveEnergy"):
+        if card.is_basic_pokemon and wants_body:
+            return 40.0
+        if card.is_energy:
+            return 30.0 if card.energy_units else 5.0
+        if card.is_pokemon:
+            return 25.0
+        if card.is_trainer:
+            return 20.0
+        return 10.0
+    return 0.0
+
+
+def _plan_choice(state, player, legal, rng):
+    """Answer the outstanding Choice. Always returns one of `legal`."""
+    pending = state.pending
+    if pending is None:
+        return None
+    choice = pending.choice
+    return _best(legal,
+                 lambda a: _choice_score(state, player, choice, a.picks), rng)
+
+
+def _settle(state, player, rng, depth=MAX_CHOICE_DEPTH):
+    """Drive a half-resolved effect to the end, the way the game would.
+
+    Returns the state once nothing is pending, or None if it could not get
+    there. The depth cap is a guard, not a rule: an effect that asks more
+    questions than this is one nobody wrote, and giving up scores the card as
+    "no better than not playing it" rather than hanging the AI.
+    """
+    for _ in range(depth):
+        if state.pending is None:
+            return state
+        who = state.pending.choice.player
+        legal = legal_actions(state, who)
+        if not legal:
+            return None
+        action = _plan_choice(state, who, legal, rng) or legal[0]
+        # A Choice belonging to the opponent is theirs to answer; scoring it
+        # from our side would have us pick their worst option, so it is
+        # answered neutrally instead.
+        if who != player:
+            action = legal[0]
+        try:
+            state, _ = engine.apply(state, action)
+        except engine.IllegalAction:
+            return None
+    return state if state.pending is None else None
+
+
+def _play_value(state, player, action, rng):
+    """What this card is worth: the position after it, minus the position now.
+
+    None when the card cannot be resolved to a comparable position, which is
+    the same as "do not play it".
+    """
+    try:
+        after, _ = engine.apply(state, action)
+    except engine.IllegalAction:
+        return None
+    after = _settle(after, player, rng)
+    if after is None or after.over:
+        return None
+    # A card that hands us the turn back is not free: playing it must beat
+    # doing nothing, and the card itself has left our hand, which the score
+    # already counts against it.
+    return _position_score(after, player) - _position_score(state, player)
+
+
+def _plan_cards(state, player, legal, rng):
+    """Play a Trainer or use an Ability, if either measurably helps.
+
+    Abilities are tried first and with no margin: they cost nothing, do not
+    leave play, and are once a turn, so a neutral one is still worth taking
+    in case it draws into something.
+    """
+    abilities = [a for a in legal if isinstance(a, UseAbility)]
+    trainers = [a for a in legal
+                if isinstance(a, (PlayTrainer, AttachTool))]
+
+    for candidates, margin in ((abilities, 0), (trainers, TRAINER_MARGIN)):
+        scored = {}
+        for action in candidates[:MAX_TRAINER_TRIALS]:
+            value = _play_value(state, player, action, rng)
+            if value is not None and value >= margin:
+                scored[action] = value
+        if scored:
+            return _best(list(scored), lambda a: scored[a], rng)
+    return None
+
 
 def _plan_promotion(state, player, promotes, rng):
     """A knockout forced this. Send up whatever can hit back hardest."""
@@ -505,6 +727,10 @@ def _decide(state, player, legal, rng):
     if not legal:
         return None, "nothing legal to do"
 
+    if state.pending is not None:
+        return (_plan_choice(state, player, legal, rng),
+                "answer the pending choice (%s)" % state.pending.choice.prompt)
+
     promotes = [a for a in legal if isinstance(a, Promote)]
     if promotes:
         return _plan_promotion(state, player, promotes, rng), "forced promotion"
@@ -513,6 +739,14 @@ def _decide(state, player, legal, rng):
         return _plan_setup(state, player, legal, rng)
 
     ps = state.players[player]
+
+    # Trainers and Abilities sit above the development steps for the same
+    # reason attaching sits above attacking: they do not end the turn, and a
+    # card that fetches an Energy has to be played before the attachment is
+    # chosen or the fetched Energy sits in hand for a turn.
+    card_play = _plan_cards(state, player, legal, rng)
+    if card_play is not None:
+        return card_play, "play a card that improves the position"
 
     # Worked out first, acted on at step 5: Energy attached to a Pokemon we
     # are about to retreat goes to the discard along with it, and a retreat

@@ -22,19 +22,69 @@ callers can keep history, replay, or search without defensive copying. A state
 is a few hundred ints and the card database refuses to be copied (CardDB
 implements __deepcopy__ as identity), so this costs far less than it looks.
 
-Scope is a theme-deck game: Basic/Stage1/Stage2 Pokemon, Energy, plain-damage
-attacks, Special Conditions. Per-card text is *modelled but inert* - an attack
-with game text still deals its printed damage, it just does not do the extra
-thing the text describes, and Trainers cannot be played at all. The seam for
-growing past that is Rules.attack_effects; see EXTENSION POINTS at the bottom.
+Scope is a real game: Basic/Stage1/Stage2 Pokemon, Energy, attacks, Special
+Conditions, and all four kinds of Trainer. Per-card *text* is still not here -
+this module knows the structural rules ("one Supporter per turn", "a Stadium
+replaces the Stadium in play") and nothing about what any individual card says.
+What a card does lives in a registry on Rules, keyed by a stable id, and every
+registry is EMPTY by default, so a stock engine remains inert and testable.
+effects.py builds a populated Rules; see EXTENSION POINTS at the bottom.
 
 Card data is carddata/*.json - the same files server.py serves to the client -
 read through the ATTR_* ids below. Nothing here invents an attribute id.
+
+
+PENDING CHOICES
+---------------
+
+Most cards ask a question: which Pokemon to heal, which two cards to discard,
+which Pokemon to fetch out of the deck. apply() used to resolve every action
+atomically, and could not express "waiting for an answer".
+
+The model is a one-slot continuation on the state:
+
+    apply(state, PlayTrainer(0, potion))
+        -> state.pending is a Pending holding a Choice, and a CHANGE_CHOICE
+           change describing it
+    players_to_act(state)          -> [the player the Choice belongs to]
+    legal_actions(state, player)   -> only Choose(player, picks) actions
+    apply(state, Choose(0, (slot,))) -> the effect runs on, and either
+           finishes or parks another Choice
+
+An effect is therefore not a coroutine but a small step machine, re-entered
+once per answer:
+
+    def potion(state, ctx, changes):
+        if not ctx["answers"]:
+            return Choice(...)          # step 0: ask
+        target = ctx["answers"][0][0]   # step 1: act
+        ...
+
+Generators would read better and were rejected: apply() deep-copies the whole
+state, a suspended generator cannot be deep-copied, and every saved game would
+have died on copy.deepcopy. The step machine survives copying because a
+Pending is nothing but data.
+
+THE ONE RULE AN EFFECT MUST FOLLOW: a call that returns a Choice must not have
+touched `state` or appended to `changes`. The engine re-enters the effect from
+the top with one more answer, so anything done before the return would be done
+twice. Written in the shape above - all questions first, all mutation last -
+this falls out naturally, and it is the same discipline as the _require()
+guards at the top of every handler below.
+
+`Choice.player` is who answers, which need not be who played the card: Escape
+Rope asks the opponent first. players_to_act() reads it directly, so a choice
+owned by the non-turn player routes correctly with no special case.
+
+Only one Choice is ever outstanding, and while one is outstanding NOTHING else
+is legal - not even ending the turn. That is what keeps the model a single
+field rather than a stack.
 """
 
 from __future__ import annotations
 
 import copy
+import dataclasses
 import itertools
 import json
 import os
@@ -77,6 +127,12 @@ ATTR_SET = 200580
 ATTR_COLLECTOR_NUMBER = 200780
 ATTR_TRAINER_TYPES = 200270        # "Item" | "Supporter" | "Stadium" | "PokemonTool"
 ATTR_ASSET_NAME = 10020            # art override; absolute when it contains "/"
+# A Trainer's rules text. Pokemon carry their text per-ability inside
+# ATTR_ABILITIES instead and never have this one (0 of 7,367 Pokemon do; 1,120
+# of 1,120 Trainers do). Like every text attribute in this data it holds a
+# LOCALIZATION KEY, not English - resolving it needs the client's shipped
+# LocalizationDB, whose keys are lowercase where these are mixed case.
+ATTR_GAME_TEXT = 200310
 
 # --------------------------------------------------------------------------
 # vocabulary
@@ -91,6 +147,29 @@ COLORLESS = "Colorless"
 NO_COLOR = "NoColor"          # the data's way of writing "no weakness/resistance"
 
 ABILITY_ATTACK = "Attack"
+
+# The other four abilityTypes in the data, by frequency: PokeAbility (956),
+# AncientTrait (93), PokePower (89), PokeBody (78). Nothing distinguishes an
+# *activated* ability from a passive one, so the engine does not try: an
+# ability is offered as an action only when Rules.ability_effects has an entry
+# for it, and membership of that registry is the whole definition of
+# "activated". AncientTrait is never activated - it is always continuous.
+ABILITY_POKE = "PokeAbility"
+ABILITY_POWER = "PokePower"
+ABILITY_BODY = "PokeBody"
+ABILITY_ANCIENT = "AncientTrait"
+
+# ATTR_TRAINER_TYPES values, all four of them plus the XY oddity. Counted over
+# carddata: Item 505, Supporter 332, PokemonTool 164, Stadium 117,
+# PokemonToolF 2. "PokemonToolF" is Team Flare Gear - a Tool with a printed
+# restriction on which Pokemon may carry it, which the data does not encode, so
+# it is played exactly like a Tool and the restriction is not enforced.
+TRAINER_ITEM = "Item"
+TRAINER_SUPPORTER = "Supporter"
+TRAINER_STADIUM = "Stadium"
+TRAINER_TOOL = "PokemonTool"
+TRAINER_TOOL_F = "PokemonToolF"
+TOOL_TYPES = (TRAINER_TOOL, TRAINER_TOOL_F)
 
 # Stage progression we are prepared to evolve through. Break/LevelUp/Legend/
 # VMAX/VUNION/VSTAR exist in the data but are out of scope, and leaving them
@@ -119,6 +198,11 @@ ZONE_ACTIVE = "activePokemonArea"
 ZONE_BENCH = "bench"
 ZONE_DISCARD = "discard"
 ZONE_LOST = "lostZone"
+# The Stadium in play belongs to the board, not to a player - the client's
+# IntroduceEntity routes by owningPlayerID and an owned activeStadium is never
+# bound to its layout. GameState.stadium remembers who *played* it, because
+# that is who discards it when it is replaced, but the zone has no owner.
+ZONE_STADIUM = "activeStadium"
 
 PHASE_SETUP = "setup"
 PHASE_MAIN = "main"
@@ -156,8 +240,9 @@ class Rules:
     # BW/XY they did. This is the only thing the first player skips.
     first_player_draws_on_first_turn: bool = False
 
-    # Also SM-era: the first player may not attack on turn 1. (They *may* play
-    # a Supporter, which is moot here since Trainers are out of scope.)
+    # Also SM-era: the first player may not attack on turn 1. They *may* play a
+    # Supporter - the two restrictions arrived together in Sun & Moon and only
+    # ever covered the draw and the attack.
     first_player_may_attack_on_first_turn: bool = False
 
     # A Pokemon cannot evolve the turn it was put into play. Setup placements
@@ -185,16 +270,81 @@ class Rules:
     energy_attachments_per_turn: int = 1
     retreats_per_turn: int = 1
 
+    # Trainer structure. All three are per player per turn; Items are
+    # deliberately absent because there is no limit on them.
+    supporters_per_turn: int = 1
+    stadiums_per_turn: int = 1
+    tools_per_pokemon: int = 1
+
+    # An Ability is usable once per turn by each Pokemon that has it. A few
+    # real cards say "once during your turn" across the whole board instead;
+    # those are the minority and are not modelled.
+    ability_uses_per_turn: int = 1
+
     # Guards rather than rules: a deck with no Basic Pokemon would mulligan for
     # ever, and enumerating retreat payments over a huge pile of Energy is
     # pointless work for a theme-deck game.
     max_mulligans: int = 100
     max_enumerated_energy: int = 10
+    # Ditto for choices: "discard 2 cards from your hand" over an eight-card
+    # hand is 28 answers, but "put 2 basic Energy from a 30-card discard pile
+    # into your hand" is 435. legal_actions() stops at this many and says so
+    # by simply offering fewer; apply() still accepts any legal answer, exactly
+    # as it does for the retreat payments _retreat_payments() collapses.
+    max_enumerated_choices: int = 60
 
-    # abilityID -> callable(state, context, changes), called after an attack's
-    # damage lands. This is where per-card text goes when someone writes it.
-    # Empty by default: attacks are inert beyond their printed damage.
+    # ---- effect registries ------------------------------------------------
+    #
+    # Four registries, each keyed by a stable id, each EMPTY by default so a
+    # stock engine is inert and every rules test above is unaffected by them.
+    # effects.py builds a Rules with them populated.
+    #
+    # One-shots are callable(state, ctx, changes) and may return a Choice to
+    # suspend (see PENDING CHOICES in the module docstring); returning None
+    # means done.
+
+    # abilityID -> the base damage this use of the attack deals, BEFORE
+    # Weakness and Resistance: callable(state, ctx, changes) -> int. This is
+    # where amountOperator lives ("30+", "40x", "80-"). It runs before the
+    # damage lands and so may NOT return a Choice; a coin flip it makes is
+    # recorded in ctx["data"] where attack_effects can read it.
+    attack_damage: Mapping[str, Callable[..., int]] = field(default_factory=dict)
+
+    # abilityID -> callable(state, ctx, changes), called after an attack's
+    # damage lands. Special Conditions, bench damage, self damage, Energy
+    # discard - everything the text says that is not the damage number.
     attack_effects: Mapping[str, Callable[..., None]] = field(default_factory=dict)
+
+    # archetype GUID -> callable(state, ctx, changes). A Trainer is playable
+    # if and only if it has an entry here: a Trainer with no implemented text
+    # is a card that does nothing, and offering it would be worse than leaving
+    # it in hand. Keyed per printing rather than per name because two cards
+    # sharing a name are not the same card.
+    trainer_effects: Mapping[str, Callable[..., None]] = field(default_factory=dict)
+
+    # abilityID -> callable(state, ctx, changes) for an ACTIVATED Ability.
+    # Membership is the definition of "activated" - see ABILITY_POKE above.
+    ability_effects: Mapping[str, Callable[..., None]] = field(default_factory=dict)
+
+    # Continuous effects, keyed by abilityID (for a Pokemon's Ability) or by
+    # archetype GUID (for an attached Tool or the Stadium in play). One
+    # callable answers every question:
+    #
+    #     callable(query, state, ctx, value) -> value
+    #
+    # with `query` one of the STATIC_* strings below. The default is inert
+    # because an empty registry is never consulted at all - _static() short
+    # circuits, which is what keeps max_hp() cheap in the common case.
+    static_effects: Mapping[str, Callable[..., int]] = field(default_factory=dict)
+
+
+# Queries a static_effects callable must be prepared to be asked. Anything it
+# does not recognise it returns `value` for unchanged.
+STATIC_DAMAGE_DEALT = "damageDealt"   # added to base damage, before Weakness
+STATIC_DAMAGE_TAKEN = "damageTaken"   # subtracted from damage, after Weakness
+STATIC_RETREAT_COST = "retreatCost"   # symbols, floored at 0 by the caller
+STATIC_MAX_HP = "maxHP"
+STATIC_NO_WEAKNESS = "noWeakness"     # non-zero means Weakness does not apply
 
 
 DEFAULT_RULES = Rules()
@@ -328,6 +478,12 @@ class Card:
     # this over the padded collector number, so a variant that does not send it
     # renders the wrong printing's art.
     card_image: Optional[str] = None
+    # ATTR_GAME_TEXT, the Trainer's rules text - a localization key, never
+    # English. The rules never read it; effects.py resolves it against the
+    # client's LocalizationDB to decide which effect a printing gets, which is
+    # how a reprint whose wording changed stays unimplemented instead of
+    # quietly inheriting the wrong behaviour.
+    game_text_key: Optional[str] = None
 
     @classmethod
     def from_archetype(cls, archetype: Mapping[str, Any]) -> "Card":
@@ -392,6 +548,9 @@ class Card:
             # ("packs/SM3Booster"), not a card face - those archetypes are boxes
             # and boosters, never anything that reaches a playmat.
             card_image=_card_image(_str(at, ATTR_ASSET_NAME)),
+            # Same "\"$$$key$$$\"" wrapping as ATTR_NAME_KEY above.
+            game_text_key=(_str(at, ATTR_GAME_TEXT) or "").strip('"').strip("$")
+            or None,
         )
 
     # -- classification ----------------------------------------------------
@@ -420,6 +579,39 @@ class Card:
     @property
     def is_evolution(self) -> bool:
         return self.is_pokemon and STAGE_ORDER.get(self.stage, 0) > 0
+
+    @property
+    def trainer_kind(self) -> Optional[str]:
+        """Item / Supporter / Stadium / PokemonTool, or None if not a Trainer.
+
+        ATTR_TRAINER_TYPES is documented as an array but is a scalar in the
+        export, and no card in carddata carries more than one value, so the
+        first entry is the whole answer.
+        """
+        if not self.is_trainer:
+            return None
+        return self.trainer_types[0] if self.trainer_types else None
+
+    @property
+    def is_item(self) -> bool:
+        return self.trainer_kind == TRAINER_ITEM
+
+    @property
+    def is_supporter(self) -> bool:
+        return self.trainer_kind == TRAINER_SUPPORTER
+
+    @property
+    def is_stadium(self) -> bool:
+        return self.trainer_kind == TRAINER_STADIUM
+
+    @property
+    def is_tool(self) -> bool:
+        return self.trainer_kind in TOOL_TYPES
+
+    @property
+    def pokemon_abilities(self) -> tuple:
+        """Everything on the card that is not an attack."""
+        return tuple(a for a in self.abilities if not a.is_attack)
 
     @property
     def attacks(self) -> tuple:
@@ -534,11 +726,15 @@ class Slot:
     stack: list                      # bottom .. top; stack[-1] is the Pokemon
     damage: int = 0
     energy: list = field(default_factory=list)
-    tools: list = field(default_factory=list)   # modelled, never populated
+    tools: list = field(default_factory=list)
     conditions: set = field(default_factory=set)
     # The owner's own turn counter when this Pokemon was played or evolved.
     # Compared against PlayerState.turns_taken, never against the global turn.
     played_on_turn: int = 0
+    # abilityIDs this Pokemon has already used this turn. Cleared for every
+    # slot at the start of every turn rather than only the turn player's,
+    # because an Ability used on the opponent's turn spends the same allowance.
+    abilities_used: set = field(default_factory=set)
 
     @property
     def top(self) -> int:
@@ -563,6 +759,8 @@ class PlayerState:
     turns_taken: int = 0
     energy_attached_this_turn: int = 0
     retreats_this_turn: int = 0
+    supporters_this_turn: int = 0
+    stadiums_this_turn: int = 0
     setup_done: bool = False
     mulligans: int = 0
     # Set the moment a draw is required and the deck is empty. The loss is
@@ -576,6 +774,111 @@ class PlayerState:
         return ([self.active] if self.active else []) + list(self.bench)
 
 
+# --------------------------------------------------------------------------
+# pending choices, temporary modifiers, the Stadium
+# --------------------------------------------------------------------------
+
+CHOICE_CARD = "card"      # options are card ids
+CHOICE_SLOT = "slot"      # options are slot ids
+CHOICE_OPTION = "option"  # options are opaque strings ("yes"/"no", a colour)
+
+
+@dataclass
+class Choice:
+    """A question an in-flight effect stopped to ask. See PENDING CHOICES.
+
+    `options` is a tuple of ids of one kind, named by `option_kind` so the
+    protocol layer knows whether it is pointing the player at cards or at
+    Pokemon. `zone` is where those cards currently are, which the client needs
+    to know whether to open the deck, the discard, or the hand.
+
+    minimum/maximum are clamped against the number of options on construction.
+    An effect that asks for two cards from a one-card discard pile gets one,
+    rather than producing a Choice no answer satisfies - a state with no legal
+    action is a hung game, and a hung game is worse than a lenient card.
+    """
+    player: int
+    prompt: str                    # stable id for the renderer, e.g. "heal"
+    options: tuple = ()
+    option_kind: str = CHOICE_CARD
+    minimum: int = 1
+    maximum: int = 1
+    zone: Optional[str] = None
+    detail: dict = field(default_factory=dict)
+
+    def __post_init__(self):
+        self.options = tuple(self.options)
+        self.maximum = max(0, min(self.maximum, len(self.options)))
+        self.minimum = max(0, min(self.minimum, self.maximum))
+
+    def as_dict(self) -> dict:
+        return {"player": self.player, "prompt": self.prompt,
+                "options": list(self.options), "optionKind": self.option_kind,
+                "minimum": self.minimum, "maximum": self.maximum,
+                "zone": self.zone, "detail": dict(self.detail)}
+
+
+@dataclass
+class Pending:
+    """The effect that asked, and everything needed to re-enter it.
+
+    Deliberately pure data: apply() deep-copies the state, so anything here
+    that were not copyable would take the whole engine with it.
+    """
+    kind: str                      # "trainer" | "ability" | "attack"
+    key: str                       # registry key: archetype GUID or abilityID
+    player: int                    # who is resolving (not always who answers)
+    choice: Choice
+    answers: list = field(default_factory=list)   # one tuple of picks each
+    source: Optional[int] = None   # cid of the card being played, if any
+    slot: Optional[int] = None     # source slot id, for an Ability or attack
+    after: Optional[str] = None    # "attack" -> end the turn once finished
+    data: dict = field(default_factory=dict)      # effect scratch
+
+
+# Modifier kinds. A Modifier is a rules change with an explicit expiry, which
+# is how "during your opponent's next turn" is expressed without a scheduler.
+MOD_DAMAGE_DEALT = "damageDealt"      # + to base damage, before Weakness
+MOD_DAMAGE_TAKEN = "damageTaken"      # - from damage, after Weakness
+MOD_PREVENT_DAMAGE = "preventDamage"  # damage to this slot becomes 0
+MOD_NO_RETREAT = "noRetreat"
+MOD_NO_ABILITIES = "noAbilities"      # every Pokemon of `player` has none
+MOD_RETREAT_COST = "retreatCost"      # + to the retreat cost, floored at 0
+MOD_NO_WEAKNESS = "noWeakness"        # this slot's Weakness does not apply
+
+# What an attack may declare its damage is not affected by. "This attack's
+# damage isn't affected by Resistance" is 101 attacks on its own, and the
+# three of these together are the only forms the printed text takes.
+IGNORE_WEAKNESS = "weakness"
+IGNORE_RESISTANCE = "resistance"
+IGNORE_EFFECTS = "effects"      # ... any effect on the defending Pokemon
+
+
+@dataclass
+class Modifier:
+    """One temporary rules change, alive while turn_number <= until_turn.
+
+    Expiry is a turn *number*, not a countdown, because turn numbers already
+    increment exactly once per player turn and a countdown would have to be
+    decremented from somewhere. "Until the end of your opponent's next turn"
+    is `state.turn_number + 1`; "during this turn" is `state.turn_number`.
+    """
+    kind: str
+    until_turn: int
+    player: Optional[int] = None   # whose side it applies to, if it is a side
+    slot: Optional[int] = None     # which Pokemon, if it is one Pokemon
+    amount: int = 0
+    source: Optional[int] = None   # cid that created it, for the renderer
+    detail: dict = field(default_factory=dict)
+
+
+@dataclass
+class StadiumInPlay:
+    """The one Stadium on the board. `owner` is only who discards it."""
+    card: int
+    owner: int
+
+
 @dataclass
 class GameState:
     db: CardDB
@@ -587,6 +890,12 @@ class GameState:
     to_move: int = 0
     turn_number: int = 0
     first_player: int = 0
+    # The Stadium belongs to neither board; see ZONE_STADIUM.
+    stadium: Optional[StadiumInPlay] = None
+    # At most one outstanding question. While this is set, the only legal
+    # action in the whole game is answering it.
+    pending: Optional[Pending] = None
+    modifiers: list = field(default_factory=list)
     # Players who owe a promotion after a knockout, turn player first. While
     # this is non-empty nothing else may happen, including ending the turn.
     pending_promotions: list = field(default_factory=list)
@@ -621,7 +930,22 @@ class GameState:
         return self.card(slot.top)
 
     def max_hp(self, slot: Slot) -> int:
-        return self.pokemon(slot).max_hp
+        """Printed HP, plus whatever is continuously adding to it.
+
+        Fighting Fury Belt style "+40 HP" has to land here rather than at the
+        knockout check, because everything that reads a Pokemon's HP - the
+        knockout test, the damage Change's maxHP, the client's originalValue -
+        has to agree on one number.
+        """
+        printed = self.pokemon(slot).max_hp
+        if not self.rules.static_effects:
+            return printed
+        return max(0, _static(self, STATIC_MAX_HP, {"slot": slot}, printed,
+                              sources=_slot_static_sources(self, slot)))
+
+    def slots(self) -> list:
+        """Every Pokemon in play, both players, Actives first."""
+        return self.players[0].in_play + self.players[1].in_play
 
     @property
     def over(self) -> bool:
@@ -700,6 +1024,42 @@ class Attack(Action):
 
 
 @dataclass(frozen=True)
+class PlayTrainer(Action):
+    """Play an Item, a Supporter or a Stadium from hand.
+
+    One action for three kinds because the *choice* the player makes is the
+    same one - "play this card" - and everything that differs afterwards is a
+    rule, not a decision. A Pokemon Tool is the exception: it names a target
+    at the moment it is played, so it gets AttachTool.
+    """
+    card: int
+
+
+@dataclass(frozen=True)
+class AttachTool(Action):
+    card: int          # the Tool, in hand
+    slot: int          # one of your Pokemon in play
+
+
+@dataclass(frozen=True)
+class UseAbility(Action):
+    """Activate a Pokemon's Ability. ability_id is its real abilityID GUID."""
+    slot: int
+    ability_id: str
+
+
+@dataclass(frozen=True)
+class Choose(Action):
+    """Answer the outstanding Choice. See PENDING CHOICES.
+
+    `picks` is a tuple of ids drawn from Choice.options; its length must fall
+    between the Choice's minimum and maximum. An empty tuple is the answer to
+    an optional choice ("you MAY reveal a Pokemon you find there").
+    """
+    picks: tuple = ()
+
+
+@dataclass(frozen=True)
 class Promote(Action):
     """Choose a new Active after the old one was knocked out."""
     slot: int
@@ -731,6 +1091,14 @@ CHANGE_TURN_START = "turnStart"
 CHANGE_TURN_END = "turnEnd"
 CHANGE_PHASE = "phase"
 CHANGE_GAME_OVER = "gameOver"
+CHANGE_PLAY = "play"          # a Trainer was played; detail names its kind
+CHANGE_TOOL = "tool"          # a Pokemon Tool attached to a Pokemon
+CHANGE_STADIUM = "stadium"    # a Stadium came into play or was replaced
+CHANGE_ABILITY = "ability"    # an Ability was activated
+CHANGE_HEAL = "heal"          # damage counters removed
+CHANGE_CHOICE = "choice"      # a Choice is now outstanding; detail is it
+CHANGE_CHOSE = "chose"        # ... and this is the answer that resolved it
+CHANGE_MODIFIER = "modifier"  # a temporary rules change started
 
 
 @dataclass(frozen=True)
@@ -883,6 +1251,176 @@ def damage_after_weakness(attacker: Card, defender: Card, base: int) -> int:
             damage -= defender.resistance_amount
 
     return max(0, damage)
+
+
+# --------------------------------------------------------------------------
+# continuous effects
+# --------------------------------------------------------------------------
+#
+# Two independent mechanisms, kept apart because they expire differently.
+#
+# Rules.static_effects is printed text that is true for as long as the card is
+# where it is: an Ability on a Pokemon in play, a Tool attached to it, the
+# Stadium on the board. It is re-read every time a number is needed and never
+# stored, so a Tool being discarded takes its effect with it automatically.
+#
+# GameState.modifiers is text that created a *temporary* change and then
+# finished - "during your opponent's next turn, damage done to this Pokemon is
+# reduced by 20". Those have to be remembered, and they carry their own expiry.
+
+def _slot_static_sources(state: GameState, slot: Slot) -> list:
+    """Registry keys that speak for this Pokemon: its Abilities, then Tools.
+
+    Attacks are excluded - an attack is not continuously true - and so is the
+    rest of the evolution stack, because only the top card's text is active.
+    """
+    keys = []
+    if not _abilities_active(state, slot):
+        pass
+    else:
+        keys += [a.ability_id for a in state.pokemon(slot).pokemon_abilities
+                 if a.ability_id]
+    keys += [state.cards[cid].archetype for cid in slot.tools]
+    return keys
+
+
+def _static(state: GameState, query: str, ctx: dict, value: int,
+            sources=()) -> int:
+    """Run `value` through every continuous effect that claims to speak.
+
+    The Stadium is always consulted, because a Stadium affects the board
+    rather than a Pokemon. Order between sources is not defined by the rules
+    and is not defined here either; every static effect in effects.py is an
+    addition or a floor, both of which commute.
+    """
+    registry = state.rules.static_effects
+    if not registry:
+        return value
+    keys = list(sources)
+    if state.stadium is not None:
+        keys.append(state.cards[state.stadium.card].archetype)
+    for key in keys:
+        hook = registry.get(key)
+        if hook is not None:
+            value = hook(query, state, ctx, value)
+    return value
+
+
+def _abilities_active(state: GameState, slot: Slot) -> bool:
+    """False while something (Hex Maniac) has switched this side's off."""
+    if not state.modifiers:
+        return True
+    owner = state.owner_of(slot.top)
+    return not any(m.kind == MOD_NO_ABILITIES
+                   and (m.player is None or m.player == owner)
+                   for m in _live_modifiers(state))
+
+
+def _live_modifiers(state: GameState) -> list:
+    return [m for m in state.modifiers if m.until_turn >= state.turn_number]
+
+
+def _modifier_total(state: GameState, kind: str, slot: Slot = None,
+                    player: int = None) -> int:
+    total = 0
+    for m in _live_modifiers(state):
+        if m.kind != kind:
+            continue
+        if m.slot is not None and (slot is None or m.slot != slot.slot_id):
+            continue
+        if m.slot is None and m.player is not None and m.player != player:
+            continue
+        total += m.amount
+    return total
+
+
+def _has_modifier(state: GameState, kind: str, slot: Slot = None,
+                  player: int = None) -> bool:
+    for m in _live_modifiers(state):
+        if m.kind != kind:
+            continue
+        if m.slot is not None:
+            if slot is not None and m.slot == slot.slot_id:
+                return True
+            continue
+        if m.player is None or m.player == player:
+            return True
+    return False
+
+
+def _add_modifier(state: GameState, changes: list, modifier: Modifier):
+    state.modifiers.append(modifier)
+    changes.append(Change(CHANGE_MODIFIER, player=modifier.player,
+                          slot=modifier.slot, card=modifier.source,
+                          amount=modifier.amount,
+                          detail={"kind": modifier.kind,
+                                  "untilTurn": modifier.until_turn,
+                                  **modifier.detail}))
+
+
+def retreat_cost(state: GameState, slot: Slot) -> int:
+    """The Pokemon's retreat cost in Energy symbols, after everything.
+
+    Public because both legal_actions() and _do_retreat() need the same
+    number, and a second copy of this arithmetic anywhere would eventually
+    disagree with the first.
+    """
+    cost = state.pokemon(slot).retreat_cost
+    cost = _static(state, STATIC_RETREAT_COST, {"slot": slot}, cost,
+                   sources=_slot_static_sources(state, slot))
+    cost += _modifier_total(state, MOD_RETREAT_COST, slot)
+    return max(0, cost)
+
+
+def _attack_damage(state: GameState, attacker_slot: Slot, defender_slot: Slot,
+                   base: int, ignore=()) -> int:
+    """Base damage through every layer, in the order the rules apply them.
+
+    Additions to the attacker's damage come first (they are printed as
+    "before applying Weakness and Resistance"), then Weakness and Resistance,
+    then reductions on the defender (printed as "after applying Weakness and
+    Resistance"). Getting that order wrong is worth 30 damage on a Weakness.
+
+    `ignore` is what the attack's own text says its damage is not affected by;
+    IGNORE_EFFECTS covers the reductions the defender put up, which is exactly
+    what "isn't affected by any effects on your opponent's Active Pokemon"
+    means and is why it does not also switch off Weakness.
+    """
+    attacker = state.pokemon(attacker_slot)
+    defender = state.pokemon(defender_slot)
+    owner = state.owner_of(attacker_slot.top)
+
+    base += _static(state, STATIC_DAMAGE_DEALT,
+                    {"slot": attacker_slot, "defender": defender_slot}, 0,
+                    sources=_slot_static_sources(state, attacker_slot))
+    base += _modifier_total(state, MOD_DAMAGE_DEALT, attacker_slot, owner)
+    if base <= 0:
+        return 0
+
+    # Weakness Policy and "this Pokemon has no Weakness until ..." both land
+    # here. Stripping the defender's weakness types and reusing the ordinary
+    # path is what keeps Resistance from drifting out of step with it.
+    no_weakness = (IGNORE_WEAKNESS in ignore
+                   or _has_modifier(state, MOD_NO_WEAKNESS, defender_slot)
+                   or _static(state, STATIC_NO_WEAKNESS, {"slot": defender_slot},
+                              0, sources=_slot_static_sources(state, defender_slot)))
+    effective = defender
+    if no_weakness:
+        effective = dataclasses.replace(effective, weakness_types=())
+    if IGNORE_RESISTANCE in ignore:
+        effective = dataclasses.replace(effective, resistance_type=None)
+    dealt = damage_after_weakness(attacker, effective, base)
+
+    if IGNORE_EFFECTS in ignore:
+        return max(0, dealt)
+    if _has_modifier(state, MOD_PREVENT_DAMAGE, defender_slot):
+        return 0
+    dealt -= _static(state, STATIC_DAMAGE_TAKEN,
+                     {"slot": defender_slot, "attacker": attacker_slot}, 0,
+                     sources=_slot_static_sources(state, defender_slot))
+    dealt -= _modifier_total(state, MOD_DAMAGE_TAKEN, defender_slot,
+                             state.owner_of(defender_slot.top))
+    return max(0, dealt)
 
 
 # --------------------------------------------------------------------------
@@ -1078,6 +1616,101 @@ def _check_game_end(state: GameState, changes: list) -> bool:
 
 
 # --------------------------------------------------------------------------
+# effect resolution
+# --------------------------------------------------------------------------
+#
+# The whole pending-choice machine is these five functions. See PENDING
+# CHOICES in the module docstring for the model and for the one rule an
+# effect has to follow.
+
+EFFECT_TRAINER = "trainer"
+EFFECT_ABILITY = "ability"
+EFFECT_ATTACK = "attack"
+
+AFTER_ATTACK = "attack"     # ... and then the attack ends the turn
+
+
+def _registry(state: GameState, kind: str) -> Mapping[str, Callable]:
+    return {EFFECT_TRAINER: state.rules.trainer_effects,
+            EFFECT_ABILITY: state.rules.ability_effects,
+            EFFECT_ATTACK: state.rules.attack_effects}[kind]
+
+
+def _new_ctx(state: GameState, kind: str, key: str, player: int, **extra) -> dict:
+    ctx = {"kind": kind, "key": key, "player": player, "source": None,
+           "slot": None, "slot_id": None, "answers": [], "data": {}}
+    ctx.update(extra)
+    return ctx
+
+
+def _rebuild_ctx(state: GameState, pending: Pending) -> dict:
+    """Reconstruct an effect's context after the state was deep-copied.
+
+    Everything durable lives on the Pending as ids; Slot objects are looked up
+    fresh, because the ones the effect saw last time belong to a state that no
+    longer exists. A slot that has since left play resolves to None rather
+    than raising - an effect that targeted something now gone has to cope, and
+    the alternative is a crash inside a live match.
+    """
+    def slot_of(slot_id):
+        found = state.slot(slot_id) if slot_id is not None else None
+        return found[1] if found else None
+
+    ctx = _new_ctx(state, pending.kind, pending.key, pending.player,
+                   source=pending.source, slot_id=pending.slot,
+                   slot=slot_of(pending.slot),
+                   answers=list(pending.answers), data=dict(pending.data))
+    if pending.kind == EFFECT_ATTACK:
+        attacker = slot_of(pending.data.get("attacker"))
+        ctx["attacker"] = attacker
+        ctx["defender"] = slot_of(pending.data.get("defender"))
+        ctx["damage"] = pending.data.get("damage", 0)
+        ctx["base"] = pending.data.get("base", 0)
+        ctx["attack"] = (state.pokemon(attacker).attack(pending.key)
+                         if attacker is not None else None)
+    return ctx
+
+
+def _start_effect(state: GameState, effect, ctx: dict, changes: list,
+                  after=None) -> bool:
+    """Call an effect once. True if it finished, False if it asked something."""
+    result = effect(state, ctx, changes)
+    if not isinstance(result, Choice):
+        return True
+    state.pending = Pending(
+        kind=ctx["kind"], key=ctx["key"], player=ctx["player"], choice=result,
+        answers=list(ctx["answers"]), source=ctx.get("source"),
+        slot=ctx.get("slot_id"), after=after, data=dict(ctx["data"]))
+    changes.append(Change(CHANGE_CHOICE, player=result.player,
+                          card=ctx.get("source"), detail=result.as_dict()))
+    return False
+
+
+def _finish_effect(state: GameState, after, changes: list):
+    """Everything that has to happen once an effect is fully resolved.
+
+    Knockouts are checked even for a Trainer, because a Trainer that moves
+    damage counters or shrinks a Pokemon's HP can knock one out, and a board
+    left holding a dead Pokemon is a worse bug than an unnecessary check.
+    """
+    if after == AFTER_ATTACK:
+        _resolve_knockouts(state, changes)
+        if not _check_game_end(state, changes):
+            _end_turn(state, changes)
+        return
+    _resolve_knockouts(state, changes)
+    _check_game_end(state, changes)
+
+
+def _run_effect(state: GameState, kind: str, key: str, ctx: dict,
+                changes: list, after=None):
+    """Start an effect and, if it does not suspend, close it out."""
+    effect = _registry(state, kind).get(key)
+    if effect is None or _start_effect(state, effect, ctx, changes, after):
+        _finish_effect(state, after, changes)
+
+
+# --------------------------------------------------------------------------
 # turn sequence
 # --------------------------------------------------------------------------
 
@@ -1088,6 +1721,15 @@ def _begin_turn(state: GameState, player: int, changes: list):
     ps.turns_taken += 1
     ps.energy_attached_this_turn = 0
     ps.retreats_this_turn = 0
+    ps.supporters_this_turn = 0
+    ps.stadiums_this_turn = 0
+    # Both sides' allowances reset, not just the turn player's: an Ability
+    # used on the opponent's turn spends this turn's use, and a Modifier that
+    # ran out has to stop being consulted or it never expires at all.
+    for slot in state.slots():
+        slot.abilities_used.clear()
+    state.modifiers = [m for m in state.modifiers
+                       if m.until_turn >= state.turn_number]
     changes.append(Change(CHANGE_TURN_START, player=player,
                           detail={"turn": state.turn_number,
                                   "playerTurn": ps.turns_taken}))
@@ -1273,9 +1915,18 @@ def _deal_prizes(state: GameState, changes: list):
 # --------------------------------------------------------------------------
 
 def players_to_act(state: GameState) -> list:
-    """Who legal_actions() will offer anything to, in priority order."""
+    """Who legal_actions() will offer anything to, in priority order.
+
+    An outstanding Choice outranks everything, including a promotion: an
+    effect stopped half way through and nothing else in the game may happen
+    until it is finished. It also need not be the turn player who answers -
+    Escape Rope asks the opponent first - so this reads the Choice's own
+    player rather than assuming.
+    """
     if state.over:
         return []
+    if state.pending is not None:
+        return [state.pending.choice.player]
     if state.pending_promotions:
         return [state.pending_promotions[0]]
     return [state.to_move]
@@ -1299,6 +1950,79 @@ def _can_evolve_onto(state: GameState, card: Card, slot: Slot,
     # Not the turn it was played. Setup placements carry setup_play_turn, so
     # this alone also forbids evolving on the first turn of the game.
     return slot.played_on_turn < ps.turns_taken
+
+
+def _can_play_trainer(state: GameState, player: int, card: Card) -> bool:
+    """Structural legality for an Item, a Supporter or a Stadium.
+
+    The first test is the important one: a Trainer with no entry in
+    Rules.trainer_effects is not offered at all. A Trainer whose text is not
+    implemented is not a partially-working card, it is a card that silently
+    does nothing, and letting a player spend their one Supporter of the turn
+    on nothing is worse than leaving it in hand. This is the same call the
+    engine already makes about Energy whose text it cannot read.
+    """
+    effect = state.rules.trainer_effects.get(card.guid)
+    if effect is None:
+        return False
+    # An effect may carry a `playable(state, player)` guard for the rule that
+    # a card you cannot do anything with cannot be played: no Potion with an
+    # undamaged board, no Switch with an empty bench. Without it a player would
+    # spend their one Supporter of the turn on nothing, and the AI would do it
+    # every turn because the card was offered.
+    guard = getattr(effect, "playable", None)
+    if guard is not None and not guard(state, player):
+        return False
+    ps = state.players[player]
+    if card.is_supporter:
+        return ps.supporters_this_turn < state.rules.supporters_per_turn
+    if card.is_stadium:
+        if ps.stadiums_this_turn >= state.rules.stadiums_per_turn:
+            return False
+        # A Stadium may not replace one of the same name - otherwise a player
+        # holding two copies could re-play it every turn to reset it.
+        return not (state.stadium is not None
+                    and state.card(state.stadium.card).name == card.name)
+    return card.is_item
+
+
+def _can_attach_tool(state: GameState, card: Card, slot: Slot) -> bool:
+    return (card.guid in state.rules.trainer_effects
+            and len(slot.tools) < state.rules.tools_per_pokemon)
+
+
+def _usable_abilities(state: GameState, player: int, slot: Slot) -> list:
+    """Abilities on this Pokemon that can be activated right now.
+
+    Nothing in the card data says whether an Ability is activated or passive,
+    so presence in Rules.ability_effects is the test. That means a passive
+    Ability is simply never registered there, and an unimplemented one is
+    never offered - which is the same "blank beats wrong" rule the Trainers
+    follow above.
+    """
+    if not state.rules.ability_effects or not _abilities_active(state, slot):
+        return []
+    return [a for a in state.pokemon(slot).pokemon_abilities
+            if a.ability_id in state.rules.ability_effects
+            and a.ability_id not in slot.abilities_used]
+
+
+def _choice_actions(state: GameState) -> list:
+    """Every answer to the outstanding Choice, up to the enumeration cap.
+
+    Combinations are produced smallest first so an optional choice always
+    offers "decline" even when the cap truncates the rest - declining must
+    never become impossible because the option list was long.
+    """
+    choice = state.pending.choice
+    cap = state.rules.max_enumerated_choices
+    out = []
+    for size in range(choice.minimum, choice.maximum + 1):
+        for combo in itertools.combinations(choice.options, size):
+            out.append(Choose(choice.player, combo))
+            if len(out) >= cap:
+                return out
+    return out
 
 
 def _can_attack_now(state: GameState, player: int) -> bool:
@@ -1325,6 +2049,9 @@ def legal_actions(state: GameState, player: int) -> list:
 
     ps = state.players[player]
     actions = []
+
+    if state.pending is not None:
+        return _choice_actions(state)
 
     if state.pending_promotions and state.pending_promotions[0] == player:
         return [Promote(player, slot.slot_id) for slot in ps.bench]
@@ -1355,14 +2082,26 @@ def legal_actions(state: GameState, player: int) -> list:
             if ps.energy_attached_this_turn < state.rules.energy_attachments_per_turn:
                 actions += [AttachEnergy(player, cid, slot.slot_id)
                             for slot in in_play]
+        elif card.is_trainer:
+            if card.is_tool:
+                actions += [AttachTool(player, cid, slot.slot_id)
+                            for slot in in_play
+                            if _can_attach_tool(state, card, slot)]
+            elif _can_play_trainer(state, player, card):
+                actions.append(PlayTrainer(player, cid))
+
+    for slot in in_play:
+        actions += [UseAbility(player, slot.slot_id, ability.ability_id)
+                    for ability in _usable_abilities(state, player, slot)]
 
     if (ps.active is not None and ps.bench
             and ps.retreats_this_turn < state.rules.retreats_per_turn
             and ASLEEP not in ps.active.conditions
             and PARALYZED not in ps.active.conditions
+            and not _has_modifier(state, MOD_NO_RETREAT, ps.active, player)
             and not (state.rules.confusion_blocks_retreat
                      and CONFUSED in ps.active.conditions)):
-        cost = state.pokemon(ps.active).retreat_cost
+        cost = retreat_cost(state, ps.active)
         payments = _retreat_payments(state, ps.active, cost)
         actions += [Retreat(player, slot.slot_id, payment)
                     for slot in ps.bench for payment in payments]
@@ -1401,6 +2140,9 @@ def apply(state: GameState, action: Action):
     if player not in expected:
         raise IllegalAction("it is not player %d's turn to act (expected %r)"
                             % (player, expected))
+    if state.pending is not None and not isinstance(action, Choose):
+        raise IllegalAction("a choice is outstanding: %s"
+                            % state.pending.choice.prompt)
 
     handler = _HANDLERS.get(type(action))
     if handler is None:
@@ -1499,20 +2241,7 @@ def _do_evolve(state, action, changes):
              "%s cannot evolve %s this turn"
              % (card.name, state.pokemon(slot).name))
 
-    ps.hand.remove(action.card)
-    # Damage stays on the Pokemon through evolution; Special Conditions do not.
-    _clear_conditions(state, slot, changes, "evolved")
-    previous = slot.top
-    slot.stack.append(action.card)
-    slot.played_on_turn = ps.turns_taken
-    changes.append(Change(CHANGE_MOVE, player=action.player, card=action.card,
-                          slot=slot.slot_id, from_zone=ZONE_HAND,
-                          to_zone=ZONE_ACTIVE if ps.active is slot else ZONE_BENCH))
-    changes.append(Change(CHANGE_EVOLVE, player=action.player, card=action.card,
-                          slot=slot.slot_id,
-                          detail={"from": previous, "name": card.name,
-                                  "damage": slot.damage,
-                                  "maxHP": card.max_hp}))
+    evolve_slot(state, action.player, action.card, slot, changes)
 
 
 def _do_attach_energy(state, action, changes):
@@ -1547,11 +2276,13 @@ def _do_retreat(state, action, changes):
     _require(not (state.rules.confusion_blocks_retreat
                   and CONFUSED in active.conditions),
              "a Confused Pokemon cannot retreat under these rules")
+    _require(not _has_modifier(state, MOD_NO_RETREAT, active, action.player),
+             "this Pokemon cannot retreat right now")
 
     incoming = _own_slot(state, action.player, action.slot)
     _require(incoming in ps.bench, "slot %r is not on the bench" % (action.slot,))
 
-    cost = state.pokemon(active).retreat_cost
+    cost = retreat_cost(state, active)
     payment = list(action.energy)
     _require(len(set(payment)) == len(payment), "duplicate Energy in payment")
     for cid in payment:
@@ -1616,24 +2347,192 @@ def _do_attack(state, action, changes):
 
     defender_slot = opponent.active
     defender = state.pokemon(defender_slot)
-    dealt = damage_after_weakness(attacker, defender, attack.damage)
+
+    ctx = _new_ctx(state, EFFECT_ATTACK, attack.ability_id, action.player,
+                   attack=attack, attacker=attacker_slot,
+                   defender=defender_slot, slot_id=attacker_slot.slot_id,
+                   slot=attacker_slot)
+    ctx["data"]["attacker"] = attacker_slot.slot_id
+    ctx["data"]["defender"] = defender_slot.slot_id
+
+    # EXTENSION POINT 1: what the printed "30+" / "40x" / "80-" actually
+    # resolves to for this use of the attack. Runs before the damage lands,
+    # because an "x" attack whose flips all came up tails does zero and there
+    # is no way to un-deal 40. Coin flips it makes go in ctx["data"] so the
+    # after-effect below can read the same result rather than flipping again.
+    base = attack.damage
+    scale = state.rules.attack_damage.get(attack.ability_id)
+    if scale is not None:
+        base = max(0, int(scale(state, ctx, changes)))
+    ctx["base"] = base
+    ctx["data"]["base"] = base
+
+    # An attack_damage hook may also declare what its damage ignores, by
+    # writing IGNORE_* strings into ctx["data"]["ignore"]. It is set there
+    # rather than returned because the hook's return value is the number.
+    dealt = _attack_damage(state, attacker_slot, defender_slot, base,
+                           ignore=tuple(ctx["data"].get("ignore") or ()))
     _apply_damage(state, defender_slot, dealt, changes,
                   {"abilityID": attack.ability_id,
-                   "baseDamage": attack.damage,
+                   "baseDamage": base,
+                   "printedDamage": attack.damage,
                    "weakness": bool(set(attacker.types) & set(defender.weakness_types)),
                    "resistance": bool(defender.resistance_type
                                       and defender.resistance_type in attacker.types)})
+    ctx["damage"] = dealt
+    ctx["data"]["damage"] = dealt
 
-    # EXTENSION POINT: everything the attack's game text says happens here.
-    effect = state.rules.attack_effects.get(attack.ability_id)
-    if effect is not None:
-        effect(state, {"player": action.player, "attack": attack,
-                       "attacker": attacker_slot, "defender": defender_slot,
-                       "damage": dealt}, changes)
+    # EXTENSION POINT 2: everything else the attack's game text says.
+    _run_effect(state, EFFECT_ATTACK, attack.ability_id, ctx, changes,
+                after=AFTER_ATTACK)
 
-    _resolve_knockouts(state, changes)
-    if not _check_game_end(state, changes):
-        _end_turn(state, changes)
+
+def _do_play_trainer(state, action, changes):
+    """Play an Item, a Supporter or a Stadium.
+
+    The card leaves the hand before its own effect runs, which matters for
+    "discard 2 cards from your hand" - Ultra Ball is not one of the two. Items
+    and Supporters go straight to the discard rather than waiting for the
+    effect to finish; that is one step earlier than the printed rules and is
+    visible only to an effect that reads its own owner's discard pile, none of
+    which exist (Energy Retrieval and VS Seeker both read it, and neither can
+    name itself: an Item is not a basic Energy and is not a Supporter).
+    """
+    ps = state.players[action.player]
+    _require(state.phase == PHASE_MAIN, "not the main phase")
+    card = _hand_card(state, action.player, action.card)
+    _require(card.is_trainer, "%s is not a Trainer card" % card.name)
+    _require(not card.is_tool,
+             "%s is a Pokemon Tool: play it with AttachTool" % card.name)
+    _require(card.guid in state.rules.trainer_effects,
+             "%s has no implemented effect" % card.name)
+    _require(_can_play_trainer(state, action.player, card),
+             "%s cannot be played right now" % card.name)
+
+    ps.hand.remove(action.card)
+    changes.append(Change(CHANGE_PLAY, player=action.player, card=action.card,
+                          detail={"kind": card.trainer_kind, "name": card.name}))
+
+    if card.is_stadium:
+        _place_stadium(state, action.player, action.card, changes)
+        ps.stadiums_this_turn += 1
+    else:
+        if card.is_supporter:
+            ps.supporters_this_turn += 1
+        ps.discard.append(action.card)
+        changes.append(Change(CHANGE_MOVE, player=action.player,
+                              card=action.card, from_zone=ZONE_HAND,
+                              to_zone=ZONE_DISCARD))
+
+    ctx = _new_ctx(state, EFFECT_TRAINER, card.guid, action.player,
+                   source=action.card)
+    _run_effect(state, EFFECT_TRAINER, card.guid, ctx, changes)
+
+
+def _place_stadium(state, player, cid, changes):
+    """Put a Stadium into play, discarding whatever it replaced.
+
+    The old Stadium goes to the discard pile of whoever PLAYED it, not of
+    whoever replaced it - a Stadium never changes owner, it only changes who
+    it is helping.
+    """
+    if state.stadium is not None:
+        old = state.stadium
+        state.players[old.owner].discard.append(old.card)
+        changes.append(Change(CHANGE_MOVE, player=old.owner, card=old.card,
+                              from_zone=ZONE_STADIUM, to_zone=ZONE_DISCARD))
+    state.stadium = StadiumInPlay(card=cid, owner=player)
+    changes.append(Change(CHANGE_MOVE, player=player, card=cid,
+                          from_zone=ZONE_HAND, to_zone=ZONE_STADIUM))
+    changes.append(Change(CHANGE_STADIUM, player=player, card=cid,
+                          detail={"name": state.card(cid).name}))
+
+
+def _do_attach_tool(state, action, changes):
+    ps = state.players[action.player]
+    _require(state.phase == PHASE_MAIN, "not the main phase")
+    card = _hand_card(state, action.player, action.card)
+    _require(card.is_tool, "%s is not a Pokemon Tool" % card.name)
+    _require(card.guid in state.rules.trainer_effects,
+             "%s has no implemented effect" % card.name)
+    slot = _own_slot(state, action.player, action.slot)
+    _require(len(slot.tools) < state.rules.tools_per_pokemon,
+             "%s already has a Pokemon Tool attached" % state.pokemon(slot).name)
+
+    ps.hand.remove(action.card)
+    slot.tools.append(action.card)
+    changes.append(Change(CHANGE_MOVE, player=action.player, card=action.card,
+                          slot=slot.slot_id, from_zone=ZONE_HAND,
+                          to_zone=ZONE_ACTIVE if ps.active is slot else ZONE_BENCH))
+    changes.append(Change(CHANGE_TOOL, player=action.player, card=action.card,
+                          slot=slot.slot_id, detail={"name": card.name}))
+
+    # A Tool's registry entry is its ON-ATTACH effect, and most Tools have
+    # none - their text is continuous and lives in Rules.static_effects. An
+    # entry that is only there to make the card playable does nothing here.
+    ctx = _new_ctx(state, EFFECT_TRAINER, card.guid, action.player,
+                   source=action.card, slot=slot, slot_id=slot.slot_id)
+    _run_effect(state, EFFECT_TRAINER, card.guid, ctx, changes)
+
+
+def _do_use_ability(state, action, changes):
+    _require(state.phase == PHASE_MAIN, "not the main phase")
+    slot = _own_slot(state, action.player, action.slot)
+    _require(_abilities_active(state, slot),
+             "Abilities are switched off right now")
+    ability = next((a for a in state.pokemon(slot).pokemon_abilities
+                    if a.ability_id == action.ability_id), None)
+    _require(ability is not None, "%s has no Ability %r"
+             % (state.pokemon(slot).name, action.ability_id))
+    _require(action.ability_id in state.rules.ability_effects,
+             "%s is not an implemented Ability" % ability.title)
+    _require(action.ability_id not in slot.abilities_used,
+             "%s has already been used this turn" % ability.title)
+
+    slot.abilities_used.add(action.ability_id)
+    changes.append(Change(CHANGE_ABILITY, player=action.player,
+                          slot=slot.slot_id, card=slot.top,
+                          detail={"abilityID": ability.ability_id,
+                                  "title": ability.title}))
+    ctx = _new_ctx(state, EFFECT_ABILITY, action.ability_id, action.player,
+                   slot=slot, slot_id=slot.slot_id, source=slot.top)
+    _run_effect(state, EFFECT_ABILITY, action.ability_id, ctx, changes)
+
+
+def _do_choose(state, action, changes):
+    """Answer the outstanding Choice and let the effect run on.
+
+    Validation is deliberately from scratch rather than "is this one of the
+    actions legal_actions() offered": that list is capped, and an answer it
+    declined to enumerate is still a legal answer.
+    """
+    pending = state.pending
+    _require(pending is not None, "nothing is waiting on a choice")
+    choice = pending.choice
+    _require(action.player == choice.player,
+             "the choice %r belongs to player %d" % (choice.prompt, choice.player))
+
+    picks = tuple(action.picks)
+    _require(len(set(picks)) == len(picks), "the same option was picked twice")
+    for pick in picks:
+        _require(pick in choice.options,
+                 "%r is not an option for %r" % (pick, choice.prompt))
+    _require(choice.minimum <= len(picks) <= choice.maximum,
+             "%r takes between %d and %d picks, got %d"
+             % (choice.prompt, choice.minimum, choice.maximum, len(picks)))
+
+    changes.append(Change(CHANGE_CHOSE, player=action.player,
+                          detail={"prompt": choice.prompt,
+                                  "picks": list(picks),
+                                  "optionKind": choice.option_kind}))
+
+    state.pending = None
+    pending.answers.append(picks)
+    ctx = _rebuild_ctx(state, pending)
+    effect = _registry(state, pending.kind).get(pending.key)
+    if effect is None or _start_effect(state, effect, ctx, changes,
+                                       pending.after):
+        _finish_effect(state, pending.after, changes)
 
 
 def _do_promote(state, action, changes):
@@ -1675,6 +2574,10 @@ _HANDLERS = {
     PlayBasic: _do_play_basic,
     Evolve: _do_evolve,
     AttachEnergy: _do_attach_energy,
+    PlayTrainer: _do_play_trainer,
+    AttachTool: _do_attach_tool,
+    UseAbility: _do_use_ability,
+    Choose: _do_choose,
     Retreat: _do_retreat,
     Attack: _do_attack,
     Promote: _do_promote,
@@ -1683,30 +2586,211 @@ _HANDLERS = {
 
 
 # --------------------------------------------------------------------------
+# EFFECT PRIMITIVES
+# --------------------------------------------------------------------------
+#
+# The supported surface for an effect in Rules.trainer_effects,
+# ability_effects or attack_effects. Everything here mutates the state it is
+# given and appends to `changes`; effects should reach for these rather than
+# poking at PlayerState lists, because these emit the Changes the protocol
+# layer needs and the lists do not.
+
+ZONE_LISTS = {ZONE_DECK: "deck", ZONE_HAND: "hand", ZONE_DISCARD: "discard",
+              ZONE_PRIZES: "prizes", ZONE_LOST: "lost"}
+
+
+def zone_of(state: GameState, cid: int):
+    """(player, zone, list) for a loose card, or None if it is in play.
+
+    Cards attached to or stacked on a Pokemon are not in a zone list, and
+    deliberately return None: an effect that wants one of those has to go
+    through the Slot, where the accounting for evolution stacks and Energy
+    lives.
+    """
+    owner = state.owner_of(cid)
+    ps = state.players[owner]
+    for zone, attr in ZONE_LISTS.items():
+        pile = getattr(ps, attr)
+        if cid in pile:
+            return owner, zone, pile
+    return None
+
+
+def move_card(state: GameState, cid: int, to_zone: str, changes: list,
+              detail=None) -> bool:
+    """Move a loose card between its owner's zones. False if it was in play.
+
+    Appends to the destination, which for ZONE_DECK means the BOTTOM - a
+    "put it on top of your deck" effect has to insert at 0 itself and say so.
+    """
+    found = zone_of(state, cid)
+    if found is None:
+        return False
+    owner, from_zone, pile = found
+    if from_zone == to_zone:
+        return True
+    pile.remove(cid)
+    getattr(state.players[owner], ZONE_LISTS[to_zone]).append(cid)
+    changes.append(Change(CHANGE_MOVE, player=owner, card=cid,
+                          from_zone=from_zone, to_zone=to_zone,
+                          detail=dict(detail or {})))
+    return True
+
+
+def heal(state: GameState, slot: Slot, amount: int, changes: list) -> int:
+    """Remove up to `amount` damage. Returns how much actually came off."""
+    healed = min(slot.damage, max(0, amount))
+    if not healed:
+        return 0
+    slot.damage -= healed
+    changes.append(Change(CHANGE_HEAL, player=state.owner_of(slot.top),
+                          slot=slot.slot_id, amount=healed,
+                          detail={"total": slot.damage,
+                                  "maxHP": state.max_hp(slot)}))
+    return healed
+
+
+def discard_attached(state: GameState, slot: Slot, cids, changes: list):
+    """Send attached Energy or Tools from a Pokemon to its owner's discard."""
+    owner = state.owner_of(slot.top)
+    ps = state.players[owner]
+    zone = ZONE_ACTIVE if ps.active is slot else ZONE_BENCH
+    for cid in list(cids):
+        if cid in slot.energy:
+            slot.energy.remove(cid)
+        elif cid in slot.tools:
+            slot.tools.remove(cid)
+        else:
+            continue
+        ps.discard.append(cid)
+        changes.append(Change(CHANGE_MOVE, player=owner, card=cid,
+                              slot=slot.slot_id, from_zone=zone,
+                              to_zone=ZONE_DISCARD))
+
+
+def bench_card(state: GameState, player: int, cid: int, changes: list) -> bool:
+    """Put a Basic straight onto the bench from wherever it currently is.
+
+    Nest Ball takes one out of the deck and Revive out of the discard; both
+    skip the hand entirely, which is why this is not PlayBasic.
+    """
+    ps = state.players[player]
+    if len(ps.bench) >= state.rules.bench_size:
+        return False
+    found = zone_of(state, cid)
+    if found is None:
+        return False
+    _, from_zone, pile = found
+    pile.remove(cid)
+    slot = _new_slot(state, cid, ps.turns_taken)
+    ps.bench.append(slot)
+    changes.append(Change(CHANGE_MOVE, player=player, card=cid,
+                          slot=slot.slot_id, from_zone=from_zone,
+                          to_zone=ZONE_BENCH))
+    return True
+
+
+def evolve_slot(state: GameState, player: int, cid: int, slot: Slot,
+                changes: list):
+    """Put an evolution card from hand onto a Pokemon in play.
+
+    Shared with Rare Candy, which skips the stage check but does exactly this
+    afterwards - the timing rules that _can_evolve_onto() enforces are the
+    caller's business, and the mechanics of the stack are this function's.
+    """
+    ps = state.players[player]
+    ps.hand.remove(cid)
+    # Damage stays on the Pokemon through evolution; Special Conditions do not.
+    _clear_conditions(state, slot, changes, "evolved")
+    previous = slot.top
+    slot.stack.append(cid)
+    slot.played_on_turn = ps.turns_taken
+    slot.abilities_used.clear()   # a different Pokemon, with its own allowance
+    card = state.card(cid)
+    changes.append(Change(CHANGE_MOVE, player=player, card=cid,
+                          slot=slot.slot_id, from_zone=ZONE_HAND,
+                          to_zone=ZONE_ACTIVE if ps.active is slot else ZONE_BENCH))
+    changes.append(Change(CHANGE_EVOLVE, player=player, card=cid,
+                          slot=slot.slot_id,
+                          detail={"from": previous, "name": card.name,
+                                  "damage": slot.damage,
+                                  "maxHP": card.max_hp}))
+
+
+def switch_active(state: GameState, player: int, slot_id: int, changes: list):
+    """Promote a benched Pokemon with no retreat cost and no once-per-turn.
+
+    This is what Switch, Escape Rope, Lysandre and every "switch" attack do.
+    It is not Retreat: no Energy is paid and the turn's retreat allowance is
+    untouched. Special Conditions still come off, because they come off any
+    time a Pokemon leaves the Active spot.
+    """
+    ps = state.players[player]
+    incoming = next((s for s in ps.bench if s.slot_id == slot_id), None)
+    if incoming is None or ps.active is None:
+        return False
+    outgoing = ps.active
+    _clear_conditions(state, outgoing, changes, "switched")
+    ps.bench.remove(incoming)
+    ps.bench.append(outgoing)
+    ps.active = incoming
+    changes.append(Change(CHANGE_PROMOTE, player=player, slot=incoming.slot_id,
+                          card=incoming.top, from_zone=ZONE_BENCH,
+                          to_zone=ZONE_ACTIVE,
+                          detail={"switched": outgoing.slot_id}))
+    return True
+
+
+# Re-exported under names an effect author would look for. The underscored
+# originals stay where they are: they are called from inside the turn machine,
+# which predates the idea of an effect calling them.
+flip_coin = _flip
+draw_cards = _draw
+shuffle_deck = _shuffle_deck
+apply_damage = _apply_damage
+add_condition = _add_condition
+clear_conditions = _clear_conditions
+add_modifier = _add_modifier
+
+
+# --------------------------------------------------------------------------
 # EXTENSION POINTS
 # --------------------------------------------------------------------------
 #
-# The four places this engine expects to grow, in the order they will hurt:
+# Five registries on Rules, all empty here, all populated by effects.py:
 #
-# 1. Rules.attack_effects - abilityID -> callable, invoked in _do_attack after
-#    damage. This is where "the Defending Pokemon is now Asleep", bench damage,
-#    energy discard, and the "30+" / "20x" damage modifiers go. The callable
-#    already receives the attacker and defender Slots and the damage dealt, and
-#    _add_condition / _apply_damage / _take_prize are the primitives it needs.
-#    Ability.has_unimplemented_text marks every attack currently under-resolved.
+#     attack_damage    abilityID     -> f(state, ctx) -> int
+#     attack_effects   abilityID     -> f(state, ctx, changes) -> Choice|None
+#     trainer_effects  archetype GUID-> f(state, ctx, changes) -> Choice|None
+#     ability_effects  abilityID     -> f(state, ctx, changes) -> Choice|None
+#     static_effects   either        -> f(query, state, ctx, value) -> value
 #
-# 2. Trainers. legal_actions() never offers a Trainer card, and there is no
-#    PlayTrainer action, because a Trainer with no text is not a partial
-#    implementation of anything - it is a card that does nothing. Adding them
-#    means a PlayTrainer action, a per-turn Supporter flag on PlayerState, a
-#    Stadium zone on GameState, and a registry parallel to attack_effects.
+# ctx is a dict; the keys every effect gets are "player", "kind", "key",
+# "source" (the cid played, if any), "slot"/"slot_id" (the source Pokemon, if
+# any), "answers" (a list of pick-tuples, one per Choice already answered) and
+# "data" (scratch that survives suspension). An attack effect additionally gets
+# "attack", "attacker", "defender", "base" and "damage".
 #
-# 3. PokeAbility / PokePower / PokeBody. Same shape as attack effects, but they
-#    need a trigger model (once per turn, on-play, continuous) rather than a
-#    single call site. Card.abilities already carries them, parsed and inert.
+# What is still missing, in the order it will hurt:
 #
-# 4. Prize counts and prize choice. Rules.prizes_per_knockout is a flat number
+# 1. Triggered abilities. Everything here is either activated (a player says
+#    so) or continuous (a number is read through it). Nothing fires on an
+#    event - "when this Pokemon is Knocked Out", "when you attach an Energy",
+#    Rocky Helmet's counter-damage. That needs the knockout and attach paths to
+#    call a trigger registry, and it is the single biggest remaining gap.
+#
+# 2. Prize counts and prize choice. Rules.prizes_per_knockout is a flat number
 #    because carddata has no verified "has a rule box" attribute; when one is
 #    identified it becomes a lookup on the knocked-out Card. Cards that let a
-#    player choose which prize to take need a real action, which means
-#    _take_prize gains a pending-choice state the way promotions have one.
+#    player choose which prize to take can now use the Choice machinery -
+#    _take_prize is the only thing that has to change.
+#
+# 3. Choices that are not a pick from a list: ordering the top five cards of
+#    your deck, naming a card, choosing an amount. Choice.options is a flat
+#    tuple and every one of those needs a different shape. CHOICE_OPTION with
+#    encoded strings covers the small cases and nothing more.
+#
+# 4. Two outstanding choices at once. GameState.pending is one slot, so an
+#    effect that would ask both players simultaneously has to ask them in
+#    order. Every card in effects.py does ask in order (that is the printed
+#    rule), but a card that genuinely needs both at once cannot be written.

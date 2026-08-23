@@ -18,6 +18,7 @@ prove that attribute 200490 really is HP.
 Run: python -m unittest discover -s tests
 """
 
+import copy
 import itertools
 import json
 import os
@@ -61,7 +62,8 @@ def _archetype(attrs):
 
 def _pokemon(name, hp, stage="Basic", types=("Colorless",), attacks=(),
              retreat=0, weakness=None, weakness_op="x", weakness_amount=2,
-             resistance=None, resistance_amount=20, evolves_from=None):
+             resistance=None, resistance_amount=20, evolves_from=None,
+             abilities=()):
     attrs = [
         _s(engine.ATTR_CARD_TYPES, "Pokemon"),
         _s(engine.ATTR_CARD_NAME, name),
@@ -84,9 +86,12 @@ def _pokemon(name, hp, stage="Basic", types=("Colorless",), attacks=(),
         attrs.append(_i(engine.ATTR_RESISTANCE_AMOUNT, resistance_amount))
     if evolves_from:
         attrs.append(_s(engine.ATTR_EVOLVES_FROM, evolves_from))
-    if attacks:
+    # Attacks and Abilities share ATTR_ABILITIES in the real data - they are
+    # told apart only by abilityType - so the fixture builds one array too.
+    entries = list(attacks) + list(abilities)
+    if entries:
         attrs.append({"n": engine.ATTR_ABILITIES, "t": 1, "v": {"a": [
-            {"s": json.dumps(a), "t": 8} for a in attacks], "t": 1}})
+            {"s": json.dumps(a), "t": 8} for a in entries], "t": 1}})
     return _archetype(attrs)
 
 
@@ -109,12 +114,26 @@ def _energy(name, options, basic=True):
     return _archetype(attrs)
 
 
-def _trainer(name, kind="Item"):
-    return _archetype([
+def _power(ability_id, title="", game_text="", kind="PokeAbility"):
+    """A non-attack Ability, in the shape ATTR_ABILITIES really uses."""
+    return {"cost": {}, "damage": 0, "title": title or ability_id,
+            "gameText": game_text, "abilityID": ability_id,
+            "amountOperator": "", "abilityType": kind,
+            "conditionExceptions": []}
+
+
+def _trainer(name, kind="Item", game_text=""):
+    attrs = [
         _s(engine.ATTR_CARD_TYPES, "TrainerCard"),
         _s(engine.ATTR_CARD_NAME, name),
         _s(engine.ATTR_TRAINER_TYPES, kind),
-    ])
+    ]
+    if game_text:
+        # Stored the same way the real export stores it: a JSON string
+        # wrapping a $$$-delimited localization key, never English.
+        attrs.append({"n": engine.ATTR_GAME_TEXT,
+                      "v": {"s": json.dumps("$$$%s$$$" % game_text), "t": 8}})
+    return _archetype(attrs)
 
 
 # Attack ids are readable strings rather than GUIDs so a failure message says
@@ -126,6 +145,7 @@ FLARE = "atk-flare"
 SMASH = "atk-smash"
 ZAP = "atk-zap"
 NOTHING = "atk-nothing"
+DIG = "abl-dig"        # a PokeAbility, not an attack
 
 ARCHETYPES = {
     "Pipsqueak": _pokemon("Pipsqueak", 60, retreat=1, weakness="Fighting",
@@ -161,7 +181,25 @@ ARCHETYPES = {
                                    ("Fighting",), ("Psychic",)], basic=False),
     # A special Energy whose text is unimplemented provides nothing.
     "Dud": _energy("Dud", [()], basic=False),
-    "Potion": _trainer("Potion"),
+    # Big enough to survive every test attack, with both a Weakness and a
+    # Resistance, so the two can be told apart in one assertion.
+    "Whale": _pokemon("Whale", 200, types=("Water",), retreat=4,
+                      weakness="Fighting", resistance="Lightning",
+                      attacks=[_attack(NOTHING, {}, 0)]),
+    "Potion": _trainer("Potion", game_text="test.potion.gametext"),
+    "Cheerful": _trainer("Cheerful", kind="Supporter"),
+    "Arena": _trainer("Arena", kind="Stadium"),
+    "OtherArena": _trainer("OtherArena", kind="Stadium"),
+    "Bandana": _trainer("Bandana", kind="PokemonTool"),
+    # A Pokemon carrying both an attack and a non-attack Ability, which is
+    # the shape that proves legal_actions() tells the two apart.
+    "Burrower": _pokemon("Burrower", 70, retreat=2,
+                         attacks=[_attack(TACKLE, {"Colorless": 1}, 10)],
+                         abilities=[_power(DIG, "Dig")]),
+    "Digger": _pokemon("Digger", 110, stage="Stage1", evolves_from="Burrower",
+                       retreat=2,
+                       attacks=[_attack(CHOMP, {"Colorless": 2}, 60)],
+                       abilities=[_power(DIG, "Dig")]),
 }
 
 DB = engine.CardDB.from_archetypes(ARCHETYPES.values())
@@ -1198,6 +1236,630 @@ class RandomGameTests(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------
+# Trainers: the structural rules
+# --------------------------------------------------------------------------
+#
+# These test the ENGINE, not any card, so every effect below is a stub that
+# records that it ran. What is under test is "one Supporter a turn", "a
+# Stadium replaces the Stadium in play", "one Tool per Pokemon" - rules that
+# are the same for every card and have to hold whatever the card does.
+
+
+def _stub(record, name, result=None):
+    """An effect that notes it ran and optionally returns a Choice."""
+    def effect(state, ctx, changes):
+        record.append((name, ctx["player"], tuple(ctx["answers"])))
+        return result(state, ctx, changes) if callable(result) else result
+    return effect
+
+
+def with_trainers(**by_name):
+    """A Rules whose trainer_effects are the given stubs, keyed by GUID."""
+    return engine.Rules(trainer_effects={GUID[n]: e for n, e in by_name.items()})
+
+
+class TrainerStructureTests(unittest.TestCase):
+
+    def setUp(self):
+        self.log = []
+
+    def board(self, rules):
+        state = make_state(rules=rules)
+        place(state, 0, "Pipsqueak")
+        place(state, 1, "Pipsqueak")
+        return state
+
+    def test_an_unimplemented_trainer_is_never_offered_or_accepted(self):
+        # DEFAULT_RULES has an empty registry, so every Trainer is inert.
+        state = self.board(engine.DEFAULT_RULES)
+        cid = to_hand(state, 0, "Potion")
+        self.assertEqual(actions_of(state, 0, engine.PlayTrainer), [])
+        with self.assertRaises(engine.IllegalAction):
+            engine.apply(state, engine.PlayTrainer(0, cid))
+
+    def test_an_item_resolves_and_goes_to_the_discard(self):
+        state = self.board(with_trainers(Potion=_stub(self.log, "potion")))
+        cid = to_hand(state, 0, "Potion")
+        self.assertIn(engine.PlayTrainer(0, cid), engine.legal_actions(state, 0))
+        state, changes = engine.apply(state, engine.PlayTrainer(0, cid))
+        self.assertEqual(self.log, [("potion", 0, ())])
+        self.assertEqual(state.players[0].discard, [cid])
+        self.assertNotIn(cid, state.players[0].hand)
+        self.assertEqual(len(kinds(changes, engine.CHANGE_PLAY)), 1)
+
+    def test_items_are_unlimited_but_supporters_are_once_a_turn(self):
+        rules = with_trainers(Potion=_stub(self.log, "item"),
+                              Cheerful=_stub(self.log, "supporter"))
+        state = self.board(rules)
+        for _ in range(3):
+            state, _ = engine.apply(state, engine.PlayTrainer(
+                0, to_hand(state, 0, "Potion")))
+        self.assertEqual(len(self.log), 3)
+
+        first = to_hand(state, 0, "Cheerful")
+        second = to_hand(state, 0, "Cheerful")
+        state, _ = engine.apply(state, engine.PlayTrainer(0, first))
+        self.assertEqual(state.players[0].supporters_this_turn, 1)
+        self.assertNotIn(engine.PlayTrainer(0, second),
+                         engine.legal_actions(state, 0))
+        with self.assertRaises(engine.IllegalAction):
+            engine.apply(state, engine.PlayTrainer(0, second))
+
+        # ... and the allowance comes back next turn.
+        state, _ = engine.apply(state, engine.Pass(0))
+        state, _ = engine.apply(state, engine.Pass(1))
+        self.assertEqual(state.players[0].supporters_this_turn, 0)
+        self.assertIn(engine.PlayTrainer(0, second),
+                      engine.legal_actions(state, 0))
+
+    def test_a_trainer_cannot_be_played_out_of_the_main_phase(self):
+        rules = with_trainers(Potion=_stub(self.log, "item"))
+        state = engine.GameState(db=DB, rules=rules, rng=ScriptedRandom(),
+                                 players=[engine.PlayerState(index=0),
+                                          engine.PlayerState(index=1)])
+        cid = to_hand(state, 0, "Potion")
+        self.assertEqual(state.phase, engine.PHASE_SETUP)
+        with self.assertRaises(engine.IllegalAction):
+            engine.apply(state, engine.PlayTrainer(0, cid))
+
+    def test_a_playable_guard_hides_a_card_that_would_do_nothing(self):
+        effect = _stub(self.log, "item")
+        effect.playable = lambda state, player: state.players[player].hand[1:] != []
+        state = self.board(with_trainers(Potion=effect))
+        only = to_hand(state, 0, "Potion")
+        self.assertEqual(actions_of(state, 0, engine.PlayTrainer), [])
+        with self.assertRaises(engine.IllegalAction):
+            engine.apply(state, engine.PlayTrainer(0, only))
+        to_hand(state, 0, "FireEnergy")
+        self.assertIn(engine.PlayTrainer(0, only), engine.legal_actions(state, 0))
+
+
+class StadiumTests(unittest.TestCase):
+
+    def setUp(self):
+        self.log = []
+        self.rules = with_trainers(Arena=_stub(self.log, "arena"),
+                                   OtherArena=_stub(self.log, "other"))
+        self.state = make_state(rules=self.rules)
+        place(self.state, 0, "Pipsqueak")
+        place(self.state, 1, "Pipsqueak")
+
+    def test_a_stadium_stays_in_play_and_belongs_to_neither_board(self):
+        cid = to_hand(self.state, 0, "Arena")
+        state, changes = engine.apply(self.state, engine.PlayTrainer(0, cid))
+        self.assertIsNotNone(state.stadium)
+        self.assertEqual(state.stadium.card, cid)
+        self.assertEqual(state.stadium.owner, 0)
+        self.assertNotIn(cid, state.players[0].discard)
+        moved = kinds(changes, engine.CHANGE_MOVE)[0]
+        self.assertEqual(moved.to_zone, engine.ZONE_STADIUM)
+        self.assertEqual(len(kinds(changes, engine.CHANGE_STADIUM)), 1)
+
+    def test_a_new_stadium_discards_the_old_one_to_its_own_owner(self):
+        first = to_hand(self.state, 0, "Arena")
+        state, _ = engine.apply(self.state, engine.PlayTrainer(0, first))
+        state, _ = engine.apply(state, engine.Pass(0))
+        second = to_hand(state, 1, "OtherArena")
+        state, changes = engine.apply(state, engine.PlayTrainer(1, second))
+
+        self.assertEqual(state.stadium.card, second)
+        self.assertEqual(state.stadium.owner, 1)
+        # The replaced Stadium goes to the pile of whoever played it.
+        self.assertEqual(state.players[0].discard, [first])
+        self.assertEqual(state.players[1].discard, [])
+
+    def test_a_stadium_of_the_same_name_may_not_replace_itself(self):
+        first = to_hand(self.state, 0, "Arena")
+        state, _ = engine.apply(self.state, engine.PlayTrainer(0, first))
+        state, _ = engine.apply(state, engine.Pass(0))
+        state, _ = engine.apply(state, engine.Pass(1))
+        again = to_hand(state, 0, "Arena")
+        self.assertEqual(actions_of(state, 0, engine.PlayTrainer), [])
+        with self.assertRaises(engine.IllegalAction):
+            engine.apply(state, engine.PlayTrainer(0, again))
+
+    def test_one_stadium_a_turn(self):
+        state, _ = engine.apply(self.state, engine.PlayTrainer(
+            0, to_hand(self.state, 0, "Arena")))
+        other = to_hand(state, 0, "OtherArena")
+        self.assertEqual(state.players[0].stadiums_this_turn, 1)
+        with self.assertRaises(engine.IllegalAction):
+            engine.apply(state, engine.PlayTrainer(0, other))
+
+
+class PokemonToolTests(unittest.TestCase):
+
+    def setUp(self):
+        self.rules = engine.Rules(
+            trainer_effects={GUID["Bandana"]: lambda s, c, ch: None},
+            static_effects={GUID["Bandana"]: _bandana})
+        self.state = make_state(rules=self.rules)
+        self.mine = place(self.state, 0, "Pipsqueak")
+        place(self.state, 1, "Pipsqueak")
+
+    def test_a_tool_attaches_and_stays_on_the_pokemon(self):
+        cid = to_hand(self.state, 0, "Bandana")
+        self.assertIn(engine.AttachTool(0, cid, self.mine.slot_id),
+                      engine.legal_actions(self.state, 0))
+        state, changes = engine.apply(
+            self.state, engine.AttachTool(0, cid, self.mine.slot_id))
+        slot = state.slot(self.mine.slot_id)[1]
+        self.assertEqual(slot.tools, [cid])
+        self.assertEqual(len(kinds(changes, engine.CHANGE_TOOL)), 1)
+
+    def test_only_one_tool_per_pokemon(self):
+        first = to_hand(self.state, 0, "Bandana")
+        second = to_hand(self.state, 0, "Bandana")
+        state, _ = engine.apply(self.state,
+                                engine.AttachTool(0, first, self.mine.slot_id))
+        self.assertEqual(actions_of(state, 0, engine.AttachTool), [])
+        with self.assertRaises(engine.IllegalAction):
+            engine.apply(state, engine.AttachTool(0, second, self.mine.slot_id))
+
+    def test_a_tool_cannot_be_attached_to_the_opponent(self):
+        theirs = self.state.players[1].active
+        cid = to_hand(self.state, 0, "Bandana")
+        with self.assertRaises(engine.IllegalAction):
+            engine.apply(self.state, engine.AttachTool(0, cid, theirs.slot_id))
+
+    def test_a_tool_leaves_play_with_the_pokemon_it_is_on(self):
+        cid = to_hand(self.state, 0, "Bandana")
+        state, _ = engine.apply(self.state,
+                                engine.AttachTool(0, cid, self.mine.slot_id))
+        slot = state.slot(self.mine.slot_id)[1]
+        slot.damage = state.max_hp(slot)
+        changes = []
+        engine._resolve_knockouts(state, changes)
+        self.assertIn(cid, state.players[0].discard)
+
+    def test_a_tool_changes_the_number_it_says_it_changes(self):
+        # Bandana adds retreat cost and HP; both have to be read through the
+        # Tool everywhere, not just where it was convenient.
+        slot = self.mine
+        self.assertEqual(engine.retreat_cost(self.state, slot), 1)
+        self.assertEqual(self.state.max_hp(slot), 60)
+        cid = to_hand(self.state, 0, "Bandana")
+        state, _ = engine.apply(self.state,
+                                engine.AttachTool(0, cid, slot.slot_id))
+        after = state.slot(slot.slot_id)[1]
+        self.assertEqual(engine.retreat_cost(state, after), 3)
+        self.assertEqual(state.max_hp(after), 90)
+
+
+def _bandana(query, state, ctx, value):
+    """A synthetic Tool: +2 retreat, +30 HP, -10 damage taken."""
+    if query == engine.STATIC_RETREAT_COST:
+        return value + 2
+    if query == engine.STATIC_MAX_HP:
+        return value + 30
+    if query == engine.STATIC_DAMAGE_TAKEN:
+        return value + 10
+    return value
+
+
+# --------------------------------------------------------------------------
+# pending choices
+# --------------------------------------------------------------------------
+
+class PendingChoiceTests(unittest.TestCase):
+    """The suspension model itself, with effects written only for this test."""
+
+    def setUp(self):
+        self.log = []
+
+    def board(self, effect, name="Potion"):
+        rules = with_trainers(**{name: effect})
+        state = make_state(rules=rules)
+        place(state, 0, "Pipsqueak")
+        place(state, 1, "Pipsqueak", damage=20)
+        return state
+
+    def one_choice(self, options, player=0, minimum=1, maximum=1):
+        def effect(state, ctx, changes):
+            if not ctx["answers"]:
+                return engine.Choice(player=player, prompt="pick",
+                                     options=options,
+                                     option_kind=engine.CHOICE_OPTION,
+                                     minimum=minimum, maximum=maximum)
+            self.log.append(ctx["answers"][0])
+        return effect
+
+    def test_a_choice_parks_the_state_and_nothing_else_is_legal(self):
+        state = self.board(self.one_choice(("a", "b", "c")))
+        cid = to_hand(state, 0, "Potion")
+        state, changes = engine.apply(state, engine.PlayTrainer(0, cid))
+
+        self.assertIsNotNone(state.pending)
+        self.assertEqual(engine.players_to_act(state), [0])
+        self.assertEqual(len(kinds(changes, engine.CHANGE_CHOICE)), 1)
+        self.assertEqual(kinds(changes, engine.CHANGE_CHOICE)[0].detail["options"],
+                         ["a", "b", "c"])
+
+        offered = engine.legal_actions(state, 0)
+        self.assertEqual(offered, [engine.Choose(0, ("a",)),
+                                   engine.Choose(0, ("b",)),
+                                   engine.Choose(0, ("c",))])
+        # Not even passing the turn.
+        with self.assertRaises(engine.IllegalAction):
+            engine.apply(state, engine.Pass(0))
+        self.assertEqual(engine.legal_actions(state, 1), [])
+
+    def test_answering_resumes_the_effect_with_the_answer(self):
+        state = self.board(self.one_choice(("a", "b")))
+        cid = to_hand(state, 0, "Potion")
+        state, _ = engine.apply(state, engine.PlayTrainer(0, cid))
+        state, changes = engine.apply(state, engine.Choose(0, ("b",)))
+
+        self.assertIsNone(state.pending)
+        self.assertEqual(self.log, [("b",)])
+        self.assertEqual(len(kinds(changes, engine.CHANGE_CHOSE)), 1)
+        # The turn carries on: the Trainer did not end it.
+        self.assertEqual(state.to_move, 0)
+        self.assertIn(engine.Pass(0), engine.legal_actions(state, 0))
+
+    def test_an_answer_outside_the_option_list_is_refused(self):
+        state = self.board(self.one_choice(("a", "b")))
+        state, _ = engine.apply(state, engine.PlayTrainer(
+            0, to_hand(state, 0, "Potion")))
+        for bad in (engine.Choose(0, ("z",)), engine.Choose(0, ()),
+                    engine.Choose(0, ("a", "b"))):
+            with self.assertRaises(engine.IllegalAction):
+                engine.apply(state, bad)
+        with self.assertRaises(engine.IllegalAction):
+            engine.apply(state, engine.Choose(1, ("a",)))
+
+    def test_a_choice_may_belong_to_the_other_player(self):
+        state = self.board(self.one_choice(("a", "b"), player=1))
+        state, _ = engine.apply(state, engine.PlayTrainer(
+            0, to_hand(state, 0, "Potion")))
+        # It is still player 0's turn, but player 1 is the one who answers.
+        self.assertEqual(state.to_move, 0)
+        self.assertEqual(engine.players_to_act(state), [1])
+        self.assertEqual(engine.legal_actions(state, 0), [])
+        state, _ = engine.apply(state, engine.Choose(1, ("a",)))
+        self.assertEqual(engine.players_to_act(state), [0])
+
+    def test_an_optional_choice_offers_declining_first(self):
+        state = self.board(self.one_choice(("a", "b"), minimum=0, maximum=1))
+        state, _ = engine.apply(state, engine.PlayTrainer(
+            0, to_hand(state, 0, "Potion")))
+        offered = engine.legal_actions(state, 0)
+        self.assertEqual(offered[0], engine.Choose(0, ()))
+        state, _ = engine.apply(state, engine.Choose(0, ()))
+        self.assertEqual(self.log, [()])
+
+    def test_minimum_is_clamped_so_a_choice_always_has_an_answer(self):
+        # An effect that asks for three of two options would otherwise leave a
+        # state with no legal action at all, which hangs a live game.
+        state = self.board(self.one_choice(("a", "b"), minimum=3, maximum=3))
+        state, _ = engine.apply(state, engine.PlayTrainer(
+            0, to_hand(state, 0, "Potion")))
+        offered = engine.legal_actions(state, 0)
+        self.assertTrue(offered)
+        state, _ = engine.apply(state, offered[0])
+        self.assertEqual(self.log, [("a", "b")])
+
+    def test_enumeration_is_capped_but_apply_still_accepts_more(self):
+        options = tuple("abcdefgh")
+        rules = engine.Rules(
+            max_enumerated_choices=5,
+            trainer_effects={GUID["Potion"]: self.one_choice(
+                options, minimum=2, maximum=2)})
+        state = make_state(rules=rules)
+        place(state, 0, "Pipsqueak")
+        place(state, 1, "Pipsqueak")
+        state, _ = engine.apply(state, engine.PlayTrainer(
+            0, to_hand(state, 0, "Potion")))
+        offered = engine.legal_actions(state, 0)
+        self.assertEqual(len(offered), 5)          # 28 combinations exist
+        # A legal answer it declined to list is still legal.
+        state, _ = engine.apply(state, engine.Choose(0, ("g", "h")))
+        self.assertEqual(self.log, [("g", "h")])
+
+    def test_several_choices_in_one_effect_run_in_order(self):
+        def effect(state, ctx, changes):
+            answers = ctx["answers"]
+            if len(answers) < 1:
+                return engine.Choice(player=0, prompt="first",
+                                     options=("a", "b"),
+                                     option_kind=engine.CHOICE_OPTION)
+            if len(answers) < 2:
+                return engine.Choice(player=1, prompt="second",
+                                     options=("x", "y"),
+                                     option_kind=engine.CHOICE_OPTION)
+            self.log.append(tuple(answers))
+
+        state = self.board(effect)
+        state, _ = engine.apply(state, engine.PlayTrainer(
+            0, to_hand(state, 0, "Potion")))
+        self.assertEqual(state.pending.choice.prompt, "first")
+        state, _ = engine.apply(state, engine.Choose(0, ("a",)))
+        self.assertEqual(state.pending.choice.prompt, "second")
+        self.assertEqual(engine.players_to_act(state), [1])
+        state, _ = engine.apply(state, engine.Choose(1, ("y",)))
+        self.assertIsNone(state.pending)
+        self.assertEqual(self.log, [(("a",), ("y",))])
+
+    def test_a_pending_choice_survives_the_deep_copy_apply_makes(self):
+        state = self.board(self.one_choice(("a", "b")))
+        state, _ = engine.apply(state, engine.PlayTrainer(
+            0, to_hand(state, 0, "Potion")))
+        # apply() copies; the Pending has to be data all the way down or the
+        # copy loses the effect's place in its own execution.
+        copied = copy.deepcopy(state)
+        self.assertIsNot(copied.pending, state.pending)
+        copied, _ = engine.apply(copied, engine.Choose(0, ("a",)))
+        self.assertIsNone(copied.pending)
+        self.assertEqual(self.log, [("a",)])
+
+
+class AttackChoiceTests(unittest.TestCase):
+    """An attack whose effect asks a question must not end the turn early."""
+
+    def test_the_turn_ends_only_once_the_attack_effect_finishes(self):
+        log = []
+
+        def effect(state, ctx, changes):
+            if not ctx["answers"]:
+                return engine.Choice(player=ctx["player"], prompt="pick",
+                                     options=("a", "b"),
+                                     option_kind=engine.CHOICE_OPTION)
+            log.append((ctx["answers"][0], ctx["damage"]))
+
+        rules = engine.Rules(attack_effects={TACKLE: effect})
+        state = make_state(rules=rules)
+        place(state, 0, "Pipsqueak", energy=["FireEnergy"])
+        place(state, 1, "Pipsqueak")
+
+        state, _ = engine.apply(state, engine.Attack(0, TACKLE))
+        self.assertIsNotNone(state.pending)
+        self.assertEqual(state.to_move, 0)             # turn has NOT passed
+        self.assertEqual(state.players[1].active.damage, 10)
+
+        state, _ = engine.apply(state, engine.Choose(0, ("b",)))
+        self.assertEqual(log, [(("b",), 10)])
+        self.assertEqual(state.to_move, 1)             # ... and now it has
+
+    def test_the_damage_hook_replaces_the_printed_number(self):
+        # "40x": three tails means the attack does nothing at all, which is
+        # exactly why the hook has to run before the damage lands.
+        rules = engine.Rules(attack_damage={CHOMP: lambda s, c, ch: 0})
+        state = make_state(rules=rules)
+        place(state, 0, "Bigmouth", energy=["FireEnergy", "FireEnergy"])
+        defender = place(state, 1, "Pipsqueak")
+        state, changes = engine.apply(state, engine.Attack(0, CHOMP))
+        self.assertEqual(state.slot(defender.slot_id)[1].damage, 0)
+        self.assertEqual(kinds(changes, engine.CHANGE_DAMAGE), [])
+
+    def test_the_damage_hook_runs_before_weakness_and_resistance(self):
+        # The hook says 100; the Whale resists Lightning by 20. If the hook
+        # ran after the pipeline the answer would be 100, and if the printed
+        # damage were used it would be 20.
+        rules = engine.Rules(attack_damage={ZAP: lambda s, c, ch: 100})
+        state = make_state(rules=rules)
+        place(state, 0, "Sparky", energy=["LightningEnergy"])
+        defender = place(state, 1, "Whale")
+        state, _ = engine.apply(state, engine.Attack(0, ZAP))
+        self.assertEqual(state.slot(defender.slot_id)[1].damage, 80)
+
+
+# --------------------------------------------------------------------------
+# continuous effects and temporary modifiers
+# --------------------------------------------------------------------------
+
+class ModifierTests(unittest.TestCase):
+
+    def attack_with(self, modifiers=(), rules=None):
+        state = make_state(rules=rules or engine.DEFAULT_RULES)
+        attacker = place(state, 0, "Pipsqueak", energy=["FireEnergy"])
+        defender = place(state, 1, "Blobfish")      # 200 HP, no weakness
+        for make in modifiers:
+            state.modifiers.append(make(state, attacker, defender))
+        state, _ = engine.apply(state, engine.Attack(0, TACKLE))
+        return state.slot(defender.slot_id)[1].damage
+
+    def test_damage_dealt_adds_before_weakness(self):
+        self.assertEqual(self.attack_with(), 10)
+        self.assertEqual(self.attack_with([
+            lambda s, a, d: engine.Modifier(kind=engine.MOD_DAMAGE_DEALT,
+                                            until_turn=s.turn_number, player=0,
+                                            amount=30)]), 40)
+
+    def test_damage_taken_subtracts_after_weakness_and_floors_at_zero(self):
+        self.assertEqual(self.attack_with([
+            lambda s, a, d: engine.Modifier(kind=engine.MOD_DAMAGE_TAKEN,
+                                            until_turn=s.turn_number,
+                                            slot=d.slot_id, amount=50)]), 0)
+
+    def test_prevent_damage_beats_everything(self):
+        self.assertEqual(self.attack_with([
+            lambda s, a, d: engine.Modifier(kind=engine.MOD_DAMAGE_DEALT,
+                                            until_turn=s.turn_number, player=0,
+                                            amount=100),
+            lambda s, a, d: engine.Modifier(kind=engine.MOD_PREVENT_DAMAGE,
+                                            until_turn=s.turn_number,
+                                            slot=d.slot_id)]), 0)
+
+    def test_no_weakness_switches_off_weakness_and_leaves_resistance(self):
+        # Rockjaw is Fighting; the Whale is weak to Fighting (x2) and resists
+        # Lightning. Smash is 50, so 100 with the Weakness and 50 without it.
+        def board():
+            state = make_state()
+            place(state, 0, "Rockjaw", energy=["FightingEnergy",
+                                               "FightingEnergy"])
+            return state, place(state, 1, "Whale")
+
+        state, defender = board()
+        after, _ = engine.apply(state, engine.Attack(0, SMASH))
+        self.assertEqual(after.slot(defender.slot_id)[1].damage, 100)
+
+        state, defender = board()
+        state.modifiers.append(engine.Modifier(
+            kind=engine.MOD_NO_WEAKNESS, until_turn=state.turn_number,
+            slot=defender.slot_id))
+        after, _ = engine.apply(state, engine.Attack(0, SMASH))
+        self.assertEqual(after.slot(defender.slot_id)[1].damage, 50)
+
+        # ... and the Resistance it also has is untouched by that.
+        state, defender = board()
+        state.players[0].active = None
+        place(state, 0, "Sparky", energy=["LightningEnergy"])
+        after, _ = engine.apply(state, engine.Attack(0, ZAP))
+        self.assertEqual(after.slot(defender.slot_id)[1].damage, 20)  # 40 - 20
+
+    def test_a_modifier_expires_and_stops_being_consulted(self):
+        state = make_state()
+        attacker = place(state, 0, "Pipsqueak", energy=["FireEnergy"])
+        defender = place(state, 1, "Blobfish")
+        del attacker
+        state.modifiers.append(engine.Modifier(
+            kind=engine.MOD_DAMAGE_DEALT, until_turn=state.turn_number,
+            player=0, amount=30))
+        state, _ = engine.apply(state, engine.Pass(0))    # turn 4
+        state, _ = engine.apply(state, engine.Pass(1))    # turn 5
+        self.assertEqual(state.modifiers, [])
+        state, _ = engine.apply(state, engine.Attack(0, TACKLE))
+        self.assertEqual(state.slot(defender.slot_id)[1].damage, 10)
+
+    def test_a_no_retreat_modifier_blocks_only_the_slot_it_names(self):
+        state = make_state()
+        active = place(state, 0, "Rockjaw")               # free retreat
+        place(state, 0, "Pipsqueak", where="bench")
+        place(state, 1, "Pipsqueak")
+        self.assertTrue(actions_of(state, 0, engine.Retreat))
+        state.modifiers.append(engine.Modifier(
+            kind=engine.MOD_NO_RETREAT, until_turn=state.turn_number,
+            slot=active.slot_id))
+        self.assertEqual(actions_of(state, 0, engine.Retreat), [])
+        with self.assertRaises(engine.IllegalAction):
+            engine.apply(state, engine.Retreat(
+                0, state.players[0].bench[0].slot_id, ()))
+
+    def test_ignoring_resistance_is_a_property_of_the_attack(self):
+        state = make_state()
+        place(state, 0, "Sparky", energy=["LightningEnergy"])
+        defender = place(state, 1, "Whale")               # resists Lightning
+        after, _ = engine.apply(state, engine.Attack(0, ZAP))
+        self.assertEqual(after.slot(defender.slot_id)[1].damage, 20)  # 40 - 20
+
+        def ignores(s, ctx, ch):
+            ctx["data"]["ignore"] = [engine.IGNORE_RESISTANCE]
+            return ctx["attack"].damage
+        state.rules = engine.Rules(attack_damage={ZAP: ignores})
+        after, _ = engine.apply(state, engine.Attack(0, ZAP))
+        self.assertEqual(after.slot(defender.slot_id)[1].damage, 40)
+
+
+# --------------------------------------------------------------------------
+# Pokemon Abilities
+# --------------------------------------------------------------------------
+
+class AbilityTests(unittest.TestCase):
+
+    def setUp(self):
+        self.used = []
+
+    def rules(self, **kw):
+        def effect(state, ctx, changes):
+            self.used.append((ctx["player"], ctx["slot_id"]))
+        base = {"ability_effects": {DIG: effect}}
+        base.update(kw)
+        return engine.Rules(**base)
+
+    def board(self, rules=None):
+        state = make_state(rules=rules or self.rules())
+        slot = place(state, 0, "Burrower")
+        place(state, 1, "Pipsqueak")
+        return state, slot
+
+    def test_an_ability_is_offered_only_when_it_is_implemented(self):
+        state, slot = self.board(rules=engine.DEFAULT_RULES)
+        self.assertEqual(actions_of(state, 0, engine.UseAbility), [])
+        with self.assertRaises(engine.IllegalAction):
+            engine.apply(state, engine.UseAbility(0, slot.slot_id, DIG))
+
+        state, slot = self.board()
+        self.assertIn(engine.UseAbility(0, slot.slot_id, DIG),
+                      engine.legal_actions(state, 0))
+
+    def test_an_ability_is_once_per_turn_per_pokemon_and_resets(self):
+        state, slot = self.board()
+        state, changes = engine.apply(state, engine.UseAbility(0, slot.slot_id, DIG))
+        self.assertEqual(self.used, [(0, slot.slot_id)])
+        self.assertEqual(len(kinds(changes, engine.CHANGE_ABILITY)), 1)
+        self.assertEqual(actions_of(state, 0, engine.UseAbility), [])
+        with self.assertRaises(engine.IllegalAction):
+            engine.apply(state, engine.UseAbility(0, slot.slot_id, DIG))
+
+        state, _ = engine.apply(state, engine.Pass(0))
+        state, _ = engine.apply(state, engine.Pass(1))
+        self.assertTrue(actions_of(state, 0, engine.UseAbility))
+
+    def test_using_an_ability_does_not_end_the_turn(self):
+        state, slot = self.board()
+        state, _ = engine.apply(state, engine.UseAbility(0, slot.slot_id, DIG))
+        self.assertEqual(state.to_move, 0)
+
+    def test_an_attack_is_never_offered_as_an_ability(self):
+        state, slot = self.board()
+        offered = {a.ability_id for a in actions_of(state, 0, engine.UseAbility)}
+        self.assertEqual(offered, {DIG})
+
+    def test_abilities_can_be_switched_off_for_a_side(self):
+        state, slot = self.board()
+        state.modifiers.append(engine.Modifier(
+            kind=engine.MOD_NO_ABILITIES, until_turn=state.turn_number))
+        self.assertEqual(actions_of(state, 0, engine.UseAbility), [])
+        with self.assertRaises(engine.IllegalAction):
+            engine.apply(state, engine.UseAbility(0, slot.slot_id, DIG))
+
+    def test_a_static_ability_changes_retreat_cost_everywhere(self):
+        def hook(query, state, ctx, value):
+            return 0 if query == engine.STATIC_RETREAT_COST else value
+
+        rules = engine.Rules(static_effects={DIG: hook})
+        state = make_state(rules=rules)
+        slot = place(state, 0, "Burrower", energy=["FireEnergy"])
+        place(state, 0, "Pipsqueak", where="bench")
+        place(state, 1, "Pipsqueak")
+        # Burrower's printed retreat is 2; the Ability makes it free, and the
+        # free-retreat action has to be the one legal_actions offers.
+        self.assertEqual(engine.retreat_cost(state, slot), 0)
+        bench = state.players[0].bench[0].slot_id
+        self.assertIn(engine.Retreat(0, bench, ()),
+                      engine.legal_actions(state, 0))
+        state, _ = engine.apply(state, engine.Retreat(0, bench, ()))
+        self.assertEqual(state.players[0].discard, [])
+
+    def test_evolving_gives_the_new_pokemon_its_own_allowance(self):
+        state, slot = self.board()
+        state, _ = engine.apply(state, engine.UseAbility(0, slot.slot_id, DIG))
+        cid = to_hand(state, 0, "Digger")
+        state, _ = engine.apply(state, engine.Evolve(0, cid, slot.slot_id))
+        self.assertEqual(state.slot(slot.slot_id)[1].abilities_used, set())
+
+
+# --------------------------------------------------------------------------
 # the real card database
 # --------------------------------------------------------------------------
 
@@ -1260,6 +1922,85 @@ class RealCardDataTests(unittest.TestCase):
         missing = [(c.name, a.title) for c in self.db
                    for a in c.attacks if not a.ability_id]
         self.assertEqual(missing, [])
+
+    def test_trainer_types_are_the_four_kinds_the_engine_knows(self):
+        kinds_seen = {}
+        for card in self.db:
+            if card.is_trainer:
+                kinds_seen[card.trainer_kind] = kinds_seen.get(card.trainer_kind, 0) + 1
+        # Five values, not four: PokemonToolF is Team Flare Gear, a Tool with
+        # a printed restriction the data does not encode.
+        self.assertEqual(set(kinds_seen), {engine.TRAINER_ITEM,
+                                           engine.TRAINER_SUPPORTER,
+                                           engine.TRAINER_STADIUM,
+                                           engine.TRAINER_TOOL,
+                                           engine.TRAINER_TOOL_F})
+        self.assertGreater(kinds_seen[engine.TRAINER_ITEM], 400)
+        # Every Trainer has exactly one kind, so trainer_kind is total.
+        self.assertTrue(all(c.trainer_kind is not None
+                            for c in self.db if c.is_trainer))
+
+    def test_attribute_200310_is_the_trainer_rules_text_key(self):
+        """Prove ATTR_GAME_TEXT means what effects.py depends on it meaning.
+
+        Two things have to hold: Trainers carry it and Pokemon never do - a
+        Pokemon's text lives per-ability inside ATTR_ABILITIES. If 200310 were
+        something else, one of those would fail.
+
+        24 Trainers have no key at all, 23 of them in SL and one in SM4.
+        Those cards simply have no text on this machine and get no effect;
+        the number is asserted so it cannot grow quietly.
+        """
+        trainers = [c for c in self.db if c.is_trainer]
+        pokemon = [c for c in self.db if c.is_pokemon]
+        self.assertGreater(len(trainers), 1000)
+        missing = [c for c in trainers if not c.game_text_key]
+        self.assertEqual(len(missing), 24)
+        self.assertEqual({c.set_code for c in missing}, {"SL", "SM4"})
+        self.assertEqual([c.name for c in pokemon if c.game_text_key], [])
+
+        # The key names the card it is on: Potion's says Potion, and it is a
+        # key rather than English (English would not contain a dotted path).
+        potion = next(c for c in self.db.by_name("Potion")
+                      if c.set_code == "BW1")
+        self.assertIn("Potion", potion.game_text_key)
+        self.assertIn("GameText", potion.game_text_key)
+        self.assertNotIn("$", potion.game_text_key)
+
+    def test_amount_operator_takes_exactly_four_values(self):
+        """Checked rather than assumed - effects.py cross-checks against it.
+
+        "" is a flat number, "+" and "x" and "-" mean the printed number is
+        conditional. Nothing says on WHAT, which is why the operator is never
+        the source of an effect, only a corroboration of one.
+        """
+        seen = {}
+        for card in self.db:
+            for attack in card.attacks:
+                seen[attack.amount_operator] = seen.get(attack.amount_operator, 0) + 1
+        self.assertEqual(set(seen), {"", "+", "x", "-"})
+        self.assertGreater(seen[""], seen["+"])
+        self.assertGreater(seen["+"], seen["x"])
+        self.assertGreater(seen["x"], seen["-"])
+
+    def test_a_real_tool_and_a_real_stadium_parse_as_such(self):
+        float_stone = next(c for c in self.db.by_name("FloatStone"))
+        self.assertTrue(float_stone.is_trainer)
+        self.assertTrue(float_stone.is_tool)
+        self.assertFalse(float_stone.is_item)
+        festival = next(c for c in self.db.by_name("ChampionsFestival"))
+        self.assertTrue(festival.is_stadium)
+        sycamore = next(c for c in self.db.by_name("ProfessorSycamore"))
+        self.assertTrue(sycamore.is_supporter)
+
+    def test_non_attack_abilities_are_separated_from_attacks(self):
+        # Card.attacks and Card.pokemon_abilities must partition
+        # ATTR_ABILITIES, or an Ability would be selectable as an attack.
+        for card in self.db:
+            self.assertEqual(len(card.attacks) + len(card.pokemon_abilities),
+                             len(card.abilities))
+        powered = [c for c in self.db if c.pokemon_abilities]
+        self.assertGreater(len(powered), 500)
 
     def test_a_real_evolution_line_is_playable(self):
         patrat = next(c for c in self.db.by_name("Patrat") if c.set_code == "BW1")

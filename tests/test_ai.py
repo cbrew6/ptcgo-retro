@@ -20,6 +20,7 @@ there does not fail a test, it hangs a real player's match.
 Run: python -m unittest discover -s tests
 """
 
+import collections
 import copy
 import itertools
 import json
@@ -73,7 +74,7 @@ def _attack(ability_id, cost, damage, title=""):
 
 
 def _pokemon(name, hp, stage="Basic", types=("Colorless",), attacks=(),
-             retreat=0, evolves_from=None):
+             retreat=0, evolves_from=None, abilities=()):
     attrs = [
         _s(engine.ATTR_CARD_TYPES, "Pokemon"),
         _s(engine.ATTR_CARD_NAME, name),
@@ -87,10 +88,27 @@ def _pokemon(name, hp, stage="Basic", types=("Colorless",), attacks=(),
         attrs.append(_i(engine.ATTR_RETREAT_COST, retreat))
     if evolves_from:
         attrs.append(_s(engine.ATTR_EVOLVES_FROM, evolves_from))
-    if attacks:
+    entries = list(attacks) + list(abilities)
+    if entries:
         attrs.append({"n": engine.ATTR_ABILITIES, "t": 1, "v": {"a": [
-            {"s": json.dumps(a), "t": 8} for a in attacks], "t": 1}})
+            {"s": json.dumps(a), "t": 8} for a in entries], "t": 1}})
     return _archetype(attrs)
+
+
+def _power(ability_id, title=""):
+    """A non-attack Ability. Attacks and Abilities share ATTR_ABILITIES in
+    the real data and differ only by abilityType, so the fixture does too."""
+    return {"cost": {}, "damage": 0, "title": title or ability_id,
+            "gameText": "", "abilityID": ability_id, "amountOperator": "",
+            "abilityType": "PokeAbility", "conditionExceptions": []}
+
+
+def _trainer(name, kind="Item"):
+    return _archetype([
+        _s(engine.ATTR_CARD_TYPES, "TrainerCard"),
+        _s(engine.ATTR_CARD_NAME, name),
+        _s(engine.ATTR_TRAINER_TYPES, kind),
+    ])
 
 
 def _energy(name, options):
@@ -129,6 +147,13 @@ ARCHETYPES = {
     "Snail": _pokemon("Snail", 120, stage="Stage1", evolves_from="Slug",
                       types=("Water",), attacks=[
                           _attack("crush", {"Water": 4}, 90)]),
+    # A Pokemon carrying an Ability as well as an attack, and two Trainers
+    # whose worth is set by the registry each test hands the engine.
+    "Mole": _pokemon("Mole", 90, retreat=1,
+                     attacks=[_attack("dig", {"Colorless": 1}, 30)],
+                     abilities=[_power("burrow", "Burrow")]),
+    "Gadget": _trainer("Gadget"),
+    "Widget": _trainer("Widget"),
     "WaterEnergy": _energy("WaterEnergy", [("Water",)]),
     "FireEnergy": _energy("FireEnergy", [("Fire",)]),
     "PlainEnergy": _energy("PlainEnergy", [("Colorless",)]),
@@ -180,10 +205,16 @@ def _place(state, player, active, bench=()):
 
 
 def _start(hand0, hand1, active0, active1, bench0=(), bench1=(),
-           first_player=0):
-    """A game in the main phase with both boards placed exactly as asked."""
+           first_player=0, rules=engine.DEFAULT_RULES):
+    """A game in the main phase with both boards placed exactly as asked.
+
+    `rules` is how a test supplies the effect registries a card needs; the
+    default is the stock empty ones, under which no Trainer is playable at
+    all and every existing test below reads exactly as it did.
+    """
     state, _ = engine.new_game(DB, [_deck(hand0), _deck(hand1)],
-                               rng=_NoShuffle(), first_player=first_player)
+                               rng=_NoShuffle(), first_player=first_player,
+                               rules=rules)
     boards = {0: (active0, bench0), 1: (active1, bench1)}
     for player in (first_player, 1 - first_player):
         state = _place(state, player, *boards[player])
@@ -223,15 +254,18 @@ def _snapshot(state):
     """
     def slots(ps):
         return tuple((s.slot_id, tuple(s.stack), s.damage, tuple(s.energy),
-                      tuple(sorted(s.conditions)), s.played_on_turn)
+                      tuple(s.tools), tuple(sorted(s.conditions)),
+                      s.played_on_turn, tuple(sorted(s.abilities_used)))
                      for s in ps.in_play)
 
     return (state.phase, state.to_move, state.turn_number, state.winner,
             tuple(state.pending_promotions), state.after_promotions,
-            state.rng.getstate(),
+            state.rng.getstate(), repr(state.pending), repr(state.modifiers),
+            state.stadium.card if state.stadium else None,
             tuple((tuple(p.deck), tuple(p.hand), tuple(p.discard),
                    tuple(p.prizes), slots(p), p.energy_attached_this_turn,
-                   p.retreats_this_turn, p.setup_done)
+                   p.retreats_this_turn, p.supporters_this_turn,
+                   p.stadiums_this_turn, p.setup_done)
                   for p in state.players))
 
 
@@ -479,6 +513,158 @@ CARD_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__
 DECK_TYPES = ("Fire", "Water", "Grass", "Lightning", "Psychic", "Fighting",
               "Darkness", "Metal")
 
+# --------------------------------------------------------------------------
+# Trainers, Abilities and pending choices
+# --------------------------------------------------------------------------
+#
+# The AI cannot read a card: its text is a callable in a registry on Rules.
+# So it judges one by playing it on a copy of the board and comparing the two
+# positions. These tests build tiny registries whose worth is obvious, and
+# check the AI reaches the obvious conclusion.
+
+def _draw_effect(count):
+    def effect(state, ctx, changes):
+        engine._draw(state, ctx["player"], count, changes)
+    return effect
+
+
+def _nothing(state, ctx, changes):
+    return None
+
+
+def _asking(prompt, options, kind=engine.CHOICE_SLOT, player=None):
+    """An effect that asks one question and records the answer."""
+    seen = []
+
+    def effect(state, ctx, changes):
+        if not ctx["answers"]:
+            return engine.Choice(
+                player=ctx["player"] if player is None else player,
+                prompt=prompt, options=options(state), option_kind=kind)
+        seen.append(ctx["answers"][0])
+    effect.seen = seen
+    return effect
+
+
+class CardPlayTests(unittest.TestCase):
+    """Whether the AI plays a card at all, and which one."""
+
+    def board(self, rules, hand=("Gadget",)):
+        state = _start(list(hand) + ["Bruiser", "Bruiser"],
+                       ["Bruiser", "Bruiser"], "Bruiser", "Bruiser",
+                       rules=rules)
+        return _to_turn_of(state, 0)
+
+    def test_a_card_that_helps_is_played(self):
+        rules = engine.Rules(trainer_effects={GUID["Gadget"]: _draw_effect(3)})
+        state = self.board(rules)
+        cid = _find(state, 0, "Gadget")
+        self.assertEqual(ai.choose(state, 0), engine.PlayTrainer(0, cid))
+
+    def test_a_card_that_buys_nothing_stays_in_hand(self):
+        # Playing it costs the card and gains nothing, so the position after
+        # is strictly worse than the position before.
+        rules = engine.Rules(trainer_effects={GUID["Gadget"]: _nothing})
+        state = self.board(rules)
+        self.assertIn(engine.PlayTrainer(0, _find(state, 0, "Gadget")),
+                      engine.legal_actions(state, 0))
+        self.assertNotIsInstance(ai.choose(state, 0), engine.PlayTrainer)
+
+    def test_the_better_of_two_cards_is_the_one_played(self):
+        rules = engine.Rules(trainer_effects={
+            GUID["Gadget"]: _draw_effect(1),
+            GUID["Widget"]: _draw_effect(4)})
+        state = self.board(rules, hand=("Gadget", "Widget"))
+        self.assertEqual(ai.choose(state, 0),
+                         engine.PlayTrainer(0, _find(state, 0, "Widget")))
+
+    def test_a_free_ability_is_used(self):
+        rules = engine.Rules(ability_effects={"burrow": _draw_effect(2)})
+        state = _start(["Mole", "Bruiser"], ["Bruiser", "Bruiser"],
+                       "Mole", "Bruiser", rules=rules)
+        state = _to_turn_of(state, 0)
+        slot = state.players[0].active
+        self.assertEqual(ai.choose(state, 0),
+                         engine.UseAbility(0, slot.slot_id, "burrow"))
+
+    def test_an_ability_is_not_used_twice_in_one_turn(self):
+        rules = engine.Rules(ability_effects={"burrow": _draw_effect(2)})
+        state = _start(["Mole", "Bruiser"], ["Bruiser", "Bruiser"],
+                       "Mole", "Bruiser", rules=rules)
+        state = _to_turn_of(state, 0)
+        state, _ = engine.apply(state, ai.choose(state, 0))
+        self.assertNotIsInstance(ai.choose(state, 0), engine.UseAbility)
+
+
+class PendingChoiceTests(unittest.TestCase):
+    """The AI has to answer a Choice, and answer it legally."""
+
+    def ask(self, effect):
+        rules = engine.Rules(trainer_effects={GUID["Gadget"]: effect})
+        state = _start(["Gadget", "Bruiser", "Dummy"],
+                       ["Bruiser", "Dummy"], "Bruiser", "Bruiser",
+                       bench0=("Dummy",), bench1=("Dummy",), rules=rules)
+        state = _to_turn_of(state, 0)
+        state, _ = engine.apply(
+            state, engine.PlayTrainer(0, _find(state, 0, "Gadget")))
+        self.assertIsNotNone(state.pending)
+        return state
+
+    def test_an_unrecognised_prompt_is_still_answered_legally(self):
+        state = self.ask(_asking(
+            "somePromptNobodyHasHeardOf",
+            lambda s: tuple(x.slot_id for x in s.players[0].in_play)))
+        legal = engine.legal_actions(state, 0)
+        action = ai.choose(state, 0)
+        # An unknown prompt makes every answer score alike; what has to hold
+        # is that the AI answers, and that apply() accepts the answer.
+        self.assertIn(action, legal)
+        state, _ = engine.apply(state, action)
+        self.assertIsNone(state.pending)
+
+    def test_a_heal_is_pointed_at_the_most_damaged_pokemon(self):
+        def options(state):
+            return tuple(x.slot_id for x in state.players[0].in_play)
+
+        rules = engine.Rules(trainer_effects={
+            GUID["Gadget"]: _asking("healTarget", options)})
+        state = _start(["Gadget", "Bruiser", "Dummy"], ["Bruiser", "Dummy"],
+                       "Bruiser", "Bruiser", bench0=("Dummy",), rules=rules)
+        state = _to_turn_of(state, 0)
+        state.players[0].active.damage = 10
+        hurt = state.players[0].bench[0]
+        hurt.damage = 20
+        state, _ = engine.apply(
+            state, engine.PlayTrainer(0, _find(state, 0, "Gadget")))
+        self.assertEqual(ai.choose(state, 0), engine.Choose(0, (hurt.slot_id,)))
+
+    def test_a_choice_that_belongs_to_the_opponent_routes_to_them(self):
+        def options(state):
+            return tuple(x.slot_id for x in state.players[1].bench)
+
+        rules = engine.Rules(trainer_effects={
+            GUID["Gadget"]: _asking("switchTo", options, player=1)})
+        state = _start(["Gadget", "Bruiser"], ["Bruiser", "Dummy", "Filler"],
+                       "Bruiser", "Bruiser", bench1=("Dummy", "Filler"),
+                       rules=rules)
+        state = _to_turn_of(state, 0)
+        state, _ = engine.apply(
+            state, engine.PlayTrainer(0, _find(state, 0, "Gadget")))
+
+        self.assertEqual(engine.players_to_act(state), [1])
+        self.assertEqual(engine.legal_actions(state, 0), [])
+        action = ai.choose(state, 1)
+        self.assertIn(action, engine.legal_actions(state, 1))
+
+    def test_choosing_never_disturbs_the_state_it_was_shown(self):
+        state = self.ask(_asking(
+            "searchDeck", lambda s: tuple(s.players[0].deck[:4]),
+            kind=engine.CHOICE_CARD))
+        before = _snapshot(state)
+        ai.choose(state, 0, rng=random.Random(1))
+        self.assertEqual(_snapshot(state), before)
+
+
 SOAK_GAMES = int(os.environ.get("PTCGO_AI_SOAK_GAMES", "60"))
 
 
@@ -642,6 +828,113 @@ class AiNeverMisbehavesTests(unittest.TestCase):
         self.assertGreater(wins / games, 0.66,
                            "the AI is no better than random: %d/%d"
                            % (wins, games))
+
+
+@unittest.skipUnless(os.path.isdir(CARD_DIR), "carddata/ not present")
+class AiWithRealCardTextTests(unittest.TestCase):
+    """The same invariants, but with every card's text switched on.
+
+    This is the configuration server.py will actually run, and it is a
+    different program from the one above: Trainers are playable, effects
+    suspend the game on a Choice, and an attack's damage is computed by a
+    hook rather than read off the card. Every one of those is a new way for
+    choose() to hand back something apply() will refuse.
+
+    Skipped without the client's LocalizationDB, which lives in the game
+    install rather than in this repo - with no text, effects.build_rules()
+    returns empty registries and this would silently retest the case above.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import effects
+        cls.effects = effects
+        cls.db = engine.CardDB.from_directory(CARD_DIR)
+        cls.loc = effects.load_localization()
+        if not cls.loc:
+            raise unittest.SkipTest("the client's LocalizationDB is not here")
+        cls.rules = effects.build_rules(cls.db, loc=cls.loc)
+        cls.deck = cls.build_deck(cls.db, cls.rules)
+
+    @staticmethod
+    def build_deck(db, rules):
+        """A deck shaped like one somebody would actually build.
+
+        An evolution line, enough Energy to power it, and four copies each of
+        the Trainers most decks are held together with - so the Trainer, the
+        Choice and the search paths are all on the critical path of the test
+        rather than reached by luck.
+        """
+        oshawott = next(c for c in db.by_name("Oshawott") if c.set_code == "BW1")
+        dewott = next(c for c in db.by_name("Dewott") if c.set_code == "BW1")
+        water = next(c for c in db if c.name == "WaterEnergy"
+                     and c.is_basic_energy)
+        deck = [oshawott.guid] * 8 + [dewott.guid] * 4 + [water.guid] * 20
+
+        wanted = ["Potion", "Switch", "UltraBall", "GreatBall", "NestBall",
+                  "ProfessorSycamore", "N", "EscapeRope", "PokemonCatcher",
+                  "FloatStone"]
+        for name in wanted:
+            found = [c for c in db.by_name(name)
+                     if c.guid in rules.trainer_effects]
+            if found:
+                deck += [found[0].guid] * 3
+        return (deck + [water.guid] * 60)[:60]
+
+    def test_whole_games_never_produce_an_illegal_action(self):
+        played = collections.Counter()
+        for game in range(max(8, SOAK_GAMES // 6)):
+            state, _ = engine.new_game(self.db, [list(self.deck),
+                                                 list(self.deck)],
+                                       seed=game, rules=self.rules)
+            rng = random.Random(game)
+            for step in range(4000):
+                if state.over:
+                    break
+                actors = engine.players_to_act(state)
+                self.assertTrue(actors, "game %d step %d: nobody may act"
+                                % (game, step))
+                player = actors[0]
+                legal = engine.legal_actions(state, player)
+                self.assertTrue(legal, "game %d step %d: nothing is legal (%s)"
+                                % (game, step,
+                                   state.pending.choice.prompt
+                                   if state.pending else state.phase))
+                before = _snapshot(state)
+                action = ai.choose(state, player, rng=rng)
+                self.assertIn(action, legal,
+                              "game %d step %d: %r is not legal"
+                              % (game, step, action))
+                self.assertEqual(_snapshot(state), before,
+                                 "game %d step %d: choose() mutated the state"
+                                 % (game, step))
+                played[type(action).__name__] += 1
+                state, _ = engine.apply(state, action)
+            else:
+                self.fail("game %d did not finish in 4000 actions" % game)
+            self.assertTrue(state.over)
+
+        # The test is only worth anything if the new code paths were reached.
+        self.assertGreater(played["PlayTrainer"], 0, "no Trainer was ever played")
+        self.assertGreater(played["Choose"], 0, "no Choice was ever answered")
+
+    def test_no_card_ever_goes_missing(self):
+        for game in range(4):
+            state, _ = engine.new_game(self.db, [list(self.deck),
+                                                 list(self.deck)],
+                                       seed=200 + game, rules=self.rules)
+            rng = random.Random(game)
+            while not state.over:
+                player = engine.players_to_act(state)[0]
+                state, _ = engine.apply(state, ai.choose(state, player, rng=rng))
+                found = 1 if state.stadium is not None else 0
+                for side in state.players:
+                    found += (len(side.deck) + len(side.hand) + len(side.discard)
+                              + len(side.prizes) + len(side.lost))
+                    for slot in side.in_play:
+                        found += len(slot.cards)
+                self.assertEqual(found, len(state.cards),
+                                 "game %d: a card is unaccounted for" % game)
 
 
 if __name__ == "__main__":
