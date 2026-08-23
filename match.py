@@ -723,10 +723,17 @@ class Match:
         msgs = []
         # A card arriving somewhere its owner can see has to be turned face up,
         # and face up means "has attributes" - so this is an introduction.
-        if change.to_zone in OPEN_ZONES and (
-                change.player == 0 or change.to_zone != ZONE_HAND):
+        reveal = (change.to_zone in OPEN_ZONES
+                  and (change.player == 0 or change.to_zone != ZONE_HAND))
+        # A prize is face down on the board, so introducing it BEFORE the move
+        # flipped it over on the prize pile and only then flew it across. You
+        # take a prize and then see what you got, not the other way round.
+        after = change.from_zone == ZONE_PRIZES
+        if reveal and not after:
             msgs.append(self._introduce_msg(change.card))
         msgs.append(self._move_msg(change.card, destination))
+        if reveal and after:
+            msgs.append(self._introduce_msg(change.card))
         return msgs
 
     def _change_attach(self, change):
@@ -747,6 +754,7 @@ class Match:
         """
         self._attack = dict(change.detail or {})
         self._attack["slot"] = change.slot
+        self._attack["card"] = change.card
         return []
 
     def _attack_effect(self, defender_cid, change):
@@ -801,30 +809,50 @@ class Match:
         })
 
     def _attack_source(self):
-        """The attacking Pokemon's entity, for playmat attribute 201870."""
+        """The attacking Pokemon's entity, for playmat attribute 201870.
+
+        Taken from the card rather than the slot. An attack that knocks its
+        own Pokemon out leaves no slot behind, and without this attribute the
+        Attack sequence's unguarded Value[0] read throws and kills the client's
+        message pump - so the one case that MUST work is the one the slot
+        lookup cannot serve.
+        """
+        cid = (self._attack or {}).get("card")
+        if cid is not None:
+            return self.eid(cid)
         slot = self.resolve_slot((self._attack or {}).get("slot"))
         return self.entity_of_slot(slot) if slot else None
 
     def _change_damage(self, change):
         """Damage is max minus current on one attribute, not a counter."""
+        # Deliberately NOT resolved through the slot. This runs against the
+        # final state, so a Pokemon this damage knocked out is already in the
+        # discard and its slot is gone - looking the slot up dropped the whole
+        # attack, animation included, for every killing blow.
         slot = self.resolve_slot(change.slot)
-        if slot is None or not slot.stack:
-            return []
-        cid = slot.stack[-1]
+        detail = change.detail or {}
+        cid = change.card
+        if cid is None:
+            if slot is None or not slot.stack:
+                return []
+            cid = slot.stack[-1]
         card = self.card(cid)
-        if not card.max_hp:
+        maximum = detail.get("maxHP") or card.max_hp
+        if not maximum:
             return []
-        current = max(0, card.max_hp - slot.damage)
+        dealt = detail.get("total")
+        if dealt is None:
+            dealt = slot.damage if slot else change.amount
+        current = max(0, maximum - dealt)
         hp = ("AttributeModified", {
             "gameID": self.game_id,
             "entityID": self.eid(cid),
             "attribute": {"name": ATTR_HP, "value": current,
-                          "originalValue": card.max_hp},
+                          "originalValue": maximum},
         })
         # Damage from an attack gets the whole hit: FX, a flying damage number
         # and the knockout animation. Damage from poison, burn or a confused
         # attacker has no attacker to play it from, so it just moves the bar.
-        detail = change.detail or {}
         if detail.get("abilityID") and self._attack:
             effect = self._attack_effect(cid, change)
             source = self._attack_source()
@@ -955,26 +983,36 @@ class Match:
         the viewer could otherwise see it.
         """
         cards = (change.detail or {}).get("cards") or []
-        items = []
-        for cid in cards:
-            # The card has to exist client-side and carry attributes, or there
-            # is nothing to turn face up.
-            items.append(("msg",) + self._introduce_msg(cid))
-            items.append(("msg", "EffectPlayed", {
-                "gameID": self.game_id,
-                "effectMessage": {
-                    "name": "RevealCardToAllEffect",
-                    "value": {
-                        "entityID": self.eid(cid),
-                        "Return": True,
-                        "alwaysReveal": True,
-                    },
+        if not cards:
+            return []
+        # The cards have to exist client-side and carry attributes before any
+        # of them can be turned face up, so the introductions go first and
+        # outside the parallel run.
+        items = [("msg",) + self._introduce_msg(cid) for cid in cards]
+        reveals = [("msg", "EffectPlayed", {
+            "gameID": self.game_id,
+            "effectMessage": {
+                "name": "RevealCardToAllEffect",
+                "value": {
+                    "entityID": self.eid(cid),
+                    "Return": True,
+                    "alwaysReveal": True,
                 },
-            }))
-        return [("seq", "AlwaysReveal", items)] if items else []
+            },
+        }) for cid in cards]
+        # ParallelSequence, not AlwaysReveal: a revealed HAND should appear as
+        # a hand. AlwaysReveal is a plain serial runner, so each card flew out,
+        # waited its half second and came back before the next one started -
+        # a seven-card hand took four seconds to show. ParallelSequence starts
+        # every child at once and waits for all of them, and the cards land in
+        # multiPresentArea, which exists to hold several.
+        items.append(("seq", "ParallelSequence", reveals))
+        return [("seq", "AlwaysReveal", items)]
 
     def _change_prize(self, change):
-        return self._change_move(change)
+        # The card's journey is its own move Change; this one only marks that
+        # a prize was taken, and carries no destination.
+        return []
 
     def _change_knockout(self, change):
         return []            # the engine also emits the moves to the discard

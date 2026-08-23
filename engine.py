@@ -1576,8 +1576,12 @@ def _apply_damage(state: GameState, slot: Slot, amount: int, changes: list,
     info = {"total": slot.damage, "maxHP": state.max_hp(slot)}
     if detail:
         info.update(detail)
+    # The card is named as well as the slot. Changes are rendered against the
+    # FINAL state, and a Pokemon that this damage knocks out has no slot left
+    # by then - so a renderer that could only look the slot up silently lost
+    # the whole attack.
     changes.append(Change(CHANGE_DAMAGE, player=owner, slot=slot.slot_id,
-                          amount=amount, detail=info))
+                          card=slot.top, amount=amount, detail=info))
 
 
 def _is_knocked_out(state: GameState, slot: Slot) -> bool:
@@ -2452,8 +2456,12 @@ def _do_attack(state, action, changes):
     _require(can_pay_cost(_energy_options(state, attacker_slot), attack.cost),
              "not enough Energy attached for %s" % attack.title)
 
+    # The attacker is named by CARD as well as by slot: an attack that knocks
+    # its own Pokemon out - recoil, or a mutual knockout - leaves no slot to
+    # look up by the time the changes are rendered.
     changes.append(Change(CHANGE_ATTACK, player=action.player,
                           slot=attacker_slot.slot_id,
+                          card=attacker_slot.top,
                           detail={"abilityID": attack.ability_id,
                                   "title": attack.title,
                                   "baseDamage": attack.damage}))
