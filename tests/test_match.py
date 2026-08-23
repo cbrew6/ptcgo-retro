@@ -480,6 +480,74 @@ class SetupSelectionTests(unittest.TestCase):
         self.assertEqual(bench, [basics[1]])
 
 
+class AttackSequenceTests(unittest.TestCase):
+    """The Attack sequence's first statement is unguarded."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.db = engine.CardDB.from_directory(CARD_DIR)
+
+    def _attacking_match(self):
+        """A match with both Actives in place and an attack resolved."""
+        basic = next(c for c in self.db
+                     if c.is_pokemon and c.stage == "Basic" and c.attacks
+                     and c.max_hp >= 60)
+        energy = next(c for c in self.db
+                      if c.is_basic_energy and c.energy_options)
+        deck = [basic.guid] * 20 + [energy.guid] * 40
+        m = match.Match("game-8", ["acct-a", "acct-b"], self.db,
+                        [deck, list(deck)], seed=9)
+        m.serialized_state(predeal=True)
+        m.auto_setup()
+        return m
+
+    def test_the_playmat_names_the_attacker_before_the_sequence(self):
+        """M.N.executeSequence opens with
+
+            All[Playmat.GetAttribute(201870).Value[0]]
+
+        and no guard, so a playmat without that attribute throws a
+        NullReferenceException out of the sequence - which escapes the message
+        pump coroutine and kills it for the rest of the game. Every later
+        message then piles up unprocessed: the board stops accepting clicks
+        and conceding does nothing.
+        """
+        m = self._attacking_match()
+        attacker = m.state.players[0].active
+        defender = m.state.players[1].active
+        self.assertIsNotNone(attacker)
+        self.assertIsNotNone(defender)
+        card = m.card(attacker.stack[-1])
+        attack = card.attacks[0]
+
+        items = m.animation_for([
+            engine.Change(engine.CHANGE_ATTACK, player=0,
+                          slot=attacker.slot_id,
+                          detail={"abilityID": attack.ability_id,
+                                  "title": attack.title,
+                                  "baseDamage": attack.damage}),
+            engine.Change(engine.CHANGE_DAMAGE, player=1,
+                          slot=defender.slot_id, amount=30,
+                          detail={"abilityID": attack.ability_id,
+                                  "baseDamage": attack.damage}),
+        ])
+        kinds = [(kind, name) for kind, name, _ in items]
+        self.assertIn(("seq", "Attack"), kinds)
+        index = kinds.index(("seq", "Attack"))
+        self.assertGreater(index, 0, "nothing was sent before the sequence")
+
+        before = items[index - 1]
+        self.assertEqual((before[0], before[1]), ("msg", "AttributeModified"))
+        self.assertEqual(before[2]["entityID"], m.playmat_id,
+                         "the attribute belongs to the PLAYMAT")
+        self.assertEqual(before[2]["attribute"]["name"],
+                         match.ATTR_ABILITY_SOURCE)
+        value = before[2]["attribute"]["value"]
+        self.assertIsInstance(value, list)
+        self.assertTrue(value, "[0] is read directly; an empty list throws too")
+        self.assertEqual(value[0], m.entity_of_slot(attacker))
+
+
 class CoinFlipTests(unittest.TestCase):
     """The opening flip, and why it cannot be sent before the board."""
 

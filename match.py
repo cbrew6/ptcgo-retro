@@ -57,6 +57,8 @@ ATTR_ASSET_NAME = 10020            # art-variant suffix, preferred over 200780
 ATTR_CONDITIONS = 200340           # SpecialConditions[]; the whole list, not a
                                    # delta - see _change_condition
 ATTR_BENCH_SLOTS = 201920          # BenchLayout divides by this: 0 gives NaN
+ATTR_ABILITY_SOURCE = 201870       # EntityID[] on the PLAYMAT: who is acting.
+                                   # The Attack sequence reads [0] unguarded.
 
 # Zones whose contents the owner may see. Everything else stays face down.
 OPEN_ZONES = (ZONE_HAND, ZONE_ACTIVE, ZONE_BENCH, ZONE_DISCARD)
@@ -703,6 +705,11 @@ class Match:
             },
         })
 
+    def _attack_source(self):
+        """The attacking Pokemon's entity, for playmat attribute 201870."""
+        slot = self.resolve_slot((self._attack or {}).get("slot"))
+        return self.entity_of_slot(slot) if slot else None
+
     def _change_damage(self, change):
         """Damage is max minus current on one attribute, not a counter."""
         slot = self.resolve_slot(change.slot)
@@ -725,8 +732,27 @@ class Match:
         detail = change.detail or {}
         if detail.get("abilityID") and self._attack:
             effect = self._attack_effect(cid, change)
+            source = self._attack_source()
             self._attack = None
-            return [("seq", "Attack", [("msg",) + effect, ("msg",) + hp])]
+            items = []
+            if source:
+                # BEFORE the sequence, not inside it. The Attack sequence's
+                # first statement is
+                #     All[Playmat.GetAttribute(201870).Value[0]]
+                # with no guard at all, so a playmat without that attribute
+                # throws a NullReferenceException out of executeSequence - and
+                # that exception escapes the message-pump coroutine, which
+                # Unity then kills for good. Every later message piles up
+                # unprocessed, which is why an attack was followed by a board
+                # that accepted no clicks and a concede that did nothing.
+                items.append(("msg", "AttributeModified", {
+                    "gameID": self.game_id,
+                    "entityID": self.playmat_id,
+                    "attribute": {"name": ATTR_ABILITY_SOURCE,
+                                  "value": [source]},
+                }))
+            items.append(("seq", "Attack", [("msg",) + effect, ("msg",) + hp]))
+            return items
         return [hp]
 
     def _change_condition(self, change):
