@@ -682,8 +682,18 @@ class Match:
             #
             # A single card has nothing to stagger, so it keeps Draw and its
             # type-bucketed fan.
-            out.append(("seq", "Draw" if len(draws_seen[0]) == 1 else "GroupedMove",
-                        items))
+            if len(draws_seen[0]) == 1:
+                out.append(("seq", "Draw", items))
+            else:
+                # Wrapped in DealInitialHands purely for its stagger.
+                # GroupedMove fans its children 0.2s apart by default, and the
+                # only two sequences in the client that override that -
+                # DealInitialHands and DealInitialPrizeCards - set it to 0.1s.
+                # So this is the one lever the server has on draw speed, and it
+                # halves it. Everything else DealInitialHands does (lowering
+                # the coins) is already true by the time anyone is drawing.
+                out.append(("seq", "DealInitialHands",
+                            [("seq", "GroupedMove", items)]))
 
         # Which player currently owes a knockout run, so the moves that follow
         # a knockout are gathered and anything else closes it.

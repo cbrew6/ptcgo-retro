@@ -483,6 +483,37 @@ class SetupTests(unittest.TestCase):
         self.assertEqual(state.players[1].mulligan_draw_number, 0)
         self.assertEqual(engine.players_to_act(state), [0])
 
+    def test_mulligans_cancel_out(self):
+        """Only the difference is owed.
+
+        Both players mulliganing the same number of times leaves nobody
+        drawing: for each of your mulligans your opponent may draw one, so
+        equal counts pay each other off. Paying the full count both ways gave
+        two players who each mulliganed ten an eleven-card hand apiece.
+        """
+        # Neither deck finds a Basic until card 15, so both mulligan twice.
+        both = self.deck(("FireEnergy", 14), ("Pipsqueak", 1), ("FireEnergy", 15))
+        state, _ = engine.new_game(DB, [list(both), list(both)],
+                                   rng=ScriptedRandom(), first_player=0)
+        self.assertEqual(state.players[0].mulligans,
+                         state.players[1].mulligans)
+        self.assertGreater(state.players[0].mulligans, 0,
+                           "the fixture never mulliganed, so it proves nothing")
+        self.assertEqual(state.players[0].owed_draws, 0)
+        self.assertEqual(state.players[1].owed_draws, 0)
+        self.assertEqual(state.players[0].owed_draws_total, 0)
+
+    def test_only_the_excess_mulligans_are_owed(self):
+        """Five against two is three, not five."""
+        many = self.deck(("FireEnergy", 21), ("Pipsqueak", 1), ("FireEnergy", 8))
+        few = self.deck(("FireEnergy", 7), ("Pipsqueak", 1), ("FireEnergy", 22))
+        state, _ = engine.new_game(DB, [many, few],
+                                   rng=ScriptedRandom(), first_player=0)
+        gap = state.players[0].mulligans - state.players[1].mulligans
+        self.assertGreater(gap, 0)
+        self.assertEqual(state.players[1].owed_draws, gap)
+        self.assertEqual(state.players[0].owed_draws, 0)
+
     def test_mulligan_compensation_may_be_declined(self):
         """The rule is permissive, and a small hand is sometimes better."""
         deck0 = self.deck(("FireEnergy", 7), ("Pipsqueak", 1), ("FireEnergy", 22))

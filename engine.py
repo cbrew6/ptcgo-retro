@@ -1970,8 +1970,12 @@ def new_game(db: CardDB, decks, seed=0, rules: Rules = DEFAULT_RULES,
             ps.hand.clear()
             _shuffle_deck(state, p, changes)
 
+    # Only the DIFFERENCE is drawn. Mulligans cancel: if both players took
+    # ten, neither draws anything, and if one took five and the other two,
+    # only the three extra are owed. Paying the full count both ways gave two
+    # players who each mulliganed ten an eleven-card hand apiece.
     for p in (0, 1):
-        extra = state.players[1 - p].mulligans
+        extra = max(0, state.players[1 - p].mulligans - state.players[p].mulligans)
         if not extra:
             continue
         if rules.optional_mulligan_draw:
