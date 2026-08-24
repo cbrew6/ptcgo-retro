@@ -23,11 +23,29 @@ collection code path that reads one of the seven defaults it:
 and CardImageRenderer never asks for any of them - it wants Set, Type,
 EnergyType, EnergyProvided, CardImage, IsFoil, FoilMask, FoilEffects, Version.
 
-Exactly ONE attribute here is load-bearing, and it is not one of the seven:
-**200570 PokemonTypes**. `getDefaultPerCardType` does `get_EnergyType().Value`
-with no HasValue check, and that throw unwinds RefreshRequestData before
+THREE attributes are load-bearing, and none of them is one of the seven. They
+are the reads that have no guard, and they were found by reading the component
+factory rather than the render path - which is the lesson, because the render
+path is where I looked first and it is not where archetypes are built.
+
+`w.C`, the card-type component every archetype gets, does:
+
+    this.A = attributes.GetAttribute(<200300>).get_Value().Value;   always
+    this.A = (isTrainer ? attributes.GetAttribute(<200270>)
+                            .get_Value().Value : TrainerTypes.UNSET);
+    if (isEnergy) a = Flatten(attributes.GetAttribute(<201040>).get_Value().A);
+
+so **200300 on every card, 200270 on every Trainer, 201040 on every Energy**.
+Omitting one throws "Nullable object must have a value" out of
+`w.g.CreateArchetype`, which kills the archetype load coroutine - the client
+sticks at 30% on the loading bar and nothing else ever explains why.
+
+`getDefaultPerCardType` adds a fourth: **200570 PokemonTypes**, an unguarded
+`get_EnergyType().Value` whose throw unwinds RefreshRequestData before
 getImageRequestString, so the card never requests its texture and renders blank
-for the whole session. We can supply it, because the bundle names carry it.
+for the whole session. Every other component - `D` for Pokemon, `c` for the
+set, `f` for rarity - checks HasAttribute or coalesces, which is why HP, stage,
+weakness and the rest may simply be absent.
 
 WHAT THE BUNDLE NAMES GIVE US, all of it verifiable rather than inferred:
 
@@ -98,7 +116,8 @@ ATTR_UNKNOWN_BOOL = 10090          # bool?, present-and-empty on every real card
 ATTR_NAME_KEY = 10140
 ATTR_SET_CARD_ID = 10190
 ATTR_CARD_TYPE = 200300
-ATTR_TRAINER_TYPE = 200270
+ATTR_TRAINER_TYPE = 200270          # unguarded for a TrainerCard
+ATTR_ENERGY_PROVIDED = 201040      # unguarded for an Energy
 ATTR_TYPES = 200570                # the load-bearing one
 ATTR_SET = 200580
 ATTR_FOIL_EFFECT = 200610
@@ -236,11 +255,24 @@ def build_set(set_name, meta, index):
 
         if "energyicon" in tags or segment == "Energy":
             attrs.append({"n": ATTR_CARD_TYPE, "v": obj_str("Energy")})
+            # Unguarded read. "[[]]" - provides nothing we can name - is a
+            # shape that already occurs in real card data, and the client's own
+            # getDefaultPerCardType handles an empty list explicitly
+            # (Length == 0 ? NoColor : [0]). Claiming a colour would be a
+            # guess; this is the honest value that also cannot throw.
+            attrs.append({"n": ATTR_ENERGY_PROVIDED,
+                          "v": obj_text('{"options":[[]]}')})
         elif segment == "trainer" or "toolpip" in tags:
             attrs.append({"n": ATTR_CARD_TYPE, "v": obj_str("TrainerCard")})
-            if "toolpip" in tags:
-                attrs.append({"n": ATTR_TRAINER_TYPE,
-                              "v": obj_str("PokemonTool")})
+            # Also unguarded, so every Trainer needs one. The tool pip is the
+            # only trainer type the bundles reveal; for the rest UNSET is a
+            # real enum member (-1) and is what the client itself substitutes
+            # for a card with no trainer type. Item is the commonest value and
+            # would be right about 45% of the time, which is exactly the kind
+            # of guess that makes a filter lie.
+            attrs.append({"n": ATTR_TRAINER_TYPE,
+                          "v": obj_str("PokemonTool" if "toolpip" in tags
+                                       else "UNSET")})
         else:
             attrs.append({"n": ATTR_CARD_TYPE, "v": obj_str("Pokemon")})
             # 200570 is why this script exists. Without it the card renders

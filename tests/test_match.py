@@ -900,6 +900,126 @@ class SerializedStateTests(unittest.TestCase):
         json.dumps(self._match().serialized_state())
 
 
+
+class BrowsePoolTests(unittest.TestCase):
+    """The cards we can show but not play, and the reads that must not throw.
+
+    `w.C` is the card-type component every archetype gets, and three of its
+    reads have no guard:
+
+        GetAttribute(200300).get_Value().Value              every card
+        isTrainer ? GetAttribute(200270).get_Value().Value  every Trainer
+        isEnergy  ? Flatten(GetAttribute(201040)...A)       every Energy
+
+    plus getDefaultPerCardType's GetAttribute(200570) for a Pokemon. Omitting
+    one throws "Nullable object must have a value" out of CreateArchetype,
+    which kills the archetype load coroutine: the client stops at 30% on the
+    loading bar and nothing says why. That happened, which is why this exists.
+
+    These skip when carddata_browse/ has not been generated - it is produced by
+    tools/build_collection_pool.py and is not in the repo.
+    """
+
+    ATTR_CARD_TYPE = 200300
+    ATTR_TRAINER_TYPE = 200270
+    ATTR_ENERGY_PROVIDED = 201040
+    ATTR_TYPES = 200570
+    ATTR_NAME_KEY = 10140
+
+    @classmethod
+    def setUpClass(cls):
+        directory = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "carddata_browse")
+        if not os.path.isdir(directory):
+            raise unittest.SkipTest("carddata_browse/ has not been generated")
+        cls.cards = []
+        for name in sorted(os.listdir(directory)):
+            if not name.endswith(".json") or name.startswith("_"):
+                continue
+            with open(os.path.join(directory, name), encoding="utf-8") as fh:
+                for a in json.load(fh).get("archetypes") or []:
+                    cls.cards.append((name, {x["n"]: x["v"]
+                                             for x in a["attrs"]}))
+        if not cls.cards:
+            raise unittest.SkipTest("carddata_browse/ is empty")
+
+    def test_every_card_declares_a_card_type(self):
+        for name, attrs in self.cards:
+            self.assertIn(self.ATTR_CARD_TYPE, attrs, name)
+            self.assertTrue(attrs[self.ATTR_CARD_TYPE].get("s"), name)
+
+    def test_every_trainer_declares_a_trainer_type(self):
+        seen = 0
+        for name, attrs in self.cards:
+            if attrs[self.ATTR_CARD_TYPE].get("s") != "TrainerCard":
+                continue
+            seen += 1
+            self.assertIn(self.ATTR_TRAINER_TYPE, attrs, name)
+            self.assertIn(attrs[self.ATTR_TRAINER_TYPE].get("s"),
+                          ("Item", "Stadium", "Supporter", "TechnicalMachine",
+                           "PokemonTool", "PokemonToolF", "Trainer", "UNSET"),
+                          name)
+        self.assertGreater(seen, 0, "no Trainers in the pool to check")
+
+    def test_every_energy_declares_what_it_provides(self):
+        seen = 0
+        for name, attrs in self.cards:
+            if attrs[self.ATTR_CARD_TYPE].get("s") != "Energy":
+                continue
+            seen += 1
+            self.assertIn(self.ATTR_ENERGY_PROVIDED, attrs, name)
+            body = attrs[self.ATTR_ENERGY_PROVIDED].get("s") or ""
+            self.assertIn("options", body, name)
+            json.loads(body)          # must parse; the client parses it too
+        self.assertGreater(seen, 0, "no Energy in the pool to check")
+
+    def test_every_pokemon_declares_its_type(self):
+        seen = 0
+        for name, attrs in self.cards:
+            if attrs[self.ATTR_CARD_TYPE].get("s") != "Pokemon":
+                continue
+            seen += 1
+            self.assertIn(self.ATTR_TYPES, attrs, name)
+            options = attrs[self.ATTR_TYPES].get("a") or []
+            self.assertTrue(options, name)
+            self.assertTrue(options[0].get("s"), name)
+        self.assertGreater(seen, 0, "no Pokemon in the pool to check")
+
+    def test_every_card_has_a_name_key(self):
+        """10140 absent makes HandSort's comparator NRE and empties the hand."""
+        for name, attrs in self.cards:
+            self.assertIn(self.ATTR_NAME_KEY, attrs, name)
+            self.assertTrue(attrs[self.ATTR_NAME_KEY].get("s"), name)
+
+    def test_the_engine_cannot_be_handed_one(self):
+        """The inner interlock: a card with no HP must never reach a match."""
+        import server
+        engine_db = server.card_db()
+        browse = server.browse_guids()
+        self.assertGreater(len(browse), 0)
+        for guid in browse:
+            self.assertNotIn(guid, engine_db)
+
+    def test_they_are_legal_in_no_format(self):
+        """The outer interlock: the client's own validation refuses them."""
+        import server
+        browse = server.browse_guids()
+        rows = {r["archetypeID"]: r for r in server.build_format_legality()}
+        for guid in browse:
+            self.assertIn(guid, rows)
+            self.assertFalse(any(rows[guid]["formatLegality"]), guid)
+
+    def test_a_real_card_is_still_legal(self):
+        """...and the interlock has not swallowed the playable pool with it."""
+        import server
+        browse = server.browse_guids()
+        playable = [r for r in server.build_format_legality()
+                    if r["archetypeID"] not in browse]
+        self.assertGreater(len(playable), 9000)
+        self.assertTrue(all(any(r["formatLegality"]) for r in playable))
+
+
 if __name__ == "__main__":
     unittest.main()
 
