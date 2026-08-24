@@ -27,3 +27,7 @@ tools/namecache/
 tools/art_provenance.json
 decks.json
 decks.json.bak
+
+# Metadata extracted from donated caches - TPCI's data, not ours to
+# redistribute. Regenerate with: python tools/import_donor_metadata.py <cache>
+donor/

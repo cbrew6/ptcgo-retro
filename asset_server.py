@@ -37,12 +37,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 PORT = 8081
 # Bump when the manifest contents change - the client caches the manifest by
 # version number and won't re-fetch otherwise.
+# 8: asset names now come from the real CDN manifest (donor/manifest.json)
+#    fully qualified, instead of being reconstructed from bundle-name prefixes.
 # 6: bundle_index.json is now read from each bundle's own m_Container instead
 #    of by walking strings, which removed 1,279 invented asset names (and
 #    added one real one). Invented names matter: DoesAssetExistInManifest is
 #    what makes the client commit to a request, so a name no bundle can serve
 #    sends it down a branch with no fallback.
-MANIFEST_VERSION = 7
+MANIFEST_VERSION = 8
 
 log = logging.getLogger("assets")
 
@@ -64,7 +66,15 @@ def load_index():
 
 
 def asset_aliases(bundle, names):
-    """Register "{prefix}/{asset}" for each underscore-delimited prefix.
+    """Register the asset names this bundle answers for.
+
+    A name that already contains "/" came from the real CDN manifest and is
+    exactly what the original server declared, so it is registered verbatim -
+    no prefix is derived and none is added. Everything below applies only to
+    bare leaf names recovered by extraction, where the namespace has to be
+    reconstructed.
+
+    Register "{prefix}/{asset}" for each underscore-delimited prefix.
 
     Foil bundles must NOT claim the bare set prefix. Card art is requested as
     "{set}/{number}" and foil masks as "{set}_{mask}/{number}", but a bundle
@@ -76,6 +86,10 @@ def asset_aliases(bundle, names):
     So for any bundle carrying a wp_<mask> segment, aliases start at the
     prefix that includes that segment and never get shorter.
     """
+    qualified = [n for n in names if "/" in n]
+    if qualified:
+        return [{"name": n} for n in qualified]
+
     parts = bundle.split("_")
     start = 1
     for k, p in enumerate(parts):

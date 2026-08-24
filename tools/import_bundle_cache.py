@@ -9,6 +9,10 @@ and `__data` IS the .unity3d payload, byte for byte. Our asset server serves
 `StreamingAssets/en_US/<bundleName>.unity3d`, so importing is a copy and a
 rename - no repacking, no re-signing.
 
+A cache may still be a .zip. Those run 4 GB and unpacking one to take 118
+bundles out of it is a waste of an hour and 4 GB of disk, so a zip is read in
+place: entries are streamed straight to their destination.
+
 This is how the art that the shut-down CDN used to hold comes back. Nothing
 here can be synthesised: a foil mask traces the card's own artwork silhouette,
 so it exists only in a cache belonging to someone who actually played that set.
@@ -22,9 +26,9 @@ Two rules this does not bend:
     a donor cache is indistinguishable from a good one by name alone.
 
 Usage:
-    python tools/import_bundle_cache.py <cacheDir>
-    python tools/import_bundle_cache.py <cacheDir> --apply
-    python tools/import_bundle_cache.py <cacheDir> --apply --only=_wp_
+    python tools/import_bundle_cache.py <cacheDir|cache.zip>
+    python tools/import_bundle_cache.py <cacheDir|cache.zip> --apply
+    python tools/import_bundle_cache.py <cacheDir|cache.zip> --apply --only=_wp_
 """
 
 import argparse
@@ -32,8 +36,8 @@ import collections
 import hashlib
 import os
 import re
-import shutil
 import sys
+import zipfile
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, HERE)
@@ -45,8 +49,34 @@ SET_RE = re.compile(r"^en_US_([A-Za-z0-9]+)_")
 KIND_RE = re.compile(r"_(wp_[a-z]+)")
 
 
-def payloads(cache_dir):
-    """bundleName -> path of its __data, for every complete entry."""
+class Payload(object):
+    """One complete `__data`, wherever it physically lives.
+
+    Size is known without reading, which is what the "only take the larger
+    one" rule compares; bytes are only pulled when a copy actually happens.
+    """
+
+    def __init__(self, size, reader):
+        self.size = size
+        self._reader = reader
+
+    def read(self):
+        return self._reader()
+
+    def digest(self):
+        h = hashlib.sha1()
+        h.update(self.read())
+        return h.hexdigest()
+
+
+def payloads(cache):
+    """bundleName -> Payload, for every complete entry in a dir or a .zip."""
+    if os.path.isfile(cache) and cache.lower().endswith(".zip"):
+        return _zip_payloads(cache)
+    return _dir_payloads(cache)
+
+
+def _dir_payloads(cache_dir):
     found = {}
     for name in sorted(os.listdir(cache_dir)):
         entry = os.path.join(cache_dir, name)
@@ -60,11 +90,34 @@ def payloads(cache_dir):
             size = os.path.getsize(data)
             if size <= 0:
                 continue                 # a started download, not a bundle
-            if best is None or size > os.path.getsize(best):
-                best = data
+            if best is None or size > best[0]:
+                best = (size, data)
         if best is not None:
-            found[name] = best
+            found[name] = Payload(
+                best[0], lambda p=best[1]: open(p, "rb").read())
     return found
+
+
+def _zip_payloads(path):
+    """The same rule, over a zipped cache read in place.
+
+    The bundleCache may sit at any depth (donors zip from different roots), so
+    the entry is located by the `bundleCache/<name>/<hash>/__data` shape rather
+    than by a fixed prefix.
+    """
+    archive = zipfile.ZipFile(path)
+    best = {}
+    for info in archive.infolist():
+        if info.is_dir() or "/bundleCache/" not in info.filename:
+            continue
+        parts = info.filename.split("/bundleCache/")[1].split("/")
+        if len(parts) < 3 or parts[-1] != "__data" or info.file_size <= 0:
+            continue
+        name = parts[0]
+        if name not in best or info.file_size > best[name].file_size:
+            best[name] = info
+    return {n: Payload(i.file_size, lambda i=i: archive.read(i))
+            for n, i in best.items()}
 
 
 def digest(path):
@@ -84,14 +137,14 @@ def classify(name):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("cache", help="a bundleCache directory")
+    ap.add_argument("cache", help="a bundleCache directory, or a .zip of one")
     ap.add_argument("--apply", action="store_true")
     ap.add_argument("--only", default="",
                     help="only bundles whose name contains this")
     args = ap.parse_args(argv)
 
-    if not os.path.isdir(args.cache):
-        sys.exit("no such directory: %s" % args.cache)
+    if not (os.path.isdir(args.cache) or os.path.isfile(args.cache)):
+        sys.exit("no such cache: %s" % args.cache)
     target = asset_server.BUNDLE_DIR
     if not os.path.isdir(target):
         sys.exit("no bundle directory at %s" % target)
@@ -103,21 +156,21 @@ def main(argv=None):
             if f.endswith(".unity3d")}
 
     new, replace, same = [], [], 0
-    for name, source in sorted(donated.items()):
+    for name, payload in sorted(donated.items()):
         destination = os.path.join(target, name + ".unity3d")
         if name not in have:
-            new.append((name, source, destination))
+            new.append((name, payload, destination))
             continue
         # Same name already served. Only take the donated one if it is both
         # different and bigger - a truncated entry has a valid name too.
-        if os.path.getsize(source) > os.path.getsize(destination) \
-                and digest(source) != digest(destination):
-            replace.append((name, source, destination))
+        if payload.size > os.path.getsize(destination) \
+                and payload.digest() != digest(destination):
+            replace.append((name, payload, destination))
         else:
             same += 1
 
     per_set = collections.defaultdict(collections.Counter)
-    for name, _s, _d in new + replace:
+    for name, _payload, _d in new + replace:
         set_code, kind = classify(name)
         per_set[set_code][kind] += 1
 
@@ -137,9 +190,10 @@ def main(argv=None):
         return 0
 
     written = 0
-    for name, source, destination in new + replace:
+    for name, payload, destination in new + replace:
         tmp = destination + ".part"
-        shutil.copyfile(source, tmp)
+        with open(tmp, "wb") as fh:
+            fh.write(payload.read())
         os.replace(tmp, destination)       # never a half-written bundle
         written += 1
     print("\nwrote %d bundles into %s" % (written, target))

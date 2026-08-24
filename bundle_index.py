@@ -41,7 +41,19 @@ UnityFS layout:
 Inside, m_Container entries are little-endian length-prefixed ASCII strings
 padded to a 4-byte boundary.
 
-Writes bundle_index.json: {bundle_name: [asset names]}.
+The real CDN manifest beats all of this where it is available. A donated
+cache carries `donor/manifest.json` (see tools/import_donor_metadata.py), which
+is the AssetBundleManifest the original server shipped: 3,058 bundles and
+32,929 asset names, every one of them ALREADY FULLY QUALIFIED - "SM5/018",
+"SM5_wp_std_Foil2/009", "LandingPage/swsh10_dialga_landingpage". Extraction
+only recovers the bare leaf ("018"), which is why asset_server.py has to guess
+the namespace back on, and guessing it is what shipped a foil mask in place of
+a card face. So: prefer the manifest, extract only for bundles it does not
+list.
+
+Writes bundle_index.json: {bundle_name: [asset names]}. A name containing "/"
+is final and asset_server.py registers it verbatim; a bare one still goes
+through the prefix expansion.
 Run after changing the set of bundles; asset_server.py loads the result.
 """
 
@@ -61,6 +73,18 @@ BUNDLE_DIR = os.path.join(
     LOCALE,
 )
 OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bundle_index.json")
+MANIFEST = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "donor", "manifest.json")
+
+
+def manifest_names():
+    """bundle -> fully-qualified asset names, from the real CDN manifest."""
+    if not os.path.exists(MANIFEST):
+        return {}
+    with open(MANIFEST, encoding="utf-8") as fh:
+        doc = json.load(fh)
+    return {b["name"]: [a["name"] for a in (b.get("assets") or ())]
+            for b in doc.get("bundles", ())}
 
 # Type-tree field names and Unity internals also appear as plain strings; asset
 # names are lowercase-ish paths. Exclude the obvious engine metadata.
@@ -316,7 +340,9 @@ def container_names(path):
 def main():
     if not os.path.isdir(BUNDLE_DIR):
         sys.exit("no bundle directory: %s" % BUNDLE_DIR)
+    declared = manifest_names()
     index, total, fell_back = {}, 0, []
+    from_manifest, extracted, undeclared = 0, 0, []
     for fn in sorted(os.listdir(BUNDLE_DIR)):
         if not fn.endswith(".unity3d"):
             continue
@@ -326,6 +352,14 @@ def main():
         name, _, ver = stem.rpartition("_")
         if not name or not ver.isdigit():
             continue
+        if name in declared:
+            # The server's own answer. An empty assets[] is a real answer too -
+            # some bundles genuinely declare none - so it is kept, not retried.
+            index[name] = declared[name]
+            total += len(declared[name])
+            from_manifest += 1
+            continue
+        undeclared.append(name)
         path = os.path.join(BUNDLE_DIR, fn)
         names = None
         try:
@@ -347,9 +381,23 @@ def main():
             names = asset_names(raw)
         index[name] = names
         total += len(names)
+        extracted += 1
     with open(OUT, "w", encoding="utf-8") as fh:
         json.dump(index, fh, indent=1)
     print("indexed %d bundles, %d asset names -> %s" % (len(index), total, OUT))
+    if declared:
+        print("  %d bundles named by the real manifest, %d extracted"
+              % (from_manifest, extracted))
+        missing = sorted(set(declared) - set(index))
+        if missing:
+            print("  %d bundles the manifest lists that we do not have"
+                  % len(missing))
+        if undeclared:
+            print("  %d bundles we serve that the manifest never listed: %s"
+                  % (len(undeclared), ", ".join(undeclared[:6])))
+    else:
+        print("  no donor/manifest.json - every name is guessed. Run"
+              " tools/import_donor_metadata.py if a donated cache is available.")
     if fell_back:
         print("  %d bundles fell back to the string heuristic:" % len(fell_back))
         for f in fell_back[:10]:

@@ -1343,31 +1343,53 @@ SET_DATA = None  # built on first use, after logging is configured
 # contents as a single release.
 
 LOC_DB = os.path.join(GAME_DIR, "LocalizationDB-UTF16.db")
+# A donated cache carries the same DB as it stood on a live account: 40,306
+# strings against the 27,550 the installer shipped. The extra rows are card
+# text and UI for sets that arrived over the wire. Rows from the shipped DB
+# win on a key collision - it is the one matched to this build.
+DONOR_LOC_DB = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "donor", "LocalizationDB-UTF16.db")
 LOC_RELEASE = "ptcgo-local"
 
 _loc_cache = None
 
 
-def load_localization():
-    """Read key/value pairs out of the client's prebuilt localization DB."""
-    global _loc_cache
-    if _loc_cache is not None:
-        return _loc_cache
-    if not os.path.exists(LOC_DB):
-        log.error("no localization DB at %s - UI labels will be missing", LOC_DB)
-        _loc_cache = []
-        return _loc_cache
+def _loc_rows(path):
+    """key/value pairs out of one localization DB, or [] if unreadable."""
+    if not os.path.exists(path):
+        return []
     try:
-        con = sqlite3.connect("file:%s?mode=ro" % LOC_DB.replace("\\", "/"),
+        con = sqlite3.connect("file:%s?mode=ro" % path.replace("\\", "/"),
                               uri=True)
         rows = con.execute("select key, value from Lookup").fetchall()
         con.close()
+        return rows
     except sqlite3.Error as exc:
-        log.error("could not read localization DB: %s", exc)
-        _loc_cache = []
+        log.error("could not read localization DB %s: %s", path, exc)
+        return []
+
+
+def load_localization():
+    """Every string we can serve: the shipped DB, widened by a donated one."""
+    global _loc_cache
+    if _loc_cache is not None:
         return _loc_cache
-    _loc_cache = [{"key": k, "value": v} for k, v in rows]
-    log.info("loaded %d localization strings", len(_loc_cache))
+    shipped = _loc_rows(LOC_DB)
+    if not shipped:
+        log.error("no localization DB at %s - UI labels will be missing", LOC_DB)
+    merged = {}
+    for key, value in _loc_rows(DONOR_LOC_DB):
+        merged[key] = value
+    added = len(merged)
+    for key, value in shipped:                 # shipped wins on a collision
+        merged[key] = value
+    _loc_cache = [{"key": k, "value": v} for k, v in merged.items()]
+    if added:
+        log.info("loaded %d localization strings (%d shipped, %d added from a"
+                 " donated DB)", len(_loc_cache), len(shipped),
+                 len(_loc_cache) - len(shipped))
+    else:
+        log.info("loaded %d localization strings", len(_loc_cache))
     return _loc_cache
 
 
