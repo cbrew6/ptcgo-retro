@@ -988,6 +988,29 @@ Bench" is one offer answered in one message.
   fan-out, `Attack`, `Knockout`, `Draw`, `Mulligan`, ...). A message sent
   outside one gets no choreography. `match.animation_for()` keeps that
   structure; `messages_for()` flattens it.
+- **The sequence NAME picks the motion.** A sequence pushes
+  `From<location>`/`To<location>` onto `get_SequenceStack()`, and the
+  `CurveMotion` prefab for a card's flight is chosen off that stack. Several
+  named sequences have a body that is a plain pass-through - `PlayEnergy` runs
+  its children and nothing else - so it is easy to conclude they do nothing and
+  send the move bare. They do not do nothing: the name is the animation.
+  Wrapping the same EntityMoved in `PlayEnergy` is the difference between the
+  Energy shrinking into the bubble at the bottom of the card and the Active
+  lifting so the card can slide in behind it.
+
+  Worth knowing which one to reach for:
+
+  | beat | sequence | what it adds |
+  | --- | --- | --- |
+  | attach Energy | `PlayEnergy` | shrink into the Energy bubble |
+  | promote after a knockout | `ReplaceActive` | finds the move into the Active area and plays the promotion motion |
+  | retreat | `Retreat`, `DiscardRetreatCost` | the swap, and the cost going to the discard |
+  | take a prize | `DrawPrizeCard` | closes the prize pile FIRST, then flies and flips |
+  | reveal a placed Pokemon | `IntroduceInitialPokemon` | plays **FlipOver** on every EntityIntroduced child |
+
+  `IntroduceInitialPokemon` collects those children in its CONSTRUCTOR, so a
+  reveal sent outside it has no flip at all and the card simply appears.
+
 - **`ParallelSequence` always throws.** Its backing list is declared and never
   assigned, so it raises a NullReferenceException out of the message pump and
   ends the game. There is no generic "run these at once" sequence. To show

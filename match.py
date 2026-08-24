@@ -831,16 +831,35 @@ class Match:
         msgs.append(self._move_msg(change.card, destination))
         if reveal and after:
             msgs.append(self._introduce_msg(change.card))
+        if after:
+            # Taking a prize is DrawPrizeCard's whole job: it closes the prize
+            # pile first, then collects the EntityMoved and EntityIntroduced
+            # out of its own children and choreographs them. Sent bare, the
+            # card turned face up while still sitting on the pile and only
+            # then travelled - you saw what you had won before you had it.
+            return [("seq", "DrawPrizeCard",
+                     [("msg",) + m for m in msgs])]
         return msgs
 
     def _change_attach(self, change):
-        """Energy becomes a child of the Pokemon; there is no energy attribute."""
+        """Energy becomes a child of the Pokemon; there is no energy attribute.
+
+        Wrapped in the PlayEnergy sequence, which is what makes the card
+        shrink into the Energy bubble at the bottom of the Pokemon instead of
+        lifting the Active and sliding in behind it. The sequence body is a
+        plain pass-through - what does the work is the NAME, which goes on
+        get_SequenceStack() and picks the CurveMotion prefab for the flight.
+        Sent bare, the move gets the default motion between those two zones,
+        which is the wrong one.
+        """
         if change.card is None or change.slot is None:
             return []
         target = self.entity_of_slot(self.resolve_slot(change.slot))
         if target is None:
             return []
-        return [self._introduce_msg(change.card), self._move_msg(change.card, target)]
+        return [("seq", "PlayEnergy",
+                 [("msg",) + self._introduce_msg(change.card),
+                  ("msg",) + self._move_msg(change.card, target)])]
 
     def _change_attack(self, change):
         """Remembered, not sent.
@@ -1140,10 +1159,12 @@ class Match:
         bench_pile = self.pile.get((change.player, ZONE_BENCH))
         msgs = []
         if outgoing is not None and outgoing.stack and bench_pile:
-            msgs.append(self._move_msg(outgoing.top, bench_pile))
+            msgs.append(("msg",) + self._move_msg(outgoing.top, bench_pile))
         if incoming is not None and incoming.stack and active_pile:
-            msgs.append(self._move_msg(incoming.top, active_pile))
-        return msgs
+            msgs.append(("msg",) + self._move_msg(incoming.top, active_pile))
+        if not msgs:
+            return []
+        return [("seq", "Retreat", msgs)]
 
     def _change_promote(self, change):
         """The benched Pokemon that replaces a knocked-out Active.
@@ -1164,7 +1185,11 @@ class Match:
         destination = self.pile.get((change.player, ZONE_ACTIVE))
         if destination is None:
             return []
-        return [self._move_msg(change.card, destination)]
+        # ReplaceActive finds the move whose destination is the Active area,
+        # pushes From<location>/To<location> onto the sequence stack and plays
+        # the promotion motion for it. Bare, the card just appears there.
+        return [("seq", "ReplaceActive",
+                 [("msg",) + self._move_msg(change.card, destination)])]
 
     def _change_turnStart(self, change):
         return [("ActivePlayerSet", {
@@ -1987,6 +2012,17 @@ class Match:
             if pile:
                 piles.setdefault(change.player, []).append(pile)
 
+        # ONLY the opponent's. MulliganRevealCardsEffect is the "look at their
+        # hand" dialog - the shipped prompt for it reads "Your opponent has no
+        # Basic Pokemon and must draw a new hand. Look at their hand and select
+        # Done" - and a player's own mulligan is a different flow with its own
+        # wording ("YOUR opening hand has no Basic Pokemon"). Emitting one per
+        # player conflated the two and, because the Mulligan sequence waits for
+        # each dialog to be dismissed, meant two OKs: your own mulligans, then
+        # theirs, which read as the same thing said twice with different
+        # numbers.
+        piles.pop(0, None)
+
         items = []
         for player, hands in sorted(piles.items()):
             items.append(("msg", "EffectPlayed", {
@@ -2007,16 +2043,22 @@ class Match:
     def reveal_setup_items(self, player=1):
         """Turn a player's setup Pokemon face up, after the prizes are out.
 
-        The counterpart to the face-down placement in _change_move: those
-        entities were introduced with a null attribute map, so this is the
-        same EntityIntroduced again, this time carrying the attributes. No
-        move is needed - the cards are already where they belong.
+        The counterpart to the hidden placement in _change_move: those cards
+        were moved without ever being introduced, so this is their first
+        EntityIntroduced and it carries the attributes. No move is needed -
+        the cards are already where they belong.
         """
         items = []
         for slot, _pile, _is_active in self.slot_entities(player):
             if not slot.stack:
                 continue
             items.append(("msg",) + self._introduce_msg(slot.stack[-1], slot))
+        if items:
+            # IntroduceInitialPokemon collects its EntityIntroduced children in
+            # its CONSTRUCTOR and plays a "FlipOver" animation for each. Sent
+            # bare the card simply appears - "it just pops in" - because
+            # nothing outside this sequence ever flips one over.
+            items = [("seq", "IntroduceInitialPokemon", items)]
         # From here on their Pokemon are public, so ordinary play introduces
         # them face up. This is a flag rather than a phase test because
         # animation_for runs AFTER engine.apply: by the time the last
@@ -2075,12 +2117,19 @@ class Match:
             if moves:
                 hands.append(("seq", "GroupedMove", moves))
         if hands:
-            # The shuffle is part of the deal, not a beat before it: the real
-            # animation riffles both decks WHILE the cards fly out into the
-            # hands. DealInitialHands also lowers both coins as the very first
-            # thing it does, so the coin clears exactly as the deal begins and
-            # the shuffle never plays over it.
-            deal = ("seq", "DealInitialHands", self.shuffle_items() + hands)
+            # DealInitialHands lowers both coins as the very first thing it
+            # does, so the coin clears exactly as the deal begins.
+            #
+            # Where the SHUFFLE goes depends on who chose, and this is pacing
+            # rather than taste. When the player was asked, the go-first dialog
+            # is itself the beat between the flip and the deal, so the shuffle
+            # rides along with the deal exactly as the real animation does -
+            # decks riffling while the cards fly out. When the OPPONENT chose
+            # there is no dialog and nothing else to wait on, and folding the
+            # shuffle into the deal left the hand dealing itself over a coin
+            # still in the air. There the shuffle is the opponent's-decision
+            # beat instead, which is also a body for OpponentChoosingToGoFirst,
+            # and that sequence needs one or it shows no notice at all.
             if opponent_chose:
                 # "Your opponent will go first". OpponentChoosingToGoFirst
                 # sets OpponentPicksWhoGoesFirst on the coin dialog - but ONLY
@@ -2093,9 +2142,12 @@ class Match:
                 # When the PLAYER won they were asked outright, so the client
                 # has already shown its own YouPickWhoGoesFirst state and this
                 # would be telling them something they just did.
-                items.append(("seq", "OpponentChoosingToGoFirst", [deal]))
+                items.append(("seq", "OpponentChoosingToGoFirst",
+                              self.shuffle_items()))
+                items.append(("seq", "DealInitialHands", hands))
             else:
-                items.append(deal)
+                items.append(("seq", "DealInitialHands",
+                              self.shuffle_items() + hands))
         # After the deal, deliberately. DealInitialHands is what lowers both
         # coins, so a reveal before it leaves the coin sitting on screen behind
         # the dialog - and the mulligans read as a summary of what happened
