@@ -1020,6 +1020,117 @@ class BrowsePoolTests(unittest.TestCase):
         self.assertTrue(all(any(r["formatLegality"]) for r in playable))
 
 
+
+class PlaySequenceTests(unittest.TestCase):
+    """Every card flight has to arrive inside a named sequence.
+
+    CurveMotionProvider.GetPathFor takes the WHOLE sequence stack and looks the
+    motion prefab up most-specific-first. A move nested in one named sequence
+    arrives three frames deep - the name, then From<loc> and To<loc>, which the
+    client pushes itself - and that is the shape the prefab table was authored
+    against. Sent bare it arrives two deep and can only match a generic entry.
+
+    Nothing is logged either way. That is why "every card flies the same" had
+    no symptom to follow, and why these are worth pinning: 213 bench plays a
+    game were going out bare.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.db = engine.CardDB.from_directory(CARD_DIR)
+
+    def board(self):
+        pokemon = [c for c in self.db if c.is_pokemon and c.stage == "Basic"]
+        pokemon.sort(key=lambda c: (c.set_code or "", c.collector_number or 0))
+        energy = next(c for c in self.db
+                      if c.is_basic_energy and c.energy_options)
+        deck = [pokemon[0].guid] * 20 + [energy.guid] * 40
+        m = match.Match("seq-1", ["acct-a", "acct-b"], self.db,
+                        [deck, list(deck)], seed=5)
+        m.serialized_state(predeal=True)
+        return m
+
+    def sequences_for(self, m, change):
+        """The sequence names animation_for wraps one change in."""
+        found = []
+
+        def walk(items, path):
+            for item in items or ():
+                if item[0] == "seq":
+                    walk(item[2], path + [item[1]])
+                else:
+                    found.append(tuple(path))
+        walk(m.animation_for([change]), [])
+        return found
+
+    def move(self, player, card, to_zone, from_zone=engine.ZONE_HAND):
+        return engine.Change(engine.CHANGE_MOVE, player=player, card=card,
+                             from_zone=from_zone, to_zone=to_zone)
+
+    def test_playing_onto_the_bench_uses_PlayCard(self):
+        m = self.board()
+        m.setup_hidden = False
+        cid = m.state.players[0].hand[0]
+        for path in self.sequences_for(m, self.move(0, cid, engine.ZONE_BENCH)):
+            self.assertIn("PlayCard", path)
+
+    def test_playing_into_the_active_uses_PlayActive(self):
+        m = self.board()
+        m.setup_hidden = False
+        cid = m.state.players[0].hand[0]
+        for path in self.sequences_for(m, self.move(0, cid, engine.ZONE_ACTIVE)):
+            self.assertIn("PlayActive", path)
+
+    def test_a_setup_placement_is_not_a_play(self):
+        """Placing a starter is choreographed by IntroduceInitialPokemon.
+
+        Wrapping it here as well would give one card two competing animations,
+        so while the setup latch is set these stay bare on purpose.
+        """
+        m = self.board()
+        self.assertTrue(m.setup_hidden)
+        cid = m.state.players[0].hand[0]
+        for path in self.sequences_for(m, self.move(0, cid, engine.ZONE_BENCH)):
+            self.assertNotIn("PlayCard", path)
+            self.assertNotIn("PlayActive", path)
+
+    def test_a_move_that_is_not_a_play_is_left_alone(self):
+        """Only hand -> board is a play. A discard is not, and must not claim
+        a sequence that hunts its children for a card being played."""
+        m = self.board()
+        m.setup_hidden = False
+        cid = m.state.players[0].hand[0]
+        for path in self.sequences_for(
+                m, self.move(0, cid, engine.ZONE_DISCARD)):
+            self.assertNotIn("PlayCard", path)
+            self.assertNotIn("PlayActive", path)
+
+    def test_retreat_cost_goes_out_under_DiscardRetreatCost(self):
+        """The cost is paid BEFORE the swap, so it leads the batch with
+        nothing behind it to group it with - which is how it ended up bare."""
+        m = self.board()
+        m.setup_hidden = False
+        state = m.state
+        energy = next(c for c in state.players[0].hand
+                      if state.card(c).is_energy)
+        changes = [
+            self.move(0, energy, engine.ZONE_DISCARD,
+                      from_zone=engine.ZONE_ACTIVE),
+            engine.Change(engine.CHANGE_RETREAT, player=0, slot=None,
+                          detail={"promoted": None}),
+        ]
+        names = set()
+
+        def walk(items, path):
+            for item in items or ():
+                if item[0] == "seq":
+                    walk(item[2], path + [item[1]])
+                else:
+                    names.update(path)
+        walk(m.animation_for(changes), [])
+        self.assertIn("DiscardRetreatCost", names)
+
+
 if __name__ == "__main__":
     unittest.main()
 

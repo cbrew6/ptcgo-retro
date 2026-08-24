@@ -99,7 +99,7 @@ def walk(items, path=()):
             yield path, item[1]
 
 
-def instrument(m, rows):
+def instrument(m, rows, phase):
     """Wrap every _change_* handler so its output is attributed to it.
 
     Attribution has to happen at the handler, not by walking the finished
@@ -118,6 +118,12 @@ def instrument(m, rows):
 
         def wrapper(change, _original=original, _kind=kind):
             items = _original(change) or []
+            # A placement made before the setup reveal is not a play. Those
+            # are deliberately bare - IntroduceInitialPokemon turns them over
+            # and does their choreography - so attribute them separately
+            # rather than letting them read as a miss.
+            if phase["setup"]:
+                _kind = "(setup)"
             for item in items:
                 # Handlers may return a bare (name, body) pair, which
                 # animation_for promotes to a top-level message.
@@ -145,7 +151,9 @@ def audit(games, seed0):
             rows[("(opening)", path, name)] += 1
 
         seen_before = sum(rows.values())
-        instrument(m, rows)
+        revealed = [False]
+        phase = {"setup": True}
+        instrument(m, rows, phase)
         rng = random.Random(seed)
         for _ in range(600):
             if m.state.winner is not None:
@@ -161,6 +169,15 @@ def audit(games, seed0):
             except engine.IllegalAction:
                 break
             produced = m.animation_for(changes)
+            # The server reveals the opponent's setup once both boards are
+            # done, and that is what clears Match.setup_hidden. Without it the
+            # latch stays set for the whole game and every play still looks
+            # like a placement - which made this tool under-report its own fix.
+            if not revealed[0] and all(p.setup_done for p in m.state.players):
+                revealed[0] = True
+                phase["setup"] = False
+                for path, name in walk(m.reveal_setup_items(1)):
+                    rows[("(reveal)", path, name)] += 1
             # Whatever the handlers did not account for came out of _grouped.
             handled = sum(rows.values()) - seen_before
             total = sum(1 for _ in walk(produced))
@@ -192,7 +209,9 @@ def main(argv=None):
             rows.items(), key=lambda kv: (-kv[1], kv[0])):
         frames = len(path)
         total = frames + (2 if name in MOVES else 0)
-        if name in MOVES:
+        if source == "(setup)":
+            ok, verdict = True, "setup placement, bare by design"
+        elif name in MOVES:
             ok = total >= WANT_MOVE_DEPTH
             verdict = "" if ok else "SHALLOW - generic curve"
         else:
@@ -206,7 +225,8 @@ def main(argv=None):
     print("\n%d distinct shapes, %d messages" % (len(rows), sum(rows.values())))
     moves = sum(c for (s, p, n), c in rows.items() if n in MOVES)
     thin = sum(c for (s, p, n), c in rows.items()
-               if n in MOVES and len(p) + 2 < WANT_MOVE_DEPTH)
+               if n in MOVES and len(p) + 2 < WANT_MOVE_DEPTH
+               and s != "(setup)")
     print("moves: %d, too shallow to match anything specific: %d (%.0f%%)"
           % (moves, thin, 100.0 * thin / moves if moves else 0))
     bare = sum(c for (s, p, n), c in rows.items() if n not in MOVES and not p)
@@ -216,7 +236,7 @@ def main(argv=None):
     for (source, path, name), count in rows.items():
         shallow = (len(path) + 2 < WANT_MOVE_DEPTH) if name in MOVES \
             else not path
-        if shallow:
+        if shallow and source != "(setup)":
             worst[source] += count
     if worst:
         print("\nwhere the shallow ones come from:")

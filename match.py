@@ -756,7 +756,40 @@ class Match:
         # a knockout are gathered and anything else closes it.
         knocked = [None]
 
+        # Retreat pays its cost BEFORE the swap, so the discarded Energy is the
+        # first thing in the batch and there is nothing behind it to group it
+        # with - which is how 44 flights a game ended up bare. The client has
+        # DiscardRetreatCost for exactly this beat, so look ahead for the
+        # CHANGE_RETREAT and, if it is coming, gather the Energy going to the
+        # discard for that player under it.
+        retreating = {c.player for c in changes
+                      if c.kind == engine.CHANGE_RETREAT}
+        cost = []
+
+        def flush_cost():
+            if not cost:
+                return
+            items = []
+            for change in cost:
+                destination = self.pile.get((change.player, ZONE_DISCARD))
+                if destination is None or change.card is None:
+                    continue
+                items.append(("msg",) + self._move_msg(change.card, destination))
+            del cost[:]
+            if items:
+                out.append(("seq", "DiscardRetreatCost", items))
+
         for change in changes:
+            if (change.kind == engine.CHANGE_MOVE
+                    and change.player in retreating
+                    and change.to_zone == ZONE_DISCARD
+                    and change.from_zone in (ZONE_ACTIVE, ZONE_BENCH)
+                    and change.card is not None
+                    and self.state.card(change.card) is not None
+                    and self.state.card(change.card).is_energy):
+                cost.append(change)
+                continue
+            flush_cost()
             if change.kind == engine.CHANGE_KNOCKOUT:
                 flush()
                 flush_draws()
@@ -789,6 +822,9 @@ class Match:
         flush()
         flush_draws()
         flush_kos()
+        # Retreat's cost is the first thing in its batch, so an open run is
+        # still open here. Dropping this would drop the Energy entirely.
+        flush_cost()
         return out
 
     def _destination(self, change):
@@ -839,7 +875,41 @@ class Match:
             # then travelled - you saw what you had won before you had it.
             return [("seq", "DrawPrizeCard",
                      [("msg",) + m for m in msgs])]
+        played = self._play_sequence(change)
+        if played:
+            return [("seq", played, [("msg",) + m for m in msgs])]
         return msgs
+
+    # Playing a card from hand onto the board. The client has a sequence for
+    # each destination and we were using neither, so both flights fell through
+    # to the generic curve.
+    #
+    # This is not cosmetic bookkeeping: CurveMotionProvider.GetPathFor takes
+    # the WHOLE sequence stack and looks the motion prefab up most-specific
+    # first. A move inside a named sequence arrives three frames deep - the
+    # name, then From<loc> and To<loc>, which the client pushes itself - and
+    # that is the shape the prefab table was authored against. Sent bare it
+    # arrives two deep and can only match a generic entry. Nothing is logged
+    # either way, which is why "every card flies the same" had no symptom to
+    # follow: 213 of these a game were bench plays.
+    #
+    # PlayCard is not a pass-through. It hunts through its own children for
+    # the move it is animating and logs "PlayCardSequence without a move!" if
+    # there is not one, so it must wrap the EntityMoved and not sit beside it.
+    PLAY_SEQUENCES = {ZONE_BENCH: "PlayCard", ZONE_ACTIVE: "PlayActive"}
+
+    def _play_sequence(self, change):
+        """The sequence name for playing this card, or None for a plain move.
+
+        Setup is excluded deliberately. Placing a starter is not playing a
+        card: those go down face down and are turned over later inside
+        IntroduceInitialPokemon, which does its own choreography, and wrapping
+        them here would give the same card two competing animations. The latch
+        is the same one the face-down rule above uses.
+        """
+        if self.setup_hidden or change.from_zone != ZONE_HAND:
+            return None
+        return self.PLAY_SEQUENCES.get(change.to_zone)
 
     def _change_attach(self, change):
         """Energy becomes a child of the Pokemon; there is no energy attribute.
