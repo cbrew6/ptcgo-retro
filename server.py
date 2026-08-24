@@ -2602,9 +2602,42 @@ class GameSession:
     def on_GetArchetypeFlags(self, value, request_id):
         self.send("ArchetypeFlagsRequested", {"archetypeFlags": []}, request_id)
 
+    # The home page's promo panel. Empty pageData is why it is black: the
+    # scene renders, there is simply nothing in it.
+    #
+    # Two things make this safe to populate without knowing the real prefab
+    # layout. `images` is read with TryGetValue(gameObject.name), so a key
+    # that matches no object is ignored rather than being an error - several
+    # plausible slot names can be offered at once and whichever the scene
+    # actually uses wins. And `template` is left at the "Inactive" sentinel
+    # that DynamicTemplate tests for: any other value is passed to
+    # Resources.Load and, if it does not resolve, the very next line
+    # dereferences the null result and kills the coroutine. A guessed prefab
+    # name would be worse than no prefab.
+    #
+    # The image path is a bundle asset, not a file: the loader tries
+    # "<ns><resolution>/<name>" and "<ns>1280x720/<name>" first and falls back
+    # to the bare path, which is the one our bundles serve.
+    LANDING_IMAGE = "LandingPage/2021_rotation_landingpage"
+    LANDING_SLOTS = ("Background", "background", "Texture", "Image",
+                     "MainImage", "mainImage", "Banner", "banner",
+                     "Sprite", "image")
+    FOREVER = 4102444800000            # 2100-01-01, in ms
+
     def on_GetDynamicPages(self, value, request_id):
+        image = {"localeImageMap": {"en_US": self.LANDING_IMAGE}}
+        page = {
+            "template": "Inactive",
+            "sortOrder": 0,
+            # Never null: the labels/actions dictionaries are read directly.
+            "labels": {},
+            "images": {slot: image for slot in self.LANDING_SLOTS},
+            "actions": {},
+            "startTime": 0,
+            "endTime": self.FOREVER,
+        }
         self.send("DynamicLandingPages", {
-            "pageData": [],
+            "pageData": [page],
             "maintenanceData": [],
         }, request_id)
 
