@@ -1009,3 +1009,64 @@ class ChangeCoverageTests(unittest.TestCase):
             self.assertIn(kind, kinds,
                           "NOT_ANIMATED lists %r, which the engine no longer "
                           "emits" % kind)
+
+
+class IntroduceShapeTests(unittest.TestCase):
+    """EntityIntroduced must never carry a null attributeMap.
+
+    Its command constructor is `new MutableAttributes(message.AttributeMap)`,
+    taken straight off the message, so a null map throws inside the client's
+    message translator and it reports "Error translating MessageCommand
+    dwd.core.match.messages.EntityIntroduced". Nothing recovers from that.
+
+    `attributes: null` IS how the SerializedGameState tree says face down, and
+    conflating the two is what broke hidden setup: a face-down card is one
+    that has simply never been introduced, so you move it and send no
+    introduction at all.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.db = engine.CardDB.from_directory(CARD_DIR)
+
+    def _messages(self):
+        pokemon = [c for c in self.db if c.is_pokemon and c.stage == "Basic"
+                   and c.attacks]
+        pokemon.sort(key=lambda c: (c.set_code or "", c.collector_number or 0))
+        energy = next(c for c in self.db if c.is_basic_energy and c.energy_options)
+        deck = [pokemon[0].guid] * 20 + [energy.guid] * 40
+        m = match.Match("g-intro", ["a", "b"], self.db, [deck, list(deck)],
+                        seed=11)
+        m.serialized_state(predeal=True)
+        out = list(_flatten_items(m.opening_animation()))
+        m.auto_setup()
+        out += list(_flatten_items(m.reveal_setup_items(1)))
+        return out
+
+    def test_no_introduction_has_a_null_attribute_map(self):
+        seen = 0
+        for name, body in self._messages():
+            if name != "EntityIntroduced":
+                continue
+            seen += 1
+            self.assertIsNotNone(
+                body.get("attributeMap"),
+                "EntityIntroduced with a null attributeMap throws in the "
+                "client's message translator")
+            self.assertIsNotNone(body.get("entityName"),
+                                 "a null entityName throws in IntroduceEntity")
+        self.assertGreater(seen, 0, "no introductions to check")
+
+
+def _flatten_items(items):
+    """emit_items form -> (name, body) pairs, sequences included."""
+    for item in items or []:
+        if not isinstance(item, tuple):
+            continue
+        if item[0] == "seq":
+            for inner in _flatten_items(item[2]):
+                yield inner
+        elif item[0] == "msg":
+            yield item[1], item[2]
+        elif len(item) == 2:
+            yield item[0], item[1]

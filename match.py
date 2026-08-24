@@ -815,18 +815,22 @@ class Match:
         # may see what the other led with - and it is what the real client
         # shows: a card back in their Active while you choose yours, flipped
         # over only after the prizes are placed.
-        face_down = (self.setup_hidden
-                     and change.player != 0
-                     and change.to_zone in (ZONE_ACTIVE, ZONE_BENCH))
+        #
+        # Face down means NOT INTRODUCED. It is not a null attributeMap: that
+        # throws in the client's own message translator. So the move goes out
+        # alone and reveal_setup_items introduces them later.
+        if (self.setup_hidden and change.player != 0
+                and change.to_zone in (ZONE_ACTIVE, ZONE_BENCH)):
+            reveal = False
         # A prize is face down on the board, so introducing it BEFORE the move
         # flipped it over on the prize pile and only then flew it across. You
         # take a prize and then see what you got, not the other way round.
         after = change.from_zone == ZONE_PRIZES
         if reveal and not after:
-            msgs.append(self._introduce_msg(change.card, face_down=face_down))
+            msgs.append(self._introduce_msg(change.card))
         msgs.append(self._move_msg(change.card, destination))
         if reveal and after:
-            msgs.append(self._introduce_msg(change.card, face_down=face_down))
+            msgs.append(self._introduce_msg(change.card))
         return msgs
 
     def _change_attach(self, change):
@@ -2118,19 +2122,24 @@ class Match:
         # DealInitialPrizeCards by animation_for.
         return items
 
-    def _introduce_msg(self, cid, slot=None, face_down=False):
-        """Put an entity on the board, face up or face down.
+    def _introduce_msg(self, cid, slot=None):
+        """Reveal an entity: give the client its attributes.
 
-        "Face down" is not a flag on the card - it is `attributes: null`. The
-        client draws a card back for an entity with no attribute map, and
-        revealing it later is just another EntityIntroduced carrying them.
+        There is no face-down variant of this message. `attributes: null` is
+        how the SerializedGameState TREE says face down, but EntityIntroduced
+        is different - its command does `new MutableAttributes(AttributeMap)`
+        straight off the message, so a null map throws and the client reports
+        "Error translating MessageCommand ... EntityIntroduced".
+
+        A card is face down by simply never having been introduced. To put one
+        down hidden, move it and send no introduction; to turn it over later,
+        send this.
         """
         return ("EntityIntroduced", {
             "gameID": self.game_id,
             "entityID": self.eid(cid),
             "entityName": self.card_kind(cid),   # never null, or Introduce throws
-            "attributeMap": (None if face_down
-                             else self.card_attributes(cid, slot)),
+            "attributeMap": self.card_attributes(cid, slot),
         })
 
     def _move_msg(self, cid, destination, duration=300, position=None):
