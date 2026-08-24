@@ -988,6 +988,16 @@ Bench" is one offer answered in one message.
   fan-out, `Attack`, `Knockout`, `Draw`, `Mulligan`, ...). A message sent
   outside one gets no choreography. `match.animation_for()` keeps that
   structure; `messages_for()` flattens it.
+- **A top-level named sequence is INERT - wrap batches in `SerialSequence`.**
+  The name only reaches the motion lookup through `set_SequenceStack`, which
+  pushes `Name` and hands a copy to every child. Nothing calls that on a
+  sequence at the top level, so its stack stays empty and the move falls back
+  to the default motion for its From/To pair. `SerialSequence` is `class O :
+  S.J`, and `S.J`'s constructor does `set_SequenceStack(new Stack<string>())`
+  and propagates down - so `SerialSequence > PlayEnergy > EntityMoved` is what
+  actually gets "PlayEnergy" onto the stack. Wrapping an attach in a bare
+  `PlayEnergy` changed nothing at all, twice, before this was understood.
+
 - **The sequence NAME picks the motion.** A sequence pushes
   `From<location>`/`To<location>` onto `get_SequenceStack()`, and the
   `CurveMotion` prefab for a card's flight is chosen off that stack. Several

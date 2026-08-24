@@ -1866,7 +1866,8 @@ class GameSession:
         sid = str(uuid.uuid4())
         self._in_sequence(sid, "StartSequence", {
             "gameID": self.game_id, "sequenceID": sid,
-            "name": name, "attributes": None})
+            # Never null: DrawPrizeCard and friends do TryGetValue on this.
+            "name": name, "attributes": {}})
         for kind, a, b in items:
             if kind == "seq":
                 self.emit_sequence(a, b)
@@ -1876,11 +1877,29 @@ class GameSession:
             "gameID": self.game_id, "sequenceID": sid, "name": name})
 
     def emit_items(self, items):
+        """Animation for one batch of changes, inside a SerialSequence.
+
+        The wrapper is what makes every named sequence below it mean anything.
+        A card's CurveMotion is looked up from the sequence STACK, and a
+        sequence's name only reaches that stack through `set_SequenceStack`,
+        which pushes `Name` and hands a copy to each child. Nobody calls that
+        on a TOP-LEVEL sequence: its stack stays empty, its name is never
+        pushed, and the move falls back to the default motion for its From/To
+        pair - which is why wrapping an attach in PlayEnergy changed nothing
+        and the Energy still animated like a Pokemon being played.
+
+        SerialSequence is the fix: it is `class O : S.J`, and S.J's
+        constructor does `set_SequenceStack(new Stack<string>())` and
+        propagates down. `SerialSequence > PlayEnergy > EntityMoved` puts
+        "PlayEnergy" on the stack, and the Energy shrinks into its bubble.
+        """
+        items = list(items or [])
+        if not items:
+            return
+        if any(kind == "seq" for kind, _a, _b in items):
+            return self.emit_sequence("SerialSequence", items)
         for kind, a, b in items:
-            if kind == "seq":
-                self.emit_sequence(a, b)
-            else:
-                self.send_game(a, b)
+            self.send_game(a, b)
 
     def advance_match(self):
         """Play out the opponent until the player has a decision to make.
@@ -2322,7 +2341,8 @@ class GameSession:
         sid = str(uuid.uuid4())
         self._in_sequence(sid, "StartSequence", {
             "gameID": self.game_id, "sequenceID": sid,
-            "name": name, "attributes": None})
+            # Never null: DrawPrizeCard and friends do TryGetValue on this.
+            "name": name, "attributes": {}})
         for kind, a, b in items:
             if kind == "seq":
                 self.emit_sequence(a, b)      # inner closes before we continue
