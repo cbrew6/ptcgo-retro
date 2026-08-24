@@ -2614,20 +2614,54 @@ class GameSession:
     # The image path is a bundle asset, not a file: the loader tries
     # "<ns><resolution>/<name>" and "<ns>1280x720/<name>" first and falls back
     # to the bare path, which is the one our bundles serve.
-    LANDING_IMAGE = "LandingPage/2021_rotation_landingpage"
-    LANDING_SLOTS = ("Background", "background", "Texture", "Image",
-                     "MainImage", "mainImage", "Banner", "banner",
-                     "Sprite", "image")
-    FOREVER = 4102444800000            # 2100-01-01, in ms
-
+    # Each candidate slot gets a DIFFERENT banner on purpose. `images` is
+    # read with TryGetValue(gameObject.name), so every key that matches no
+    # object is ignored silently - which is exactly why guessing one name at a
+    # time tells you nothing. Giving each candidate its own image turns the
+    # client into the oracle: whichever slot the scene really uses is the one
+    # whose image gets requested, and that request is named in output_log.txt.
+    #
+    # The names cannot be recovered from the shipped files. MonoScript class
+    # names are absent from every .assets and level file in this build -
+    # AssetBundleTexture, CardImageRenderer and PlaymatProvider are all
+    # missing too - so a MonoBehaviour cannot be tied back to its class, and
+    # tools/scene_names.py has nothing to match on.
+    LANDING_SLOT_IMAGES = {
+       
+        "Background": "LandingPage/2017europeannationals_landingpage",
+        "background": "LandingPage/2019_rotation_landingpage",
+        "Texture": "LandingPage/2020_rotation_landingpage",
+        "texture": "LandingPage/2021_rotation_landingpage",
+        "Image": "LandingPage/avatar_landingpage",
+        "image": "LandingPage/barnesnoble2017_landingpage",
+        "MainImage": "LandingPage/bidoofday2021_landingpage",
+        "mainImage": "LandingPage/code_redemption_landingpage",
+        "Banner": "LandingPage/coderedemption_landingpage",
+        "banner": "LandingPage/cr121_rotation_landingpage",
+        "Art": "LandingPage/dm_charizard_landingpage",
+        "art": "LandingPage/dm_dragonite_landingpage",
+        "Backdrop": "LandingPage/dm_reshiram_landingpage",
+        "backdrop": "LandingPage/dm_salamence_landingpage",
+        "Hero": "LandingPage/feat_set_rotation_landingpage",
+        "Splash": "LandingPage/feat_vs_ladder28_landingpage",
+        "Feature": "LandingPage/gamestop_bewear_landingpage",
+        "Promo": "LandingPage/gamestop_cr116_landingpage",
+        "Panel": "LandingPage/gamestop_cr118_landingpage",
+        "Picture": "LandingPage/generationsyoutube_landingpage",
+        "Preview": "LandingPage/generic_op_landingpage",
+        "Tile": "LandingPage/increasedticekt_landingpage",
+        "Frame": "LandingPage/increasedtoken_landingpage",
+        "Sprite": "LandingPage/ladder22_landingpage",
+        "Thumbnail": "LandingPage/ladder23_landingpage"
+}
     def on_GetDynamicPages(self, value, request_id):
-        image = {"localeImageMap": {"en_US": self.LANDING_IMAGE}}
         page = {
             "template": "Inactive",
             "sortOrder": 0,
             # Never null: the labels/actions dictionaries are read directly.
             "labels": {},
-            "images": {slot: image for slot in self.LANDING_SLOTS},
+            "images": {slot: {"localeImageMap": {"en_US": path}}
+                       for slot, path in self.LANDING_SLOT_IMAGES.items()},
             "actions": {},
             "startTime": 0,
             "endTime": self.FOREVER,
