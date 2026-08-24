@@ -1980,19 +1980,38 @@ class GameSession:
         # screen that swallowed every click behind it. Nothing else in the
         # client ever clears that flag.
         #
-        # After the deal is the one position that satisfies both.
-        # player_won_flip is who CHOSE, which is not the same question as
-        # who goes first - the notice is about the choice.
-        # Emitted one item at a time so the opponent's choice can be paced.
-        # OpponentChoosingToGoFirst is the "your opponent will go first"
-        # notice; without a pause after it the deal starts underneath it and
-        # the whole opening reads as one instant blur.
+        # It goes BEFORE the deal, and that is a reversal of what this comment
+        # used to say. The old reasoning was sound for the board it was written
+        # against: with nothing between the flip and the deal, an
+        # ActivePlayerSet sent early cut the flip's own animation short. The
+        # fix then was to move it after the deal, which cleared the coin but
+        # left the notice banner standing over the cards while they dealt.
+        #
+        # There is real pacing now - the flip gets COIN_FLIP_SECONDS, the
+        # opponent's decision gets its own beat, and the notice gets
+        # GO_FIRST_NOTICE_SECONDS to be read. By the time this is sent the flip
+        # is long finished, so putting the coin away here costs nothing and the
+        # cards deal onto a clear board instead of behind a banner.
+        #
+        # player_won_flip is who CHOSE, which is not the same question as who
+        # goes first - the notice is about the choice.
+        notice, deal = [], []
         for item in self.match.opening_animation(
                 opponent_chose=not self.player_won_flip):
-            self.emit_items([item])
             if item[0] == "seq" and item[1] == "OpponentChoosingToGoFirst":
-                time.sleep(GO_FIRST_NOTICE_SECONDS)
+                notice.append(item)
+            else:
+                deal.append(item)
+
+        if notice:
+            # "Your opponent will go first", then long enough to read it.
+            self.emit_items(notice)
+            time.sleep(GO_FIRST_NOTICE_SECONDS)
+        # Empty ActivePlayerSet: hides the coin dialog, clears
+        # OverrideShowPrompt - which nothing else in the client ever does - and
+        # lowers both coins, all before running its (absent) children.
         self.emit_sequence("ActivePlayerSet", [])
+        self.emit_items(deal)
         # No ActivePlayerSet here. It plays the "YOUR TURN" banner and
         # increments the client's own turn counter, and at this point nobody
         # has chosen an Active yet - the turn has not started. The engine emits
