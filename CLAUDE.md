@@ -227,6 +227,16 @@ art bundle, and a request for the card face returned a foil mask. Bundles with
 a `wp_<mask>` segment must never claim the bare set prefix. This was only
 visible on XY12 - the one set with both art and foil locally.
 
+**A stale `AllArchetypesChecksumMatch` hides every card you just added.**
+`on_GetProtobufAllArchetypesList` answers with a bare match if the checksum the
+client sends equals the server's, and the client then keeps its own cache and
+takes none of the ~11 MB payload. That checksum was the literal
+`"ptcgo-local-1"` for a long time, which was fine until the card list changed:
+4,747 new cards were served, confirmed, and invisible, with nothing logged and
+nothing failing. `card_checksum()` derives it from the archetype ids now, so it
+is right by construction. If cards you added do not appear, look here first -
+the symptom is silence, not an error.
+
 **The client reports its own crashes** as `LogClientError`, with a full stack
 in `debugInfo.Stack`. This is the fastest debugging tool available — the
 server log usually explains a client-side failure before `output_log.txt`
@@ -433,6 +443,53 @@ Two things worth keeping from that dig:
   seed files against, so any fabricated set payload dropped in that directory
   would need a matching entry. The live patcher (`Refresher\`) shipped content
   as binary **vcdiff deltas** against these seed files, not as whole files.
+
+## Cards you can look at but not play
+
+`carddata_browse/` holds 4,747 records for SM5-SWSH10, built by
+`tools/build_collection_pool.py` out of bundle names and the donated caches.
+They carry no HP, weakness, resistance, retreat cost, stage, evolves-from or
+rarity - the seven fields nothing local supplies.
+
+The insight worth keeping is that those seven stop a card being PLAYED and not
+being SEEN. The collection renders the card's TEXTURE, which already has the HP
+printed on it, and every collection path that reads one of them defaults it:
+
+    SortHitpower, SortRetreatType, SortWeaknessValue, SortResistanceValue
+                            x.GetAttribute(...).get_Value() ?? 0
+    SortByRarity, SortByEvolution, Evolution(), Rarity(), PokemonFamily()
+                            TryGetOne<T>()?.A ?? <default>
+    RetreatCost()           returns 0 unless HasAttribute
+    IsLegend()              guarded TryGetOne(out ...)
+
+`CardImageRenderer` asks for none of them - it wants Set, Type, EnergyType,
+EnergyProvided, CardImage, IsFoil, FoilMask, FoilEffects, Version. **Exactly one
+attribute is load-bearing and it is not one of the seven: 200570 PokemonTypes**,
+where `getDefaultPerCardType` does an unguarded `.Value`.
+
+The bundle names carry what is needed. `SM5_fire_CRSM5 -> ["SM5/018".."SM5/027"]`
+says those ten are Fire; `_toolpip` marks a Pokemon Tool, `_energyicon` a
+Special Energy, and `wp_std` / `wp_ph` / `wp_secondary` say how a card is foiled.
+
+**What is deliberately not claimed is the NAME.** AttributeDB holds real names
+for 5,578 of these archetypes and nothing local joins a name to a collector
+number. Cache-key order was the obvious candidate and it is not that - measured
+against the sets we do have, 50% inversions, which is chance. So a card is
+labelled with what can be proved, `EVS 001`, and its face says the rest.
+Alphabetising a type block would be right often enough to be trusted and wrong
+often enough to poison search.
+
+**Two independent guards keep them out of a match**, because a card with no HP
+would be knocked out the moment it was played:
+
+1. They live in `carddata_browse/`, and `card_db()` builds the engine's
+   database from `carddata/` alone - the engine cannot be handed one.
+2. `build_format_legality()` marks them legal in NO format, so the client's own
+   deck validation refuses them before a deck can be queued.
+
+Joining real names, attacks and the seven numbers onto these records is what
+turns them from browsable into playable, and it is the same job either way:
+read them off the card faces, or take them from an external database.
 
 ## Card art
 
@@ -1237,8 +1294,8 @@ name list) or `ValidateDecksData` bails and nothing is legal.
 
 ## Status / next
 
-Working: login, main menu, deck builder and deck save/load, 62 sets, 9,940
-cards with 4 of each in the collection, card art for every card, pack opening,
+Working: login, main menu, deck builder and deck save/load, 87 sets, 9,940
+playable cards plus 4,747 browsable-only ones, 4 of each in the collection, card art for every card, pack opening,
 the avatar wardrobe (1,333 reconstructed items), and **a complete game** -
 the player chooses their own Active and Bench, plays Basics, evolves, attaches
 Energy, retreats, uses Abilities, plays Trainers, attacks with real hit
