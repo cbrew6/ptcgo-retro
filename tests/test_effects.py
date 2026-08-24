@@ -560,7 +560,9 @@ class RealCardTests(unittest.TestCase):
                      "MuscleBand", "ChoiceBand", "BodybuildingDumbbells",
                      "TrainingCenter", "AspertiaCityGym", "FairyGarden",
                      "Colress", "Wicke", "ComputerSearch", "Xerosic",
-                     "MultiSwitch", "EnergyReturner", "Iris"]:
+                     "MultiSwitch", "EnergyReturner", "Iris",
+                     "GiantCape", "ShadowCircle", "FairyDrop", "Olympia",
+                     "ProfessorKukui", "Ilima", "Plumeria"]:
             with self.subTest(card=name):
                 self.assertTrue(self.implemented(name),
                                 "%s has no implemented printing" % name)
@@ -871,6 +873,45 @@ class ContinuousRealCardTests(unittest.TestCase):
         fairy = next(c for c in self.db.by_name("FairyEnergy"))
         slot.energy.append(engine._new_card(state, fairy.guid, 0))
         self.assertEqual(engine.retreat_cost(state, slot), 0)
+
+    def test_giant_cape_does_not_steal_the_stage_1_dumbbells(self):
+        """Two Tools, one sentence apart. Pattern order must not merge them."""
+        cape = self.one("GiantCape")
+        bells = self.one("BodybuildingDumbbells")
+        self.assertNotEqual(cape.guid, bells.guid)
+        basic = next(c for c in self.db if c.is_pokemon and c.stage == "Basic")
+        state = _real_board(self.db, self.rules, basic)
+        slot = state.players[0].active
+        before = state.max_hp(slot)
+        # Giant Cape asks nothing about the stage; the Dumbbells do.
+        capped = self.attach(state, cape, slot)
+        self.assertEqual(capped.max_hp(capped.players[0].active), before + 20)
+        belled = self.attach(state, bells, slot)
+        self.assertEqual(belled.max_hp(belled.players[0].active), before)
+
+    def test_shadow_circle_switches_weakness_off_for_its_colour(self):
+        stadium = self.one("ShadowCircle")
+        state, slot, ability = self.matchup_board()
+        # Give the defender a Weakness the attacker actually triggers, so the
+        # Stadium has something to switch off.
+        attacker_types = set(state.pokemon(slot).types)
+        weak = next(c for c in self.db
+                    if c.is_pokemon and c.stage == "Basic" and c.max_hp >= 100
+                    and set(c.weakness_types) & attacker_types)
+        state.players[1].active.stack[-1] = engine._new_card(
+            state, weak.guid, 1)
+        defender = state.players[1].active.slot_id
+        doubled, _ = engine.apply(state, engine.Attack(0, ability.ability_id))
+        hit = doubled.slot(defender)[1].damage
+
+        cid = engine._new_card(state, stadium.guid, 0)
+        state.players[0].hand.append(cid)
+        state, _ = engine.apply(state, engine.PlayTrainer(0, cid))
+        dark = next(c for c in self.db.by_name("DarknessEnergy"))
+        state.players[1].active.energy.append(
+            engine._new_card(state, dark.guid, 1))
+        plain, _ = engine.apply(state, engine.Attack(0, ability.ability_id))
+        self.assertLess(plain.slot(defender)[1].damage, hit)
 
     def test_bodybuilding_dumbbells_reads_the_stage_it_is_attached_to(self):
         tool = self.one("BodybuildingDumbbells")

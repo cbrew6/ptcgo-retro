@@ -1638,6 +1638,138 @@ def _eviolite(m, card):
     return _tool(hook)
 
 
+@trainer(r"Heal " + N + r" damage from 1 of your " + POKEMON + r" that has "
+         r"any \{([A-Z])\} Energy attached to it\.")
+def _colour_heal(m, card):
+    """Fairy Drop. The colour requirement is the whole card."""
+    amount, code = int(m.group(1)), m.group(2)
+    if SYMBOLS.get(code) is None:
+        return None
+
+    def targets(state, player):
+        return [s for s in damaged(state, player)
+                if _count_symbol(state, s, code)]
+
+    @playable(lambda state, player: bool(targets(state, player)))
+    def effect(state, ctx, changes):
+        player = ctx["player"]
+        found = targets(state, player)
+        picks, choice = step(ctx, 0, lambda: Choice(
+            player=player, prompt="healTarget", options=slot_ids(found),
+            option_kind=CHOICE_SLOT,
+            detail={"card": card.name, "amount": amount}) if found else None)
+        if choice is not None:
+            return choice
+        for slot_id in picks:
+            slot = slot_of(state, slot_id)
+            if slot is not None:
+                engine.heal(state, slot, amount, changes)
+    return effect
+
+
+@trainer(r"Switch your Active " + POKEMON + r" with 1 of your Benched "
+         + POKEMON + r"\. If you do, heal " + N + r" damage from the "
+         + POKEMON + r" you moved to your Bench\.")
+def _switch_and_heal(m, card):
+    """Olympia. The heal lands on the Pokemon that just LEFT the Active."""
+    amount = int(m.group(1))
+
+    @playable(lambda state, player: bool(state.players[player].bench
+                                         and state.players[player].active))
+    def effect(state, ctx, changes):
+        player = ctx["player"]
+        bench = state.players[player].bench
+        picks, choice = step(ctx, 0, lambda: Choice(
+            player=player, prompt="switchTo", options=slot_ids(bench),
+            option_kind=CHOICE_SLOT, detail={"card": card.name})
+            if bench else None)
+        if choice is not None:
+            return choice
+        if not picks:
+            return None
+        # Remember which slot is retiring before the switch, because after it
+        # the "old Active" is just another benched Pokemon.
+        retiring = state.players[player].active
+        retiring_id = retiring.slot_id if retiring is not None else None
+        engine.switch_active(state, player, picks[0], changes)
+        moved = slot_of(state, retiring_id) if retiring_id is not None else None
+        if moved is not None:
+            engine.heal(state, moved, amount, changes)
+    return effect
+
+
+@trainer(r"Draw " + N + r" cards\. During this turn, your " + POKEMON
+         + r"'s attacks do " + N + r" more damage to your opponent's Active "
+         + POKEMON + r" \(before applying Weakness and Resistance\)\.")
+def _draw_and_pluspower(m, card):
+    """Professor Kukui. Two things this module already does, in one card."""
+    count, amount = int(m.group(1)), int(m.group(2))
+
+    def effect(state, ctx, changes):
+        player = ctx["player"]
+        engine.draw_cards(state, player, count, changes)
+        engine.add_modifier(state, changes, Modifier(
+            kind=MOD_DAMAGE_DEALT, until_turn=state.turn_number,
+            player=player, amount=amount, source=ctx.get("source"),
+            detail={"card": card.name}))
+    return effect
+
+
+@trainer(r"Each player shuffles their hand into their deck and flips a coin\. "
+         r"If heads, that player draws " + N + r" cards\. If tails, "
+         r"(?:they|that player) draws? " + N + r" cards\.")
+def _shuffle_and_flip_draw(m, card):
+    """Ilima. Each player flips their OWN coin, starting with the caster."""
+    heads, tails = int(m.group(1)), int(m.group(2))
+
+    def effect(state, ctx, changes):
+        player = ctx["player"]
+        for p in (player, 1 - player):
+            shuffle_into_deck(state, p, list(state.players[p].hand), changes)
+            won = flips(state, changes, 1, card.name, p)
+            engine.draw_cards(state, p, heads if won else tails, changes)
+    return effect
+
+
+@trainer(r"Discard " + N + r" cards from your hand\. If you do, discard an "
+         r"Energy from 1 of your opponent's " + POKEMON + r"\.")
+def _discard_then_hammer(m, card):
+    """Plumeria. The cost is paid first, and only then does the Energy go."""
+    cost = int(m.group(1))
+
+    def ready(state, player):
+        return (len(state.players[player].hand) > cost
+                and any(slot.energy for slot in own_slots(state, 1 - player)))
+
+    @playable(ready)
+    def effect(state, ctx, changes):
+        player = ctx["player"]
+        ps = state.players[player]
+        picks, choice = step(ctx, 0, lambda: Choice(
+            player=player, prompt="discardFromHand", options=tuple(ps.hand),
+            option_kind=CHOICE_CARD, minimum=cost, maximum=cost,
+            zone=ZONE_HAND, detail={"card": card.name}))
+        if choice is not None:
+            return choice
+        if len(picks) < cost:
+            return None
+        options = tuple(cid for slot in own_slots(state, 1 - player)
+                        for cid in slot.energy)
+        take, choice = step(ctx, 1, lambda: Choice(
+            player=player, prompt="discardEnergy", options=options,
+            option_kind=CHOICE_CARD, detail={"card": card.name})
+            if options else None)
+        if choice is not None:
+            return choice
+        for cid in picks:
+            engine.move_card(state, cid, ZONE_DISCARD, changes)
+        for cid in take:
+            slot = slot_holding(state, 1 - player, cid)
+            if slot is not None:
+                engine.discard_attached(state, slot, (cid,), changes)
+    return effect
+
+
 @trainer(r"Flip a coin\. If heads, draw " + N + r" cards\. If tails, "
          r"(?:they |you )?draw " + N + r" cards\.")
 def _flip_draw_either_way(m, card):
@@ -1849,6 +1981,33 @@ def _is_active(state, slot) -> bool:
     if slot is None:
         return False
     return any(state.players[p].active is slot for p in (0, 1))
+
+
+@static(r"The " + POKEMON + r" this card is attached to gets \+" + N + r" HP\.")
+def _giant_cape(m, card):
+    amount = int(m.group(1))
+
+    def hook(query, state, ctx, value):
+        return value + amount if query == STATIC_MAX_HP else value
+    return _tool(hook)
+
+
+@static(r"Each " + POKEMON + r" that has any \{([A-Z])\} Energy attached to it "
+        r"\(both yours and your opponent's\) has no Weakness\.")
+def _shadow_circle(m, card):
+    """Shadow Circle. Fairy Garden's shape, aimed at Weakness instead."""
+    code = m.group(1)
+    if SYMBOLS.get(code) is None:
+        return None
+
+    def hook(query, state, ctx, value):
+        if query != STATIC_NO_WEAKNESS:
+            return value
+        slot = ctx.get("slot")
+        if slot is None or not _count_symbol(state, slot, code):
+            return value
+        return 1
+    return _tool(hook)
 
 
 @static(r"The attacks of the " + POKEMON + r" this card is attached to do " + N
