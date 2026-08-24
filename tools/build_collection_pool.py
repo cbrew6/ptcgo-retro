@@ -135,14 +135,31 @@ TYPES = {
     "dragon": "Dragon", "colorless": "Colorless",
 }
 
-# Foil enum members, taken from values that already appear in carddata rather
-# than from the enum definition - a value the client cannot parse throws.
-FOIL_BY_KIND = {
-    "std": ("Holo", "Cosmos"),
-    "ph": ("Reverse", "Rainbow"),
-    "secondary": ("Holo", "Rainbow"),
-    "pcd": ("Reverse", "Rainbow"),
+# Foils. Two separate decisions, and only the first one can be got wrong
+# silently.
+#
+# The MASK picks which bundle is requested. CardImageRenderer.SetupFoilTexture
+# is `mask == FoilMasks.Reverse ? "ph" : "std"`, so a number that only exists in
+# <SET>_wp_ph_Foil2 must be Reverse and one in _wp_std_Foil2 must not be. Get
+# that wrong and the client asks for a mask that is not there.
+#
+# The EFFECT picks the shader (GetFoil2Material), and it is per ERA. The first
+# version of this used Rainbow and Cosmos for everything, which is why the
+# foils looked "a little wrong": Rainbow is the XY-era sheen, and every set
+# here is SM or SWSH. Measured against the sets we have real data for, SM4 is
+# 74x (Reverse, SunBeam) and 12x (Holo, SunLava) - so SM reverse holos are
+# SunBeam and SM holos are SunLava. Sword & Shield has its own materials in the
+# enum, SwHolo and SwSecret; nothing in our data pins which of them a SWSH
+# reverse uses, but SwHolo is the era's holo material and an SM one would
+# certainly be wrong.
+#
+# The era comes from `block` in the server's own set list, not from the set
+# name, because the name does not always say (DM, GUM, HF and SL are all SM).
+FOIL_EFFECT_BY_BLOCK = {
+    "SM": {"std": "SunLava", "ph": "SunBeam"},
+    "SWSH": {"std": "SwHolo", "ph": "SwHolo"},
 }
+FOIL_EFFECT_DEFAULT = {"std": "Cosmos", "ph": "Rainbow"}
 
 LEAF = re.compile(r"^(\d{3})([a-z0-9]*)$")
 SUFFIX = re.compile(r"^(\d{3}[a-z0-9]*)_(toolpip|energyicon|energypip)$")
@@ -287,12 +304,21 @@ def build_set(set_name, meta, index):
         if variant:
             attrs.append({"n": ATTR_ASSET_NAME, "v": obj_str(leaf)})
 
-        kind = next((k for k in ("std", "secondary", "ph", "pcd")
-                     if k in foils.get(leaf, ())), None)
+        # Only "std" and "ph" are reachable as a card's primary foil. A number
+        # that appears solely in _wp_secondary_Foil2 or _wp_pcd_Foil2 has no
+        # mask the renderer would ask for, so it gets no foil attributes at
+        # all and renders as a plain card. That is deliberate: IsFoil is
+        # computed from these two attributes, and a card that says it is foil
+        # with no mask to bind samples stale reflection state and smears a
+        # sheen across itself.
+        present = foils.get(leaf, ())
+        kind = "std" if "std" in present else ("ph" if "ph" in present else None)
         if kind:
-            mask, effect = FOIL_BY_KIND[kind]
+            effects = FOIL_EFFECT_BY_BLOCK.get(meta.get("block") or "",
+                                               FOIL_EFFECT_DEFAULT)
+            mask = "Reverse" if kind == "ph" else "Holo"
             attrs.append({"n": ATTR_FOIL_MASK, "v": obj_str(mask)})
-            attrs.append({"n": ATTR_FOIL_EFFECT, "v": obj_str(effect)})
+            attrs.append({"n": ATTR_FOIL_EFFECT, "v": obj_str(effects[kind])})
 
         archetypes.append({"lo": lo, "hi": hi, "attrs": attrs,
                            "_label": "%s %s" % (meta.get("externalId")
