@@ -897,6 +897,13 @@ DECKS_PATH = os.path.join(HERE, "decks.json")
 # against the animation rather than guessed at: the flip is ~2s of spin plus
 # the result settling.
 COIN_FLIP_SECONDS = 2.5
+# When the PLAYER wins the flip the client waits for them to click, and that
+# click is all the pacing the opening needs. When the OPPONENT wins there is no
+# click: the AI answers in microseconds, so the notice and the deal arrive on
+# top of a coin that is still spinning. These two are the beat a human would
+# have taken - deciding, and then being read.
+OPPONENT_DECIDES_SECONDS = 1.2
+GO_FIRST_NOTICE_SECONDS = 2.0
 ZERO_GUID = "00000000-0000-0000-0000-000000000000"
 
 # validationResults must NOT be empty, and this is the second time an empty
@@ -1930,6 +1937,9 @@ class GameSession:
             self.offer_go_first()
         else:
             # The opponent won and takes the first turn, as any player would.
+            # The AI decides instantly, which is the one thing a real opponent
+            # never did, so give it long enough to look like a decision.
+            time.sleep(OPPONENT_DECIDES_SECONDS)
             self.start_match(player_first=False)
 
     def start_match(self, player_first):
@@ -1973,8 +1983,15 @@ class GameSession:
         # After the deal is the one position that satisfies both.
         # player_won_flip is who CHOSE, which is not the same question as
         # who goes first - the notice is about the choice.
-        self.emit_items(self.match.opening_animation(
-            opponent_chose=not self.player_won_flip))
+        # Emitted one item at a time so the opponent's choice can be paced.
+        # OpponentChoosingToGoFirst is the "your opponent will go first"
+        # notice; without a pause after it the deal starts underneath it and
+        # the whole opening reads as one instant blur.
+        for item in self.match.opening_animation(
+                opponent_chose=not self.player_won_flip):
+            self.emit_items([item])
+            if item[0] == "seq" and item[1] == "OpponentChoosingToGoFirst":
+                time.sleep(GO_FIRST_NOTICE_SECONDS)
         self.emit_sequence("ActivePlayerSet", [])
         # No ActivePlayerSet here. It plays the "YOUR TURN" banner and
         # increments the client's own turn counter, and at this point nobody

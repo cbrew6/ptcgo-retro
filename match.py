@@ -671,6 +671,20 @@ class Match:
         out, run = [], []
         kos = []
 
+        # Attaching an Energy emits TWO changes for one card: the CHANGE_MOVE
+        # out of the hand and the CHANGE_ATTACH onto the Pokemon. Only one of
+        # them may animate it. _change_attach owns the beat - it is the one
+        # that knows the destination is a Pokemon and wraps the flight in
+        # AttachEnergy - so the move is dropped here.
+        #
+        # This was invisible until the move got a real animation of its own.
+        # While it was bare the client short-circuited the second flight
+        # (MoveEntity returns early when the card is already at its new
+        # parent), so one motion played and it happened to be the wrong one.
+        # Give both a motion and you see both.
+        attached = {c.card for c in changes
+                    if c.kind == engine.CHANGE_ATTACH and c.card is not None}
+
         def flush_kos():
             """A knockout and the cards it takes out of play, as one sequence.
 
@@ -785,6 +799,9 @@ class Match:
                             [("seq", "DetachEnergy", items)]))
 
         for change in changes:
+            if (change.kind == engine.CHANGE_MOVE
+                    and change.card in attached):
+                continue
             if (change.kind == engine.CHANGE_MOVE
                     and change.player in retreating
                     and change.to_zone == ZONE_DISCARD
@@ -2213,16 +2230,18 @@ class Match:
             # DealInitialHands lowers both coins as the very first thing it
             # does, so the coin clears exactly as the deal begins.
             #
-            # Where the SHUFFLE goes depends on who chose, and this is pacing
-            # rather than taste. When the player was asked, the go-first dialog
-            # is itself the beat between the flip and the deal, so the shuffle
-            # rides along with the deal exactly as the real animation does -
-            # decks riffling while the cards fly out. When the OPPONENT chose
-            # there is no dialog and nothing else to wait on, and folding the
-            # shuffle into the deal left the hand dealing itself over a coin
-            # still in the air. There the shuffle is the opponent's-decision
-            # beat instead, which is also a body for OpponentChoosingToGoFirst,
-            # and that sequence needs one or it shows no notice at all.
+            # The shuffle rides with the DEAL, on both paths: decks riffling
+            # while the seven cards fly out, which is the one animation the
+            # real opening showed.
+            #
+            # It used to be the body of OpponentChoosingToGoFirst when the
+            # opponent chose, because that sequence needs a child and the
+            # shuffles were the only thing to hand. That is what the two
+            # splashes in the top-left and bottom-right corners were: the decks
+            # riffling on their own, behind the notice banner, seconds before
+            # the hand they belong to. The pacing that was buying is now done
+            # properly by the server waiting (see resolve_flip), so the shuffle
+            # can go back where it belongs.
             if opponent_chose:
                 # "Your opponent will go first". OpponentChoosingToGoFirst
                 # sets OpponentPicksWhoGoesFirst on the coin dialog - but ONLY
@@ -2235,9 +2254,16 @@ class Match:
                 # When the PLAYER won they were asked outright, so the client
                 # has already shown its own YouPickWhoGoesFirst state and this
                 # would be telling them something they just did.
+                # The body is an empty GroupedMove: the sequence only tests
+                # `sequence.Count > 0` before setting the flag, and a
+                # GroupedMove with no children wraps an empty list and
+                # finishes immediately. It is a body that does nothing, which
+                # is what this needs - anything with an animation of its own
+                # plays behind the banner, which is the bug being fixed.
                 items.append(("seq", "OpponentChoosingToGoFirst",
-                              self.shuffle_items()))
-                items.append(("seq", "DealInitialHands", hands))
+                              [("seq", "GroupedMove", [])]))
+                items.append(("seq", "DealInitialHands",
+                              self.shuffle_items() + hands))
             else:
                 items.append(("seq", "DealInitialHands",
                               self.shuffle_items() + hands))

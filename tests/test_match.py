@@ -1050,6 +1050,15 @@ class PlaySequenceTests(unittest.TestCase):
         m.serialized_state(predeal=True)
         return m
 
+    def walk_all(self, items, path=()):
+        """(sequence path, message name) for every leaf, at any depth."""
+        for item in items or ():
+            if item[0] == "seq":
+                for found in self.walk_all(item[2], path + (item[1],)):
+                    yield found
+            else:
+                yield path, item[1]
+
     def sequences_for(self, m, change):
         """The sequence names animation_for wraps one change in."""
         found = []
@@ -1151,6 +1160,66 @@ class PlaySequenceTests(unittest.TestCase):
         for path in paths:
             self.assertIn("AttachEnergy", path)
             self.assertNotIn("PlayEnergy", path)
+
+    def test_an_attach_animates_exactly_once(self):
+        """The engine emits CHANGE_MOVE and CHANGE_ATTACH for the same card.
+
+        Only _change_attach may animate it - it is the one that knows the
+        destination is a Pokemon and wraps the flight in AttachEnergy. While
+        the move was bare this was invisible, because the client short-circuits
+        a move whose card is already at its new parent; give both a motion and
+        the card flies twice.
+        """
+        m = self.board()
+        m.setup_hidden = False
+        for _ in range(6):
+            if m.state.players[0].active is not None:
+                break
+            actors = engine.players_to_act(m.state)
+            if not actors:
+                break
+            player = actors[0]
+            if m.state.players[player].active is not None:
+                m.state, _ = engine.apply(m.state, engine.SetupDone(player))
+                continue
+            basic = next(c for c in m.state.players[player].hand
+                         if m.state.card(c).is_basic_pokemon)
+            m.state, _ = engine.apply(
+                m.state, engine.SetupPlaceActive(player, basic))
+        slot = m.state.players[0].active
+        self.assertIsNotNone(slot)
+        energy = next(c for c in m.state.players[0].hand
+                      if m.state.card(c).is_energy)
+        changes = [
+            engine.Change(engine.CHANGE_MOVE, player=0, card=energy,
+                          slot=slot.slot_id, from_zone=engine.ZONE_HAND,
+                          to_zone=engine.ZONE_ACTIVE),
+            engine.Change(engine.CHANGE_ATTACH, player=0, card=energy,
+                          slot=slot.slot_id),
+        ]
+        flights = [path for path, name in self.walk_all(m.animation_for(changes))
+                   if name == "EntityMoved"]
+        self.assertEqual(len(flights), 1, "the card flew %d times" % len(flights))
+        self.assertIn("AttachEnergy", flights[0])
+
+    def test_the_shuffle_rides_with_the_deal_not_the_notice(self):
+        """The two corner splashes were the decks riffling behind the banner.
+
+        OpponentChoosingToGoFirst only needs a non-empty body, so it gets an
+        empty GroupedMove and the shuffle goes back under DealInitialHands
+        where the real opening had it.
+        """
+        m = self.board()
+        items = m.opening_animation(opponent_chose=True)
+        for path, name in self.walk_all(items):
+            if name == "Shuffled":
+                self.assertIn("DealInitialHands", path)
+                self.assertNotIn("OpponentChoosingToGoFirst", path)
+        notice = [i for i in items
+                  if i[0] == "seq" and i[1] == "OpponentChoosingToGoFirst"]
+        self.assertEqual(len(notice), 1)
+        # A body it must have, or the client shows no notice at all.
+        self.assertTrue(notice[0][2])
 
     def test_the_names_we_send_exist_in_the_motion_table(self):
         """Anti-rot: a name with no row is a frame that cannot match.
