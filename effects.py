@@ -87,7 +87,9 @@ from engine import (
     MOD_NO_ABILITIES,
     MOD_NO_RETREAT,
     Modifier,
+    STATIC_DAMAGE_DEALT,
     STATIC_DAMAGE_TAKEN,
+    STATIC_MAX_HP,
     STATIC_NO_WEAKNESS,
     STATIC_RETREAT_COST,
     ZONE_DECK,
@@ -969,7 +971,7 @@ def _evolvable(state, player, slot):
 @trainer(r"Choose 1 of your Basic " + POKEMON + r" in play\. If you have a "
          r"Stage 2 card in your hand that evolves from that " + POKEMON
          + r", put that card on(?:to)? the Basic " + POKEMON
-         + r"(?:to evolve it)?\.?\s*(?:\(This counts as evolving that "
+         + r"(?: to evolve it)?\.?\s*(?:\(This counts as evolving that "
          + POKEMON + r"\.\))? You can't use this card during your first turn "
            r"or on a Basic " + POKEMON + r" that was put into play this turn\.")
 def _rare_candy(m, card):
@@ -1633,6 +1635,333 @@ def _eviolite(m, card):
         if slot is None or not state.pokemon(slot).is_basic_pokemon:
             return value
         return value + amount
+    return _tool(hook)
+
+
+@trainer(r"Flip a coin\. If heads, draw " + N + r" cards\. If tails, "
+         r"(?:they |you )?draw " + N + r" cards\.")
+def _flip_draw_either_way(m, card):
+    """Emcee's Chatter. Both branches draw, so this never does nothing."""
+    heads, tails = int(m.group(1)), int(m.group(2))
+
+    def effect(state, ctx, changes):
+        player = ctx["player"]
+        won = flips(state, changes, 1, card.name, player)
+        engine.draw_cards(state, player, heads if won else tails, changes)
+    return effect
+
+
+@trainer(r"Draw a card for each of your opponent's Benched Basic " + POKEMON
+         + r"\.")
+def _draw_per_opponent_basic(m, card):
+    """Lass's Special. Counts BASICS on the bench, not the whole bench."""
+    def count(state, player):
+        return sum(1 for s in state.players[1 - player].bench
+                   if state.pokemon(s).is_basic_pokemon)
+
+    @playable(lambda state, player: count(state, player) > 0)
+    def effect(state, ctx, changes):
+        player = ctx["player"]
+        engine.draw_cards(state, player, count(state, player), changes)
+    return effect
+
+
+@trainer(r"Shuffle your hand into your deck\. Then, draw a number of cards "
+         r"equal to the number of Benched " + POKEMON + r" \(both yours and "
+         r"your opponent's\)\.")
+def _colress(m, card):
+    def effect(state, ctx, changes):
+        player = ctx["player"]
+        count = len(state.players[0].bench) + len(state.players[1].bench)
+        shuffle_into_deck(state, player, list(state.players[player].hand),
+                          changes)
+        engine.draw_cards(state, player, count, changes)
+    return effect
+
+
+@trainer(r"Each player counts the cards in their hand, shuffles those cards "
+         r"into their deck, then draws that many cards\.")
+def _wicke(m, card):
+    """Wicke. Both hands are counted before either is shuffled away.
+
+    Order is easy to get wrong here. Shuffling the first player's hand in
+    before counting the second changes nothing today, but counting both up
+    front is what the card says and costs nothing to do.
+    """
+    def effect(state, ctx, changes):
+        player = ctx["player"]
+        counts = {p: len(state.players[p].hand) for p in (0, 1)}
+        for p in (player, 1 - player):
+            shuffle_into_deck(state, p, list(state.players[p].hand), changes)
+            engine.draw_cards(state, p, counts[p], changes)
+    return effect
+
+
+@trainer(r"Search your discard pile for " + N + r" basic Energy cards, reveal "
+         r"them, and shuffle them into your deck\.")
+def _energy_returner(m, card):
+    count = int(m.group(1))
+
+    @playable(lambda state, player: any(
+        is_basic_energy(state, c) for c in state.players[player].discard))
+    def effect(state, ctx, changes):
+        player = ctx["player"]
+        ps = state.players[player]
+        options = tuple(c for c in ps.discard if is_basic_energy(state, c))
+        picks, choice = step(ctx, 0, lambda: Choice(
+            player=player, prompt="searchDiscard", options=options,
+            option_kind=CHOICE_CARD, minimum=0, maximum=count,
+            zone=ZONE_DISCARD, detail={"card": card.name}) if options else None)
+        if choice is not None:
+            return choice
+        shuffle_into_deck(state, player, list(picks), changes)
+    return effect
+
+
+@trainer(r"Discard " + N + r" cards from your hand\. \(If you can't discard "
+         + N + r" cards, you can't play this card\.\) Search your deck for a "
+         r"card and put it into your hand\. Shuffle your deck afterward\.")
+def _computer_search(m, card):
+    """Computer Search. Ultra Ball's shape, except that it finds ANY card."""
+    cost = int(m.group(1))
+
+    @playable(lambda state, player: len(state.players[player].hand) > cost)
+    def effect(state, ctx, changes):
+        player = ctx["player"]
+        ps = state.players[player]
+        picks, choice = step(ctx, 0, lambda: Choice(
+            player=player, prompt="discardFromHand", options=tuple(ps.hand),
+            option_kind=CHOICE_CARD, minimum=cost, maximum=cost,
+            zone=ZONE_HAND, detail={"card": card.name}))
+        if choice is not None:
+            return choice
+        if len(picks) < cost:
+            return None
+        found = distinct(state, list(ps.deck))
+        take, choice = step(ctx, 1, lambda: Choice(
+            player=player, prompt="searchDeck", options=found,
+            option_kind=CHOICE_CARD, minimum=0, maximum=1, zone=ZONE_DECK,
+            detail={"card": card.name}) if found else None)
+        if choice is not None:
+            return choice
+        for cid in picks:
+            engine.move_card(state, cid, ZONE_DISCARD, changes)
+        to_hand(state, take, changes)
+        engine.shuffle_deck(state, player, changes)
+    return effect
+
+
+@trainer(r"During this turn, your " + POKEMON + r"'s attacks do " + N
+         + r" more damage to the Active " + POKEMON + r" for each Prize card "
+           r"your opponent has taken \(before applying Weakness and "
+           r"Resistance\)\.")
+def _iris(m, card):
+    """Iris. Fixed when played, which is when the count is what it will be.
+
+    Nothing between playing a Supporter and attacking can change how many
+    prizes the opponent has taken, so reading it here rather than at damage
+    time is the same number by every route a turn can actually take.
+    """
+    per = int(m.group(1))
+
+    def effect(state, ctx, changes):
+        player = ctx["player"]
+        taken = state.rules.prize_count - len(state.players[1 - player].prizes)
+        if taken <= 0:
+            return None
+        engine.add_modifier(state, changes, Modifier(
+            kind=MOD_DAMAGE_DEALT, until_turn=state.turn_number,
+            player=player, amount=per * taken, source=ctx.get("source"),
+            detail={"card": card.name}))
+    return effect
+
+
+@trainer(r"Choose a " + POKEMON + r" Tool or Special Energy card attached to "
+         r"a " + POKEMON + r" in play \(yours or your opponent's\) and discard "
+         r"it\.")
+def _xerosic(m, card):
+    """Xerosic. Either side of the board, Tools and Special Energy alike."""
+    def attached(state):
+        out = []
+        for p in (0, 1):
+            for slot in state.players[p].in_play:
+                out += list(slot.tools)
+                out += [c for c in slot.energy if is_special_energy(state, c)]
+        return tuple(out)
+
+    @playable(lambda state, player: bool(attached(state)))
+    def effect(state, ctx, changes):
+        player = ctx["player"]
+        options = attached(state)
+        picks, choice = step(ctx, 0, lambda: Choice(
+            player=player, prompt="discardAttached", options=options,
+            option_kind=CHOICE_CARD, detail={"card": card.name})
+            if options else None)
+        if choice is not None:
+            return choice
+        for cid in picks:
+            engine.move_card(state, cid, ZONE_DISCARD, changes)
+    return effect
+
+
+@trainer(r"Move an Energy from 1 of your Benched " + POKEMON + r" to your "
+         r"Active " + POKEMON + r"\.")
+def _multi_switch(m, card):
+    """Multi Switch. Any Energy, and only bench -> Active."""
+    def ready(state, player):
+        ps = state.players[player]
+        return bool(ps.active) and any(s.energy for s in ps.bench)
+
+    @playable(ready)
+    def effect(state, ctx, changes):
+        player = ctx["player"]
+        ps = state.players[player]
+        movable = tuple(c for s in ps.bench for c in s.energy)
+        picks, choice = step(ctx, 0, lambda: Choice(
+            player=player, prompt="moveEnergy", options=movable,
+            option_kind=CHOICE_CARD, detail={"card": card.name})
+            if movable else None)
+        if choice is not None:
+            return choice
+        if not picks or ps.active is None:
+            return None
+        source = slot_holding(state, player, picks[0])
+        if source is None or source is ps.active:
+            return None
+        source.energy.remove(picks[0])
+        ps.active.energy.append(picks[0])
+        changes.append(engine.Change(engine.CHANGE_ATTACH, player=player,
+                                     card=picks[0], slot=ps.active.slot_id,
+                                     detail={"movedFrom": source.slot_id}))
+    return effect
+
+
+# --------------------------------------------------------------------------
+# Tools and Stadiums that only add a number
+# --------------------------------------------------------------------------
+#
+# All of these are continuous, so they are @static and their on-play half does
+# nothing. A Stadium goes through the same door as a Tool: _static() always
+# consults the Stadium in play, so the hook is asked about every Pokemon on
+# the board rather than only the one it is attached to.
+
+def _is_active(state, slot) -> bool:
+    if slot is None:
+        return False
+    return any(state.players[p].active is slot for p in (0, 1))
+
+
+@static(r"The attacks of the " + POKEMON + r" this card is attached to do " + N
+        + r" more damage to your opponent's Active " + POKEMON
+        + r" \(before applying Weakness and Resistance\)\.")
+def _muscle_band(m, card):
+    """Muscle Band. Only against the ACTIVE, which is the whole restriction.
+
+    The hook is reached only through the attacker's own sources, so the one
+    thing left to check is that the Pokemon being hit is an Active - a snipe
+    at the bench gets nothing.
+    """
+    amount = int(m.group(1))
+
+    def hook(query, state, ctx, value):
+        if query != STATIC_DAMAGE_DEALT:
+            return value
+        if not _is_active(state, ctx.get("defender")):
+            return value
+        return value + amount
+    return _tool(hook)
+
+
+@static(r"The attacks of the " + POKEMON + r" this card is attached to do " + N
+        + r" more damage to your opponent's Active " + POKEMON + r"-GX or "
+          r"Active " + POKEMON + r"-EX \(before applying Weakness and "
+          r"Resistance\)\.")
+def _choice_band(m, card):
+    """Choice Band. "Pokemon-GX or Pokemon-EX" is exactly the rule-box set.
+
+    prize_value() is the same judgement the prize count is built on, and it
+    returns 2 for precisely the EX and GX printings, so asking it here is
+    asking the one question the card asks rather than a proxy for it.
+    """
+    amount = int(m.group(1))
+
+    def hook(query, state, ctx, value):
+        if query != STATIC_DAMAGE_DEALT:
+            return value
+        defender = ctx.get("defender")
+        if not _is_active(state, defender):
+            return value
+        if prize_value(state.pokemon(defender)) < 2:
+            return value
+        return value + amount
+    return _tool(hook)
+
+
+@static(r"The Stage 1 " + POKEMON + r" this card is attached to gets \+" + N
+        + r" HP\.")
+def _bodybuilding_dumbbells(m, card):
+    amount = int(m.group(1))
+
+    def hook(query, state, ctx, value):
+        if query != STATIC_MAX_HP:
+            return value
+        slot = ctx.get("slot")
+        if slot is None or state.pokemon(slot).stage != "Stage1":
+            return value
+        return value + amount
+    return _tool(hook)
+
+
+@static(r"Each Stage 1 and Stage 2 " + POKEMON + r" in play \(both yours and "
+        r"your opponent's\) gets \+" + N + r" HP\.")
+def _training_center(m, card):
+    """Training Center. A Stadium, so it is asked about both players' slots."""
+    amount = int(m.group(1))
+
+    def hook(query, state, ctx, value):
+        if query != STATIC_MAX_HP:
+            return value
+        slot = ctx.get("slot")
+        if slot is None or state.pokemon(slot).stage not in ("Stage1", "Stage2"):
+            return value
+        return value + amount
+    return _tool(hook)
+
+
+@static(r"Each \{([A-Z])\} " + POKEMON + r" in play \(both yours and your "
+        r"opponent's\) gets \+" + N + r" HP\.")
+def _type_gym(m, card):
+    """Aspertia City Gym and its colour-swapped siblings."""
+    want = SYMBOLS.get(m.group(1))
+    amount = int(m.group(2))
+    if want is None:
+        return None
+
+    def hook(query, state, ctx, value):
+        if query != STATIC_MAX_HP:
+            return value
+        slot = ctx.get("slot")
+        if slot is None or want not in state.pokemon(slot).types:
+            return value
+        return value + amount
+    return _tool(hook)
+
+
+@static(r"Each " + POKEMON + r" that has any \{([A-Z])\} Energy attached to it "
+        r"\(both yours and your opponent's\) has no Retreat Cost\.")
+def _fairy_garden(m, card):
+    """Fairy Garden. Retreat is free for anything carrying that colour."""
+    code = m.group(1)
+    if SYMBOLS.get(code) is None:
+        return None
+
+    def hook(query, state, ctx, value):
+        if query != STATIC_RETREAT_COST:
+            return value
+        slot = ctx.get("slot")
+        if slot is None or not _count_symbol(state, slot, code):
+            return value
+        return 0
     return _tool(hook)
 
 

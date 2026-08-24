@@ -556,7 +556,11 @@ class RealCardTests(unittest.TestCase):
                      "N", "Lillie", "Skyla", "PokemonCatcher", "FullHeal",
                      "PokemonFanClub", "ProfessorsLetter", "Revive",
                      "FloatStone", "Eviolite", "WeaknessPolicy", "Lysandre",
-                     "Guzma", "TeamFlareGrunt", "CrushingHammer"]:
+                     "Guzma", "TeamFlareGrunt", "CrushingHammer",
+                     "MuscleBand", "ChoiceBand", "BodybuildingDumbbells",
+                     "TrainingCenter", "AspertiaCityGym", "FairyGarden",
+                     "Colress", "Wicke", "ComputerSearch", "Xerosic",
+                     "MultiSwitch", "EnergyReturner", "Iris"]:
             with self.subTest(card=name):
                 self.assertTrue(self.implemented(name),
                                 "%s has no implemented printing" % name)
@@ -689,6 +693,200 @@ def _accounted(state):
         for slot in ps.in_play:
             total += len(slot.cards)
     return total
+
+
+
+class ContinuousRealCardTests(unittest.TestCase):
+    """Tools and Stadiums that only add a number, on real cards.
+
+    These are worth testing end to end rather than synthetically, because the
+    thing most likely to be wrong is not the arithmetic - it is the condition.
+    Muscle Band that fires on a bench snipe, or a Stadium that reads the
+    holder's stage instead of the slot it was asked about, both pass a
+    synthetic test that only ever looks at one Pokemon.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        if LOC is None:
+            raise unittest.SkipTest("no localization database")
+        cls.db = engine.CardDB.from_directory(CARD_DIR)
+        cls.rules = effects.build_rules(cls.db, loc=LOC)
+
+    def one(self, name):
+        found = [c for c in self.db.by_name(name)
+                 if c.guid in self.rules.trainer_effects]
+        if not found:
+            self.skipTest("%s is not implemented in this pool" % name)
+        return found[0]
+
+    def attach(self, state, card, slot):
+        cid = engine._new_card(state, card.guid, 0)
+        state.players[0].hand.append(cid)
+        return engine.apply(state, engine.AttachTool(0, cid, slot.slot_id))[0]
+
+    def matchup(self):
+        """A real attack whose damage is a number, and a defender it lands on.
+
+        Every constraint here removes something that would hide the effect
+        under test. Fixed damage and no registered damage or effect hook, so
+        the printed number is the number; an all-Colorless cost, so any Energy
+        pays it; and a defender with neither Weakness nor Resistance to the
+        attacker's type, because Weakness MULTIPLIES - (base + 20) x 2 is not
+        base x 2 + 20, and a test ignoring that would assert the wrong sum.
+        The defender also has to survive the hit.
+        """
+        attack = None
+        for card in self.db:
+            if not card.is_pokemon or card.stage != "Basic":
+                continue
+            for ability in card.abilities:
+                if not ability.is_attack or not ability.damage:
+                    continue
+                if ability.amount_operator or ability.damage > 30:
+                    continue
+                if set(ability.cost) - {"Colorless"}:
+                    continue
+                if (ability.ability_id in self.rules.attack_damage
+                        or ability.ability_id in self.rules.attack_effects):
+                    continue
+                attack = (card, ability, ability.cost.get("Colorless", 0))
+                break
+            if attack:
+                break
+        if attack is None:
+            self.skipTest("no plain attack in this pool")
+        attacker, ability, cost = attack
+        for card in self.db:
+            if not card.is_pokemon or card.stage != "Basic":
+                continue
+            if card.max_hp < 100:
+                continue
+            if set(card.weakness_types) & set(attacker.types):
+                continue
+            if card.resistance_type and card.resistance_type in attacker.types:
+                continue
+            return attacker, ability, cost, card
+        self.skipTest("no neutral defender in this pool")
+
+    def matchup_board(self):
+        attacker, ability, cost, defender = self.matchup()
+        state = _real_board(self.db, self.rules, attacker)
+        slot = state.players[0].active
+        energy = next(c for c in self.db.by_name("DarknessEnergy"))
+        for _ in range(max(cost, 1)):
+            slot.energy.append(engine._new_card(state, energy.guid, 0))
+        state.players[1].active.stack[-1] = engine._new_card(
+            state, defender.guid, 1)
+        return state, slot, ability
+
+    def test_muscle_band_adds_its_damage_against_the_active(self):
+        state, slot, ability = self.matchup_board()
+        defender = state.players[1].active.slot_id
+
+        plain, _ = engine.apply(state, engine.Attack(0, ability.ability_id))
+        base = plain.slot(defender)[1].damage
+        self.assertGreater(base, 0)
+
+        state = self.attach(state, self.one("MuscleBand"), slot)
+        boosted, _ = engine.apply(state, engine.Attack(0, ability.ability_id))
+        self.assertEqual(boosted.slot(defender)[1].damage, base + 20)
+
+    def test_muscle_band_does_nothing_to_a_benched_pokemon(self):
+        """The condition, not the arithmetic. A bench snipe gets no bonus."""
+        state, slot, _ability = self.matchup_board()
+        band = self.one("MuscleBand")
+        state = self.attach(state, band, slot)
+        hook = self.rules.static_effects[band.guid]
+        bench = state.players[1].bench[0]
+        self.assertEqual(
+            hook(engine.STATIC_DAMAGE_DEALT, state,
+                 {"slot": slot, "defender": bench}, 0), 0)
+        self.assertEqual(
+            hook(engine.STATIC_DAMAGE_DEALT, state,
+                 {"slot": slot, "defender": state.players[1].active}, 0), 20)
+
+    def test_choice_band_only_fires_against_a_rule_box_pokemon(self):
+        """The whole card is the condition, so an ordinary defender gets nothing."""
+        state, slot, ability = self.matchup_board()
+        attacker_types = set(state.pokemon(slot).types)
+        state = self.attach(state, self.one("ChoiceBand"), slot)
+        # attach() goes through engine.apply, which deep-copies. Anything held
+        # from before it points at the old state and mutating it does nothing.
+        defender_slot = state.players[1].active
+
+        plain, _ = engine.apply(state, engine.Attack(0, ability.ability_id))
+        ordinary = plain.slot(defender_slot.slot_id)[1].damage
+
+        # Same attack, same board, defender swapped for a Pokemon-EX. It has
+        # to be as neutral as the first one, or Weakness explains the change.
+        ex = next(c for c in self.db
+                  if c.is_pokemon and c.stage == "Basic"
+                  and effects.prize_value(c) == 2 and c.max_hp >= 150
+                  and not set(c.weakness_types) & attacker_types
+                  and (not c.resistance_type
+                       or c.resistance_type not in attacker_types))
+        defender_slot.stack[-1] = engine._new_card(state, ex.guid, 1)
+        boosted, _ = engine.apply(state, engine.Attack(0, ability.ability_id))
+        self.assertEqual(boosted.slot(defender_slot.slot_id)[1].damage,
+                         ordinary + 30)
+
+    def test_training_center_reaches_both_players_and_only_evolutions(self):
+        stadium = self.one("TrainingCenter")
+        stage1 = next(c for c in self.db if c.is_pokemon and c.stage == "Stage1")
+        basic = next(c for c in self.db if c.is_pokemon and c.stage == "Basic")
+        state = _real_board(self.db, self.rules, stage1)
+        state.players[1].active.stack[-1] = engine._new_card(
+            state, stage1.guid, 1)
+        state.players[0].bench[0].stack[-1] = engine._new_card(
+            state, basic.guid, 0)
+
+        before_mine = state.max_hp(state.players[0].active)
+        before_theirs = state.max_hp(state.players[1].active)
+        before_basic = state.max_hp(state.players[0].bench[0])
+
+        cid = engine._new_card(state, stadium.guid, 0)
+        state.players[0].hand.append(cid)
+        state, _ = engine.apply(state, engine.PlayTrainer(0, cid))
+
+        self.assertEqual(state.max_hp(state.players[0].active), before_mine + 30)
+        self.assertEqual(state.max_hp(state.players[1].active),
+                         before_theirs + 30)          # "both yours and your opponent's"
+        self.assertEqual(state.max_hp(state.players[0].bench[0]), before_basic)
+
+    def test_fairy_garden_frees_retreat_only_for_the_right_colour(self):
+        stadium = self.one("FairyGarden")
+        heavy = next(c for c in self.db.by_name("Bouffalant")
+                     if c.set_code == "BW1")
+        state = _real_board(self.db, self.rules, heavy)
+        slot = state.players[0].active
+        self.assertGreater(engine.retreat_cost(state, slot), 0)
+
+        cid = engine._new_card(state, stadium.guid, 0)
+        state.players[0].hand.append(cid)
+        state, _ = engine.apply(state, engine.PlayTrainer(0, cid))
+        # Still costs: no Fairy Energy is attached yet.
+        self.assertGreater(engine.retreat_cost(state, slot), 0)
+
+        fairy = next(c for c in self.db.by_name("FairyEnergy"))
+        slot.energy.append(engine._new_card(state, fairy.guid, 0))
+        self.assertEqual(engine.retreat_cost(state, slot), 0)
+
+    def test_bodybuilding_dumbbells_reads_the_stage_it_is_attached_to(self):
+        tool = self.one("BodybuildingDumbbells")
+        basic = next(c for c in self.db if c.is_pokemon and c.stage == "Basic")
+        state = _real_board(self.db, self.rules, basic)
+        slot = state.players[0].active
+        before = state.max_hp(slot)
+        state = self.attach(state, tool, slot)
+        self.assertEqual(state.max_hp(state.players[0].active), before)
+
+        stage1 = next(c for c in self.db if c.is_pokemon and c.stage == "Stage1")
+        state2 = _real_board(self.db, self.rules, stage1)
+        slot2 = state2.players[0].active
+        before2 = state2.max_hp(slot2)
+        state2 = self.attach(state2, tool, slot2)
+        self.assertEqual(state2.max_hp(state2.players[0].active), before2 + 40)
 
 
 if __name__ == "__main__":
