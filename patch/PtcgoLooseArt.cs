@@ -61,6 +61,21 @@ using UnityEngine;
 /// for a bundle-loaded texture, so the counts stay balanced: +1 on insert into
 /// imageCache, +1 per GetTexture() requester, -1 on eviction, -1 when a
 /// requester goes away.
+///
+/// ------------------------------------------------------------------------
+/// AND THE CACHE HAS TO BE BOUNDED -- see Evict()
+/// ------------------------------------------------------------------------
+///
+/// Writing into imageCache directly gets the entry in, but it also skips
+/// AddTexture()'s eviction, so nothing ever takes a loose texture back out.
+/// The client's own cap of 60 only applies on the AddTexture() path, and a
+/// collection scroll is served almost entirely from here -- so the dictionary
+/// simply grows. One session reached 583 textures.
+///
+/// Compressing them (see Shrink) took the per-texture cost from ~8 MB to
+/// ~0.5-1 MB, which is what stopped the process dying at 3.4 GB of address
+/// space, but "smaller" is not "bounded": a long enough session still walks
+/// off the end. Evict() applies our own cap on the entries we inserted.
 /// </summary>
 public static class PtcgoLooseArt
 {
@@ -68,7 +83,21 @@ public static class PtcgoLooseArt
     private static FieldInfo cacheField;
     private static Type cacheOwner;
     private static MethodInfo addReference;
+    private static MethodInfo removeReference;
     private static bool addReferenceResolved;
+
+    // The keys we put into imageCache, oldest first. Only ours: an entry the
+    // bundle system added is the bundle system's to evict.
+    private static readonly List<string> inserted = new List<string>();
+
+    /// <summary>How many loose textures may sit in the cache at once.
+    ///
+    /// The client's own cap is 60, chosen for RGBA32 bundle textures. Ours are
+    /// DXT by the time they land (Shrink), so 150 costs about the same memory
+    /// as 20 of the client's would, and re-reading an evicted one means
+    /// decoding a PNG off disk again - worth avoiding for anything the player
+    /// might scroll back to.</summary>
+    private const int looseCacheLimit = 150;
     // Remember misses so a missing file isn't stat'd on every single frame.
     private static readonly HashSet<string> missing = new HashSet<string>();
     // The miss log is the only way to discover a request name we are not
@@ -115,7 +144,16 @@ public static class PtcgoLooseArt
             tex.LoadImage(File.ReadAllBytes(file));
             tex.name = request;
             Shrink(tex);
+            // Evict BEFORE inserting, the way AddTexture() does, so the cap
+            // is a ceiling rather than a ceiling plus one.
+            Evict(map);
             map[request] = tex;
+            // The client's own AddTexture() can evict one of ours behind our
+            // back, after which the same request is loaded again. Dropping any
+            // stale entry keeps one bookkeeping row per reference we hold; two
+            // rows for one texture would release it once and count it twice.
+            inserted.Remove(request);
+            inserted.Add(request);
             // MUST happen for every texture that enters imageCache; see the
             // class comment. Without it the cache's own eviction throws and
             // takes CardImageRenderer's loader coroutine down with it.
@@ -127,6 +165,40 @@ public static class PtcgoLooseArt
             // Never let this break the caller: a throw here would take out the
             // texture path for every asset in the game.
             Debug.LogWarning("[LooseArt] " + request + ": " + e.Message);
+        }
+    }
+
+    /// <summary>Drop our oldest entries until the cache is under the cap.
+    ///
+    /// This mirrors AddTexture()'s eviction with one deliberate difference: it
+    /// does not consult the `requesters` map first. Skipping that check is
+    /// safe, and the reason is worth stating because it looks unsafe.
+    ///
+    /// Removing a key from imageCache does NOT destroy the Texture. A renderer
+    /// that is currently showing it holds its own reference, so the object
+    /// stays alive and the card on screen is unaffected; the only consequence
+    /// is that asking for it again re-reads the PNG from disk. The reference
+    /// counts also stay balanced, because we remove exactly the one reference
+    /// we added on insert and leave every requester's own count alone.
+    ///
+    /// So the worst case here is a redundant decode, not a black card and not
+    /// an unbalanced counter. Trying to find `requesters` by reflection to
+    /// avoid that, on the other hand, means guessing which of two identically
+    /// shaped dictionaries is which - and guessing wrong there evicts nothing
+    /// or evicts everything.</summary>
+    private static void Evict(IDictionary<string, Texture> map)
+    {
+        // >= because the caller inserts one immediately after, so the cap is
+        // a ceiling on what the dictionary ever holds, not on what it held.
+        while (inserted.Count >= looseCacheLimit)
+        {
+            string key = inserted[0];
+            inserted.RemoveAt(0);
+            Texture old;
+            if (!map.TryGetValue(key, out old) || old == null)
+                continue;              // already gone, taken by AddTexture
+            map.Remove(key);
+            Untrack(old);
         }
     }
 
@@ -197,11 +269,18 @@ public static class PtcgoLooseArt
                     }
                 }
                 if (t != null)
+                {
                     addReference = t.GetMethod(
                         "AddReference",
                         BindingFlags.Static | BindingFlags.Public |
                         BindingFlags.NonPublic,
                         null, new[] { typeof(UnityEngine.Object) }, null);
+                    removeReference = t.GetMethod(
+                        "RemoveReference",
+                        BindingFlags.Static | BindingFlags.Public |
+                        BindingFlags.NonPublic,
+                        null, new[] { typeof(UnityEngine.Object) }, null);
+                }
             }
             catch (Exception e)
             {
@@ -214,6 +293,26 @@ public static class PtcgoLooseArt
         }
         if (addReference != null)
             addReference.Invoke(null, new object[] { tex });
+    }
+
+    /// <summary>Give back the one reference Track() added.
+    ///
+    /// Never lets a throw out. RemoveReference raises if it is not counting
+    /// the texture, which should be impossible for anything we inserted, but
+    /// this runs inside the loader coroutine and a throw here would kill it -
+    /// which is the exact failure the ref counting exists to prevent.</summary>
+    private static void Untrack(Texture tex)
+    {
+        if (removeReference == null) return;
+        try
+        {
+            removeReference.Invoke(null, new object[] { tex });
+        }
+        catch (Exception e)
+        {
+            Debug.LogWarning("[LooseArt] could not release " + tex.name +
+                             ": " + e.Message);
+        }
     }
 
     /// <summary>Find the cache's Dictionary&lt;string, Texture&gt; by shape, not

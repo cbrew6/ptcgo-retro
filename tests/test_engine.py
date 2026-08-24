@@ -19,6 +19,7 @@ Run: python -m unittest discover -s tests
 """
 
 import copy
+import dataclasses
 import itertools
 import json
 import os
@@ -1130,6 +1131,72 @@ class KnockoutTests(unittest.TestCase):
         # Attacking ends the turn, so promotion hands play straight to player 1.
         self.assertEqual(state.to_move, 1)
         self.assertEqual(len(kinds(changes, engine.CHANGE_TURN_START)), 1)
+
+    def test_a_two_prize_pokemon_gives_two_prizes(self):
+        """Rules.prize_values is consulted per PRINTING, not per species.
+
+        Nothing in carddata marks a rule box, so this is the one place the
+        engine takes an outside judgement about a card - it looks the answer
+        up and never derives it.
+        """
+        rules = dataclasses.replace(
+            engine.DEFAULT_RULES, prize_values={GUID["Pipsqueak"]: 2})
+        state = make_state(rules=rules)
+        place(state, 0, "Bigmouth", energy=["FireEnergy", "FireEnergy"])
+        place(state, 1, "Pipsqueak", damage=10)
+        place(state, 1, "Rockjaw", where="bench")
+
+        state, changes = engine.apply(state, engine.Attack(0, CHOMP))
+        self.assertEqual(len(state.players[0].prizes), 4)
+        self.assertEqual(len(kinds(changes, engine.CHANGE_PRIZE)), 2)
+        self.assertEqual(len(state.players[0].hand), 2)
+
+    def test_a_two_prize_knockout_can_take_the_last_prize_and_win(self):
+        """Two prizes with one left is a win, not an error.
+
+        _take_prize returns quietly on an empty pile, so the overshoot is
+        absorbed rather than raising, and the game ends on prizes.
+        """
+        rules = dataclasses.replace(
+            engine.DEFAULT_RULES, prize_values={GUID["Pipsqueak"]: 2})
+        state = make_state(rules=rules, prizes=1)
+        place(state, 0, "Bigmouth", energy=["FireEnergy", "FireEnergy"])
+        place(state, 1, "Pipsqueak", damage=10)
+        place(state, 1, "Rockjaw", where="bench")
+
+        state, changes = engine.apply(state, engine.Attack(0, CHOMP))
+        self.assertEqual(state.players[0].prizes, [])
+        self.assertEqual(state.winner, 0)
+        ended = kinds(changes, engine.CHANGE_GAME_OVER)
+        self.assertEqual(ended[0].detail["reasons"][0], engine.WIN_PRIZES)
+
+    def test_prize_value_comes_from_the_top_of_the_stack(self):
+        """An evolved Pokemon is worth what the card in PLAY is worth.
+
+        The stack underneath is irrelevant, which is also why the value has to
+        be read before _discard_slot empties the slot.
+        """
+        rules = dataclasses.replace(
+            engine.DEFAULT_RULES, prize_values={GUID["Rockjaw"]: 2})
+        state = make_state(rules=rules)
+        place(state, 0, "Bigmouth", energy=["FireEnergy", "FireEnergy"])
+        victim = place(state, 1, "Pipsqueak", damage=10)
+        place(state, 1, "Blobfish", where="bench")
+        # Rockjaw is worth two, but it is buried, so it is not what is in play.
+        victim.stack.insert(0, engine._new_card(state, GUID["Rockjaw"], 1))
+
+        state, changes = engine.apply(state, engine.Attack(0, CHOMP))
+        self.assertEqual(len(kinds(changes, engine.CHANGE_PRIZE)), 1)
+
+    def test_an_unlisted_pokemon_is_worth_the_ordinary_number(self):
+        rules = dataclasses.replace(
+            engine.DEFAULT_RULES, prize_values={GUID["Rockjaw"]: 2})
+        state = make_state(rules=rules)
+        place(state, 0, "Bigmouth", energy=["FireEnergy", "FireEnergy"])
+        place(state, 1, "Pipsqueak", damage=10)
+        place(state, 1, "Blobfish", where="bench")
+        state, changes = engine.apply(state, engine.Attack(0, CHOMP))
+        self.assertEqual(len(kinds(changes, engine.CHANGE_PRIZE)), 1)
 
     def test_promoting_a_pokemon_that_is_not_yours_or_not_benched_is_refused(self):
         state = make_state()

@@ -2891,6 +2891,41 @@ def _match(table, text, card):
     return None
 
 
+# Prizes. A Pokemon with a rule box is worth more than one prize, and nothing
+# in carddata says which cards have one: there is no such attribute, and rarity
+# does not separate them (RareUltra covers both a full-art Pokemon-EX and an
+# ordinary full-art). What DOES separate them is the printed name, because the
+# rule box is part of the name - a Pokemon-EX is stored as "MewtwoEX" and a
+# Pokemon-GX as "TapuKokoGX".
+#
+# Checked against the pool rather than assumed: every one of the 295 cards
+# whose rarity is RareHoloEX or RareHoloGX carries the suffix, none is missed,
+# and the cards the suffix finds that those rarities do not are promos and
+# full-arts of the same cards. See tests/test_effects.py.
+#
+# Deliberately NOT here:
+#   BREAK   an evolution, worth one prize like the card underneath it.
+#   LEGEND  worth two, but a LEGEND is two halves and the engine cannot put
+#           one into play at all, so a value would never be read.
+#   TAG TEAM GX  worth three. Named "...GX" like any other GX and not
+#           separable by name, but every one of them is SM9 or later and no
+#           such set has card data yet. Revisit with the SM9+ pool.
+PRIZE_SUFFIXES = (("EX", 2), ("GX", 2))
+
+
+def prize_value(card) -> int:
+    """Prizes for knocking this printing out, or 1 for an ordinary Pokemon.
+
+    The lowercase letter before the suffix is load-bearing: it is what keeps a
+    name that merely ENDS in those letters from being read as a rule box.
+    """
+    name = card.name or ""
+    for suffix, prizes in PRIZE_SUFFIXES:
+        if len(name) > len(suffix) and name.endswith(suffix)                 and name[-len(suffix) - 1].islower():
+            return prizes
+    return 1
+
+
 def build_rules(db, loc=None, base=None, localization_path=None):
     """A Rules with every card this module can read filled in.
 
@@ -2908,6 +2943,7 @@ def build_rules(db, loc=None, base=None, localization_path=None):
     trainers, statics = {}, {}
     damage, effects = {}, {}
     abilities = {}
+    prizes = {}
 
     for card in db:
         if card.is_trainer:
@@ -2927,6 +2963,9 @@ def build_rules(db, loc=None, base=None, localization_path=None):
 
         if not card.is_pokemon:
             continue
+        worth = prize_value(card)
+        if worth != 1:
+            prizes[card.guid] = worth
         for entry in card.abilities:
             if not entry.ability_id:
                 continue
@@ -2963,7 +3002,8 @@ def build_rules(db, loc=None, base=None, localization_path=None):
         static_effects=merge(base.static_effects, statics),
         attack_damage=merge(base.attack_damage, damage),
         attack_effects=merge(base.attack_effects, effects),
-        ability_effects=merge(base.ability_effects, abilities))
+        ability_effects=merge(base.ability_effects, abilities),
+        prize_values=merge(base.prize_values, prizes))
 
 
 _CACHE = {}

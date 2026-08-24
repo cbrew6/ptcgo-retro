@@ -123,6 +123,7 @@ ATTR_IS_BASIC_ENERGY = 200520
 ATTR_FAMILY_ID = 200260
 ATTR_CARD_NAME = 200630
 ATTR_EVOLVES_FROM = 200640         # the *name* (ATTR_CARD_NAME) of the pre-evolution
+ATTR_RARITY = 200550             # "Common" ... "RareHoloEX", "RareHoloGX"
 ATTR_SET = 200580
 ATTR_COLLECTOR_NUMBER = 200780
 ATTR_TRAINER_TYPES = 200270        # "Item" | "Supporter" | "Stadium" | "PokemonTool"
@@ -268,9 +269,10 @@ class Rules:
     # the coin flip. Older rulings required a flip to retreat as well.
     confusion_blocks_retreat: bool = False
 
-    # Prizes per knockout. Cards with rule boxes (EX/GX/V/VMAX) are worth 2 or
-    # 3, but carddata has no *verified* attribute for "has a rule box", so this
-    # engine invents nothing and always takes one.
+    # Prizes per knockout for an ordinary Pokemon. Cards with rule boxes are
+    # worth more, but carddata carries no attribute saying so, so the engine
+    # reads nothing into it - `prize_values` below is the exception list and a
+    # stock engine has none.
     prizes_per_knockout: int = 1
 
     # "For each of your opponent's mulligans you MAY draw a card." Drawing
@@ -347,6 +349,15 @@ class Rules:
     # because an empty registry is never consulted at all - _static() short
     # circuits, which is what keeps max_hp() cheap in the common case.
     static_effects: Mapping[str, Callable[..., int]] = field(default_factory=dict)
+
+    # archetype GUID -> prizes taken when THIS printing is knocked out, for the
+    # cards that are not worth one. Empty by default: nothing in carddata marks
+    # a rule box, so the judgement is made in effects.py from the printed name
+    # (a Pokemon-EX is literally named "...EX") and the engine only looks the
+    # answer up. Keyed by the guid of the card on TOP of the stack, which is
+    # the Pokemon in play - a Stage 2 sitting on two Basics is worth what the
+    # Stage 2 says, and a BREAK is worth what a BREAK is worth (one).
+    prize_values: Mapping[str, int] = field(default_factory=dict)
 
 
 # Queries a static_effects callable must be prepared to be asked. Anything it
@@ -502,6 +513,10 @@ class Card:
     family_id: Optional[int]
     set_code: Optional[str]
     collector_number: Optional[int]
+    # Printed rarity. No rule reads it; it is the only other signal in the
+    # pool that corroborates which cards have a rule box, and the prize
+    # tests use it to check the name rule has not gone wrong.
+    rarity: Optional[str]
     trainer_types: tuple
     # The localization key for the card's display name. Not used by the rules,
     # but the client's hand comparator dereferences it unguarded, so the
@@ -581,6 +596,7 @@ class Card:
             family_id=at.get(ATTR_FAMILY_ID, {}).get("i"),
             set_code=_str(at, ATTR_SET),
             collector_number=at.get(ATTR_COLLECTOR_NUMBER, {}).get("i"),
+            rarity=_str(at, ATTR_RARITY),
             # stored as a JSON string: "\"$$$com...Name$$$\""
             name_key=(_str(at, 10140) or "").strip('"').strip("$") or None,
             trainer_types=_strings(at, ATTR_TRAINER_TYPES),
@@ -1635,6 +1651,23 @@ def _discard_slot(state: GameState, owner: int, slot: Slot, changes: list):
         ps.bench.remove(slot)
 
 
+def prizes_for(state: GameState, card_id) -> int:
+    """How many prizes knocking this card out is worth.
+
+    The answer is per PRINTING, not per species: Rules.prize_values is keyed by
+    archetype guid, so Mewtwo is one and Mewtwo-EX is two without the engine
+    knowing what "EX" means. An unknown card, or a card the database cannot
+    resolve, is worth the ordinary number rather than nothing.
+    """
+    rules = state.rules
+    if not rules.prize_values:
+        return rules.prizes_per_knockout
+    card = state.card(card_id)
+    if card is None:
+        return rules.prizes_per_knockout
+    return rules.prize_values.get(card.guid, rules.prizes_per_knockout)
+
+
 def _resolve_knockouts(state: GameState, changes: list):
     """Knock out anything at or past its HP, award prizes, queue promotions.
 
@@ -1654,8 +1687,12 @@ def _resolve_knockouts(state: GameState, changes: list):
                               card=slot.top,
                               detail={"damage": slot.damage,
                                       "maxHP": state.max_hp(slot)}))
+        # Read the prize value BEFORE discarding: _discard_slot empties the
+        # slot, and the card that was on top of it is what the prize count
+        # comes from.
+        taken = prizes_for(state, slot.top)
         _discard_slot(state, owner, slot, changes)
-        for _ in range(state.rules.prizes_per_knockout):
+        for _ in range(taken):
             _take_prize(state, 1 - owner, changes)
 
     # Only queue a promotion for someone who can actually make one. A player

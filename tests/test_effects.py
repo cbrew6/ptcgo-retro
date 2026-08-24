@@ -453,6 +453,60 @@ LOC = effects.load_localization()
 
 @unittest.skipUnless(os.path.isdir(CARD_DIR), "carddata/ not present")
 @unittest.skipUnless(LOC, "the client's LocalizationDB is not on this machine")
+class PrizeValueTests(unittest.TestCase):
+    """The name suffix is a judgement about the data, so it gets pinned here.
+
+    Nothing in carddata marks a rule box. The claim is that the printed name
+    does, and that claim is only worth anything if it agrees with the one
+    other signal the pool carries - the RareHoloEX / RareHoloGX rarities.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.db = engine.CardDB.from_directory(CARD_DIR)
+        cls.pokemon = [c for c in cls.db if c.is_pokemon]
+
+    def test_the_suffix_needs_a_lowercase_letter_in_front_of_it(self):
+        """Otherwise any name ending in those two letters reads as a rule box."""
+        class Fake(object):
+            def __init__(self, name):
+                self.name = name
+        self.assertEqual(effects.prize_value(Fake("MewtwoEX")), 2)
+        self.assertEqual(effects.prize_value(Fake("TapuKokoGX")), 2)
+        self.assertEqual(effects.prize_value(Fake("Pikachu")), 1)
+        self.assertEqual(effects.prize_value(Fake("EX")), 1)
+        self.assertEqual(effects.prize_value(Fake("GX")), 1)
+        self.assertEqual(effects.prize_value(Fake("")), 1)
+        self.assertIsNotNone(effects.prize_value(Fake(None)))
+
+    def test_a_break_is_worth_one_prize(self):
+        """A BREAK is an evolution, not a rule box. Easy to lump in; wrong."""
+        breaks = [c for c in self.pokemon if c.name.endswith("BREAK")]
+        self.assertTrue(breaks)
+        for card in breaks:
+            self.assertEqual(effects.prize_value(card), 1, card.name)
+
+    def test_every_rule_box_rarity_is_found_by_the_name(self):
+        """The cross-check. A miss here means the rule is unsound, not stale."""
+        rare = [c for c in self.pokemon
+                if c.rarity in ("RareHoloEX", "RareHoloGX")]
+        self.assertGreater(len(rare), 200)
+        missed = [c.name for c in rare if effects.prize_value(c) != 2]
+        self.assertEqual(missed, [])
+
+    def test_the_registry_is_built_and_holds_only_real_multipliers(self):
+        rules = effects.build_rules(self.db, loc=LOC)
+        self.assertGreater(len(rules.prize_values), 500)
+        self.assertEqual(set(rules.prize_values.values()), {2})
+        for guid in rules.prize_values:
+            self.assertTrue(self.db.get(guid).is_pokemon)
+
+    def test_an_ordinary_pokemon_is_absent_from_the_registry(self):
+        rules = effects.build_rules(self.db, loc=LOC)
+        pikachu = next(c for c in self.db.by_name("Pikachu"))
+        self.assertNotIn(pikachu.guid, rules.prize_values)
+
+
 class RealCardTests(unittest.TestCase):
     """The claim the whole module rests on: the shipped text is readable.
 
