@@ -218,8 +218,17 @@ def build_all_scenarios():
 # archetype is {lo, hi, attrs:[{n, v}]} where v is a dwd.Protobuf.Object.
 
 CARD_DIR = os.path.join(HERE, "carddata")
+# Cards we can show but not play: SM5-SWSH10, rebuilt from bundle names and the
+# donated caches by tools/build_collection_pool.py. They carry no HP, weakness,
+# resistance, retreat cost, stage, evolves-from or rarity, which the collection
+# defaults but a match cannot. They are a SEPARATE directory precisely so that
+# card_db() - the engine's database, built from CARD_DIR alone - cannot be
+# handed one. See build_format_legality() for the second guard.
+BROWSE_DIR = os.path.join(HERE, "carddata_browse")
+BROWSE_LABELS = os.path.join(BROWSE_DIR, "_labels.json")
 _cards = None
 _cards_by_set = None
+_browse_guids = set()
 
 
 def load_cards():
@@ -234,19 +243,23 @@ def load_cards():
     dictionary.Add(archetypeID, ...) per archetype and that throws on a
     duplicate key, which would abort the whole load.
     """
-    global _cards, _cards_by_set
+    global _cards, _cards_by_set, _browse_guids
     if _cards is not None:
         return _cards
-    _cards, _cards_by_set = [], {}
+    _cards, _cards_by_set, _browse_guids = [], {}, set()
     if not os.path.isdir(CARD_DIR):
         log.error("no carddata/ directory - collection will be empty")
         return _cards
     seen = set()
     dupes = 0
-    for fn in sorted(os.listdir(CARD_DIR)):
+    files = [(CARD_DIR, fn) for fn in sorted(os.listdir(CARD_DIR))]
+    if os.path.isdir(BROWSE_DIR):
+        files += [(BROWSE_DIR, fn) for fn in sorted(os.listdir(BROWSE_DIR))
+                  if not fn.startswith("_")]
+    for directory, fn in files:
         if not fn.endswith(".json"):
             continue
-        with open(os.path.join(CARD_DIR, fn), encoding="utf-8") as fh:
+        with open(os.path.join(directory, fn), encoding="utf-8") as fh:
             data = json.load(fh)
         key = data.get("set") or fn[:-5]
         unique = []
@@ -257,12 +270,21 @@ def load_cards():
                 continue
             seen.add(ident)
             unique.append(a)
+            if directory == BROWSE_DIR:
+                _browse_guids.add(uuid_to_guid_str(a["lo"], a["hi"]))
         _cards_by_set[key] = unique
         _cards.extend(unique)
-    log.info("loaded %d archetypes across %d sets%s", len(_cards),
+    log.info("loaded %d archetypes across %d sets%s%s", len(_cards),
              len(_cards_by_set),
-             (" (%d cross-set duplicates dropped)" % dupes) if dupes else "")
+             (" (%d cross-set duplicates dropped)" % dupes) if dupes else "",
+             (", %d browse-only" % len(_browse_guids)) if _browse_guids else "")
     return _cards
+
+
+def browse_guids():
+    """Archetypes that may be looked at but never played."""
+    load_cards()
+    return _browse_guids
 
 
 def set_keys():
@@ -280,7 +302,7 @@ def build_set_archetypes(key):
         body = b""
         for a in _cards_by_set.get(key, []):
             body += _len_field(1, pb_archetype(a))
-        body += _len_field(2, CARD_CHECKSUM.encode())
+        body += _len_field(2, card_checksum().encode())
         body += _len_field(3, key.encode("utf-8"))
         _set_bodies[key] = body
     return _set_bodies[key]
@@ -350,13 +372,36 @@ def build_all_archetypes():
         body = b""
         for a in load_cards():
             body += _len_field(1, pb_archetype(a))
-        body += _len_field(2, CARD_CHECKSUM.encode())
+        body += _len_field(2, card_checksum().encode())
         _all_archetypes_body = body
         log.info("built AllArchetypesFound payload: %d bytes", len(body))
     return _all_archetypes_body
 
 
-CARD_CHECKSUM = "ptcgo-local-1"
+_card_checksum = None
+
+
+def card_checksum():
+    """A checksum over the archetypes we actually serve.
+
+    This gates a ~11 MB transfer: the client sends the checksum of its on-disk
+    cache and `on_GetProtobufAllArchetypesList` answers AllArchetypesChecksumMatch
+    if they agree, skipping the download entirely.
+
+    It used to be the literal "ptcgo-local-1", which was fine until the card
+    list changed. Then the client kept confirming a cache that no longer
+    matched what the server held, and 4,747 new cards were invisible with
+    nothing logged and nothing failing - the transfer that would have carried
+    them was skipped by design. Deriving it from the ids means the answer is
+    right by construction and no one has to remember to bump anything.
+    """
+    global _card_checksum
+    if _card_checksum is None:
+        digest = hashlib.md5()
+        for a in load_cards():
+            digest.update(b"%d:%d;" % (a["lo"], a["hi"]))
+        _card_checksum = "ptcgo-local-" + digest.hexdigest()
+    return _card_checksum
 
 AVATARS_PATH = os.path.join(HERE, "avatars.json")
 _avatar_archetypes_body = None
@@ -732,7 +777,7 @@ def build_avatar_archetypes():
                 count += 1
         else:
             log.warning("no avatars.json - avatar wardrobe will be empty")
-        body += _len_field(2, CARD_CHECKSUM.encode())
+        body += _len_field(2, card_checksum().encode())
         _avatar_archetypes_body = body
         log.info("built AllAvatarArchetypesFound payload: %d archetypes, %d bytes",
                  count, len(body))
@@ -1111,25 +1156,32 @@ NEVER_TIME_LOCKED = -1
 
 
 def build_format_legality():
-    """Every archetype legal in every format.
+    """Every archetype legal in every format, except the browse-only ones.
 
     A deliberate deviation: real legality was rotation data the server owned,
     and it is gone. Everything-legal is the useful answer for a local sandbox,
     and the alternative - inventing a rotation - would silently make cards
     unplayable for reasons no one could check.
+
+    The exception is not a rotation, it is a safety interlock. A browse-only
+    card has no HP, so it must never reach a match; legal in no format, the
+    client's own deck validation refuses it before a deck can be queued. That
+    is the outer guard, and card_db() reading CARD_DIR alone is the inner one.
     """
     global _format_legality
     if _format_legality is None:
-        _format_legality = [
-            {
-                "archetypeID": uuid_to_guid_str(a["lo"], a["hi"]),
-                "formatLegality": [True] * FORMAT_COUNT,
+        browse = browse_guids()
+        _format_legality = []
+        for a in load_cards():
+            guid = uuid_to_guid_str(a["lo"], a["hi"])
+            legal = guid not in browse
+            _format_legality.append({
+                "archetypeID": guid,
+                "formatLegality": [legal] * FORMAT_COUNT,
                 "formatLegalityTime": [NEVER_TIME_LOCKED] * FORMAT_COUNT,
-            }
-            for a in load_cards()
-        ]
-        log.info("built format legality: %d archetypes, all formats",
-                 len(_format_legality))
+            })
+        log.info("built format legality: %d archetypes (%d browse-only, legal "
+                 "in no format)", len(_format_legality), len(browse))
     return _format_legality
 
 
@@ -1290,36 +1342,73 @@ GAME_DIR = os.path.join(
 NOT_A_SET = {"keys.bin"}
 
 
+# The server's own set list, cached by a client that was still online:
+# 87 sets with their real external id, ordering number, card count, block and
+# legal formats. Before this existed the list was fabricated from a directory
+# scan - externalId equal to the internal name, number equal to an alphabetical
+# index, count zero - which sorted the sets wrongly and labelled them "SM5"
+# rather than "UPR". See tools/import_donor_metadata.py.
+DONOR_SETDATA = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             "donor", "setdata.json")
+
+
+def _real_setdata():
+    """name -> the set record the original server sent, or {} if we have none."""
+    if not os.path.exists(DONOR_SETDATA):
+        return {}
+    try:
+        with open(DONOR_SETDATA, encoding="utf-8") as fh:
+            return {r["name"]: r for r in json.load(fh)}
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        log.error("could not read %s: %s", DONOR_SETDATA, exc)
+        return {}
+
+
 def discover_sets():
-    """Build SetDataList entries from the shipped archetype cache."""
+    """SetDataList covering every set we actually serve cards for.
+
+    Driven off the card data rather than off a directory, because a set with
+    no entry here is a set whose cards cannot be filtered to in the collection.
+    Real metadata is used where we have it and synthesized where we do not -
+    AvatarItems, RewardItems and NoSet are ours and were never in the server's
+    list.
+    """
+    real = _real_setdata()
+    names = set(set_keys())
     for host_dir in ("127.0.0.1", "tcgo-gateway.direwolfdigital.com"):
         path = os.path.join(GAME_DIR, host_dir)
         if os.path.isdir(path):
+            names.update(n for n in os.listdir(path)
+                         if n not in NOT_A_SET
+                         and os.path.isfile(os.path.join(path, n)))
             break
-    else:
-        log.error("no archetype folder under %s - sending empty set list", GAME_DIR)
-        return []
 
-    names = sorted(n for n in os.listdir(path)
-                   if n not in NOT_A_SET
-                   and os.path.isfile(os.path.join(path, n)))
-
-    sets = []
-    for i, name in enumerate(names):
-        sets.append({
-            "name": name,
-            "externalId": name,
-            "number": i,
-            "count": 0,
-            "filter": True,
-            # arrays must not be null - the client indexes them directly
-            "legalFormats": [],
-            "featuredArchetypes": [],
-            "visibleUnfilterable": False,
-            "promo": name.startswith("Promo"),
-            "block": "",
-        })
-    log.info("discovered %d sets in %s", len(sets), path)
+    sets, synthesized = [], 0
+    for i, name in enumerate(sorted(names)):
+        record = real.get(name)
+        if record is None:
+            synthesized += 1
+            record = {
+                "name": name,
+                "externalId": name,
+                # Past the real list's highest number so ours sort last rather
+                # than interleaving with the real sets in the set picker.
+                "number": 10000 + i,
+                "count": 0,
+                "filter": True,
+                "legalFormats": [],
+                "featuredArchetypes": [],
+                "visibleUnfilterable": False,
+                "promo": name.startswith("Promo"),
+                "block": "",
+            }
+        # Arrays must be present and non-null; the client indexes them.
+        record = dict(record)
+        record["legalFormats"] = list(record.get("legalFormats") or [])
+        record["featuredArchetypes"] = list(record.get("featuredArchetypes") or [])
+        sets.append(record)
+    log.info("set list: %d sets (%d from the server's own data, %d synthesized)",
+             len(sets), len(sets) - synthesized, synthesized)
     return sets
 
 
@@ -1383,6 +1472,15 @@ def load_localization():
     added = len(merged)
     for key, value in shipped:                 # shipped wins on a collision
         merged[key] = value
+    # Labels for the browse-only cards. Their keys are ours and cannot collide
+    # with a real one, so these go on last; without them the client renders the
+    # key itself, which L.LT returns verbatim for anything it cannot find.
+    if os.path.exists(BROWSE_LABELS):
+        try:
+            with open(BROWSE_LABELS, encoding="utf-8") as fh:
+                merged.update(json.load(fh))
+        except (OSError, ValueError) as exc:
+            log.error("could not read %s: %s", BROWSE_LABELS, exc)
     _loc_cache = [{"key": k, "value": v} for k, v in merged.items()]
     if added:
         log.info("loaded %d localization strings (%d shipped, %d added from a"
@@ -2565,7 +2663,7 @@ class GameSession:
     def on_GetProtobufAllArchetypesList(self, value, request_id):
         # If the client's on-disk cache is the one build_cache.py wrote, just
         # confirm it and skip the ~9.7MB transfer entirely.
-        if (value or {}).get("checksum") == CARD_CHECKSUM:
+        if (value or {}).get("checksum") == card_checksum():
             log.info("[game %s] archetype checksum matches disk cache",
                      self.peer)
             self.send("AllArchetypesChecksumMatch", {}, request_id)

@@ -31,3 +31,7 @@ decks.json.bak
 # Metadata extracted from donated caches - TPCI's data, not ours to
 # redistribute. Regenerate with: python tools/import_donor_metadata.py <cache>
 donor/
+
+# Browsable-only card records, generated from bundle names + the donor caches.
+# Regenerate with: python tools/build_collection_pool.py --apply
+carddata_browse/
