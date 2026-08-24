@@ -1074,12 +1074,19 @@ class PlaySequenceTests(unittest.TestCase):
         for path in self.sequences_for(m, self.move(0, cid, engine.ZONE_BENCH)):
             self.assertIn("PlayCard", path)
 
-    def test_playing_into_the_active_uses_PlayActive(self):
+    def test_playing_into_the_active_also_uses_PlayCard(self):
+        """Not PlayActive, which is where I first put it.
+
+        PlayActive is a real sequence class but a pure pass-through, and it
+        appears nowhere in the motion table in resources.assets. PlayCard is
+        the only play action the table knows, and the To frame is what
+        separates the bench from the Active.
+        """
         m = self.board()
         m.setup_hidden = False
         cid = m.state.players[0].hand[0]
         for path in self.sequences_for(m, self.move(0, cid, engine.ZONE_ACTIVE)):
-            self.assertIn("PlayActive", path)
+            self.assertIn("PlayCard", path)
 
     def test_a_setup_placement_is_not_a_play(self):
         """Placing a starter is choreographed by IntroduceInitialPokemon.
@@ -1104,6 +1111,68 @@ class PlaySequenceTests(unittest.TestCase):
                 m, self.move(0, cid, engine.ZONE_DISCARD)):
             self.assertNotIn("PlayCard", path)
             self.assertNotIn("PlayActive", path)
+
+    def test_attaching_energy_uses_AttachEnergy(self):
+        """The name the motion table is keyed on, verified against it.
+
+            cardPathAnimations/P1_active_attachEnergy
+                AttachEnergy | FromHand | ToActivePokemonAreaAttachment
+
+        It was PlayEnergy for a long time, which is a real sequence class but a
+        pure pass-through with zero rows in the table - an unmatchable frame
+        and no behaviour, so the lookup fell through to the generic curve that
+        lifts the Active and slides the card in behind it.
+        """
+        m = self.board()
+        # The board is dealt but not set up, so give player 0 something to
+        # attach to before asking how the attach animates.
+        for _ in range(6):
+            if m.state.players[0].active is not None:
+                break
+            actors = engine.players_to_act(m.state)
+            if not actors:
+                break
+            player = actors[0]
+            if m.state.players[player].active is not None:
+                m.state, _ = engine.apply(m.state, engine.SetupDone(player))
+                continue
+            basic = next(c for c in m.state.players[player].hand
+                         if m.state.card(c).is_basic_pokemon)
+            m.state, _ = engine.apply(
+                m.state, engine.SetupPlaceActive(player, basic))
+        state = m.state
+        self.assertIsNotNone(state.players[0].active)
+        energy = next(c for c in state.players[0].hand
+                      if state.card(c).is_energy)
+        change = engine.Change(engine.CHANGE_ATTACH, player=0, card=energy,
+                               slot=state.players[0].active.slot_id)
+        paths = self.sequences_for(m, change)
+        self.assertTrue(paths, "attach produced no messages")
+        for path in paths:
+            self.assertIn("AttachEnergy", path)
+            self.assertNotIn("PlayEnergy", path)
+
+    def test_the_names_we_send_exist_in_the_motion_table(self):
+        """Anti-rot: a name with no row is a frame that cannot match.
+
+        Only checks the names whose whole job is picking a motion. Sequences
+        that exist for BEHAVIOUR - IntroduceInitialPokemon flipping cards over,
+        DrawPrizeCard closing the pile - legitimately have no row and are not
+        listed here.
+        """
+        resources = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "..", "PokemonTradingCardGameOnline",
+            "Pokemon Trading Card Game Online_Data", "resources.assets")
+        if not os.path.exists(resources):
+            self.skipTest("no client install to read the motion table from")
+        with open(resources, "rb") as fh:
+            blob = fh.read()
+        for name in ("AttachEnergy", "AttachTool", "PlayCard", "DetachEnergy",
+                     "DiscardRetreatCost", "Attack", "Draw", "TrainerCard"):
+            with self.subTest(sequence=name):
+                self.assertIn(name.encode(), blob,
+                              "%s has no row in the motion table" % name)
 
     def test_retreat_cost_goes_out_under_DiscardRetreatCost(self):
         """The cost is paid BEFORE the swap, so it leads the batch with

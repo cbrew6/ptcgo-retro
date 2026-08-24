@@ -777,7 +777,12 @@ class Match:
                 items.append(("msg",) + self._move_msg(change.card, destination))
             del cost[:]
             if items:
-                out.append(("seq", "DiscardRetreatCost", items))
+                # Nested, because the table is keyed on both frames:
+                #     DiscardRetreatCost | DetachEnergy | From... | ToDiscard
+                # which is the phase { action { primitive } } shape the
+                # original server used.
+                out.append(("seq", "DiscardRetreatCost",
+                            [("seq", "DetachEnergy", items)]))
 
         for change in changes:
             if (change.kind == engine.CHANGE_MOVE
@@ -896,7 +901,12 @@ class Match:
     # PlayCard is not a pass-through. It hunts through its own children for
     # the move it is animating and logs "PlayCardSequence without a move!" if
     # there is not one, so it must wrap the EntityMoved and not sit beside it.
-    PLAY_SEQUENCES = {ZONE_BENCH: "PlayCard", ZONE_ACTIVE: "PlayActive"}
+    # Both destinations are PlayCard. PlayActive exists as a sequence class but
+    # is a pure pass-through and appears nowhere in the motion table, so it
+    # would contribute an unmatchable frame; PlayCard is the only play action
+    # the table knows (40 rows) and the To frame is what separates bench from
+    # Active.
+    PLAY_SEQUENCES = {ZONE_BENCH: "PlayCard", ZONE_ACTIVE: "PlayCard"}
 
     def _play_sequence(self, change):
         """The sequence name for playing this card, or None for a plain move.
@@ -914,20 +924,33 @@ class Match:
     def _change_attach(self, change):
         """Energy becomes a child of the Pokemon; there is no energy attribute.
 
-        Wrapped in the PlayEnergy sequence, which is what makes the card
-        shrink into the Energy bubble at the bottom of the Pokemon instead of
-        lifting the Active and sliding in behind it. The sequence body is a
-        plain pass-through - what does the work is the NAME, which goes on
-        get_SequenceStack() and picks the CurveMotion prefab for the flight.
-        Sent bare, the move gets the default motion between those two zones,
-        which is the wrong one.
+        The name is AttachEnergy, and getting it wrong is why this looked
+        wrong for so long. It was PlayEnergy, which is a real sequence class -
+        but a pure pass-through, and it appears NOWHERE in the motion table, so
+        it contributed a stack frame that could not match and no behaviour
+        either. The lookup fell through to a generic curve, which is the Active
+        lifting so the card can slide in behind it.
+
+        The table is in resources.assets, one row per prefab:
+
+            cardPathAnimations/P1_active_attachEnergy
+                AttachEnergy | FromHand | ToActivePokemonAreaAttachment | Player1
+            cardPathAnimations/P1_bench_attachEnergy
+                AttachEnergy | FromHand | ToBenchAttachment | Player1
+
+        and the same prefabs are registered again under the shorter keys
+        AttachEnergy | ToActivePokemonArea and AttachEnergy | ToBench, which is
+        what we match: the destination we send is the Pokemon, and
+        GetLocationNameFor only appends "Attachment" for an entity whose own
+        parent is a Pokemon card. So the short key is the one available to us
+        and it reaches the right prefab.
         """
         if change.card is None or change.slot is None:
             return []
         target = self.entity_of_slot(self.resolve_slot(change.slot))
         if target is None:
             return []
-        return [("seq", "PlayEnergy",
+        return [("seq", "AttachEnergy",
                  [("msg",) + self._introduce_msg(change.card),
                   ("msg",) + self._move_msg(change.card, target)])]
 
@@ -1131,7 +1154,7 @@ class Match:
         target = self.entity_of_slot(self.resolve_slot(change.slot))
         if target is None:
             return []
-        return [("seq", "PlayTool",
+        return [("seq", "AttachTool",
                  [("msg",) + self._introduce_msg(change.card),
                   ("msg",) + self._move_msg(change.card, target)])]
 
