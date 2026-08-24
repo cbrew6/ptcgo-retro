@@ -848,6 +848,10 @@ def build_family_map():
 # without a second format to keep in step.
 
 DECKS_PATH = os.path.join(HERE, "decks.json")
+# How long the initial coin flip needs before the deal may start. Measured
+# against the animation rather than guessed at: the flip is ~2s of spin plus
+# the result settling.
+COIN_FLIP_SECONDS = 2.5
 ZERO_GUID = "00000000-0000-0000-0000-000000000000"
 
 # validationResults must NOT be empty, and this is the second time an empty
@@ -1791,6 +1795,16 @@ class GameSession:
                  "heads" if heads else "tails",
                  "player" if winner == 0 else "opponent")
         self.emit_items(self.match.coin_flip_items(winner, heads))
+        # The flip's COMMAND returns as soon as it has set the coin animator's
+        # bools; the coin keeps spinning on its own after that. Nothing in the
+        # message stream waits for it, so whatever we send next plays over the
+        # top - which is why the hands dealt themselves behind a coin still in
+        # the air no matter where the shuffle went.
+        #
+        # There is no delay primitive to use instead: AnimationDelayEffect has
+        # no consumer in this build. So the wait happens here, on this
+        # session's own thread, before anything else is queued.
+        time.sleep(COIN_FLIP_SECONDS)
 
         if self.player_won_flip:
             self.offer_go_first()
@@ -1877,29 +1891,11 @@ class GameSession:
             "gameID": self.game_id, "sequenceID": sid, "name": name})
 
     def emit_items(self, items):
-        """Animation for one batch of changes, inside a SerialSequence.
-
-        The wrapper is what makes every named sequence below it mean anything.
-        A card's CurveMotion is looked up from the sequence STACK, and a
-        sequence's name only reaches that stack through `set_SequenceStack`,
-        which pushes `Name` and hands a copy to each child. Nobody calls that
-        on a TOP-LEVEL sequence: its stack stays empty, its name is never
-        pushed, and the move falls back to the default motion for its From/To
-        pair - which is why wrapping an attach in PlayEnergy changed nothing
-        and the Energy still animated like a Pokemon being played.
-
-        SerialSequence is the fix: it is `class O : S.J`, and S.J's
-        constructor does `set_SequenceStack(new Stack<string>())` and
-        propagates down. `SerialSequence > PlayEnergy > EntityMoved` puts
-        "PlayEnergy" on the stack, and the Energy shrinks into its bubble.
-        """
-        items = list(items or [])
-        if not items:
-            return
-        if any(kind == "seq" for kind, _a, _b in items):
-            return self.emit_sequence("SerialSequence", items)
         for kind, a, b in items:
-            self.send_game(a, b)
+            if kind == "seq":
+                self.emit_sequence(a, b)
+            else:
+                self.send_game(a, b)
 
     def advance_match(self):
         """Play out the opponent until the player has a decision to make.

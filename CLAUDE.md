@@ -988,15 +988,20 @@ Bench" is one offer answered in one message.
   fan-out, `Attack`, `Knockout`, `Draw`, `Mulligan`, ...). A message sent
   outside one gets no choreography. `match.animation_for()` keeps that
   structure; `messages_for()` flattens it.
-- **A top-level named sequence is INERT - wrap batches in `SerialSequence`.**
-  The name only reaches the motion lookup through `set_SequenceStack`, which
-  pushes `Name` and hands a copy to every child. Nothing calls that on a
-  sequence at the top level, so its stack stays empty and the move falls back
-  to the default motion for its From/To pair. `SerialSequence` is `class O :
-  S.J`, and `S.J`'s constructor does `set_SequenceStack(new Stack<string>())`
-  and propagates down - so `SerialSequence > PlayEnergy > EntityMoved` is what
-  actually gets "PlayEnergy" onto the stack. Wrapping an attach in a bare
-  `PlayEnergy` changed nothing at all, twice, before this was understood.
+- **A top-level sequence gets its stack from the CONSUMER, not a wrapper.**
+  `ConsumeQueuedMessages` does `if (l.get_SequenceStack() == null)
+  l.set_SequenceStack(new Stack<string>());` on every top-level command, and
+  `m.n.set_SequenceStack` pushes `Name`. So the name already reaches the
+  motion lookup and **wrapping batches in `SerialSequence` changes nothing** -
+  that was tried, shipped, and made no difference to any animation. Top-level
+  commands are also consumed strictly serially (`foreach (object item2 in
+  command2) yield return item2;`), so sequences do not overlap each other.
+
+- **The coin flip does not block.** Its command sets the coin animator's bools
+  and returns; the coin keeps spinning independently. Nothing in the message
+  stream waits for it, so whatever is queued next plays over the top. There is
+  no delay primitive - `AnimationDelayEffect` has no consumer - so the only
+  honest fix is for the server to wait before queueing the deal.
 
 - **The sequence NAME picks the motion.** A sequence pushes
   `From<location>`/`To<location>` onto `get_SequenceStack()`, and the
