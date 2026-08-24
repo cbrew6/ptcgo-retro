@@ -487,9 +487,39 @@ would be knocked out the moment it was played:
 2. `build_format_legality()` marks them legal in NO format, so the client's own
    deck validation refuses them before a deck can be queued.
 
+**They render, and "the new cards are missing" is not a bug.** This was
+reported once and cost an investigation, so: the cards appear in the collection
+with their real art and real foils. What they do NOT have is names, so a search
+for "Honchkrow GX" finds nothing and the grid reads as placeholder junk. That
+is the symptom; the cards are there.
+
+How to check it in ten seconds rather than re-deriving it:
+
+  - `output_log.txt` shows a continuous run of `[LooseArt] miss: <SET>/<num>`
+    for the new sets as the collection scrolls. A miss is the EXPECTED result -
+    LooseArt has no PNG for these sets, so the bundle system serves them - and
+    it proves the card was reached and asked for its texture.
+  - Every browse set was verified end to end: no art request the manifest does
+    not declare, and every bundle it needs on disk. SM5 is built identically to
+    SWSH4, so if one renders they all do.
+
+What DOES work on them: filtering by Pokemon type, by Trainer, by Energy, and
+by set, because those attributes are real. Sorting by set and number works.
+Name search does not, and cannot without a name.
+
+**Art-only is a decision, not a gap left open.** The user chose to keep this
+fully local rather than take names from an external database, having been shown
+that a set+number -> name mapping exists nowhere in the files we own and that
+no OCR is installed on this machine. Do not "fix" it by guessing names from a
+type block's alphabetical order: a card that misstates itself is worse than one
+that says less, and it would poison search rather than enable it.
+
+If they get in the way - the collection is 14,687 cards now, and the client is
+32-bit - move `carddata_browse/` aside and restart. Nothing else references it.
+
 Joining real names, attacks and the seven numbers onto these records is what
-turns them from browsable into playable, and it is the same job either way:
-read them off the card faces, or take them from an external database.
+would turn them from browsable into playable, and it is the same job either
+way: read them off the card faces, or take them from an external database.
 
 ## Card art
 
