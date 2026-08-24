@@ -2626,8 +2626,9 @@ class GameSession:
     # AssetBundleTexture, CardImageRenderer and PlaymatProvider are all
     # missing too - so a MonoBehaviour cannot be tied back to its class, and
     # tools/scene_names.py has nothing to match on.
+    FOREVER = 4102444800000            # 2100-01-01, in ms
+
     LANDING_SLOT_IMAGES = {
-       
         "Background": "LandingPage/2017europeannationals_landingpage",
         "background": "LandingPage/2019_rotation_landingpage",
         "Texture": "LandingPage/2020_rotation_landingpage",

@@ -1070,3 +1070,70 @@ def _flatten_items(items):
             yield item[1], item[2]
         elif len(item) == 2:
             yield item[0], item[1]
+
+
+class StaticHandlerTests(unittest.TestCase):
+    """Handlers that answer from constants must actually run.
+
+    `import server` proves nothing about them: a handler referencing a class
+    attribute that no longer exists imports fine and raises AttributeError at
+    the moment the client asks. That is not a quiet failure either - the
+    exception unwinds out of GameSession.run and the socket is dropped, so the
+    player sees "Connection to server has been lost" and cannot launch. That
+    shipped once, from a constant deleted during an edit while the handler
+    that used it stayed behind.
+
+    Every handler here replies from constants, so calling it needs no match,
+    no deck and no login.
+    """
+
+    HANDLERS = [
+        ("on_GetDynamicPages", "DynamicLandingPages"),
+        ("on_GetDynamicVersions", "DynamicVersions"),
+        ("on_GetThemeDeckContents", "ThemeDeckContentsMap"),
+        ("on_GetArchetypeCorrections", "ArchetypeCorrections"),
+        ("on_GetAllBannedCardsByFormats", "AllBannedCardsByFormat"),
+        ("on_ViewMyLots", "MyLotsRetrieved"),
+    ]
+
+    def _session(self):
+        import server
+
+        class Recording(server.GameSession):
+            def __init__(self):
+                self.sent = []
+
+            def send(self, name, body, request_id=None):
+                self.sent.append((name, body))
+
+        return Recording()
+
+    def test_every_static_handler_answers(self):
+        for method, expected in self.HANDLERS:
+            session = self._session()
+            handler = getattr(session, method, None)
+            self.assertIsNotNone(handler, "%s no longer exists" % method)
+            handler({}, 1)
+            self.assertTrue(session.sent, "%s sent nothing" % method)
+            name, body = session.sent[0]
+            self.assertEqual(name, expected, "%s replied with %s" % (method, name))
+            self.assertIsInstance(body, dict)
+
+    def test_the_landing_page_is_not_empty(self):
+        """An empty pageData is a black home screen, which is what it was."""
+        session = self._session()
+        session.on_GetDynamicPages({}, 1)
+        _name, body = session.sent[0]
+        pages = body["pageData"]
+        self.assertTrue(pages, "no landing page items: the home screen is black")
+        for page in pages:
+            # Read directly by the client, so none of these may be null.
+            for field in ("labels", "images", "actions"):
+                self.assertIsInstance(page[field], dict)
+            self.assertTrue(page["images"], "an item with no images shows nothing")
+            for slot, image in page["images"].items():
+                self.assertIn("en_US", image["localeImageMap"], slot)
+            # "Inactive" is the sentinel DynamicTemplate skips. Any other value
+            # goes to Resources.Load and is dereferenced unguarded.
+            self.assertEqual(page["template"], "Inactive")
+            self.assertGreater(page["endTime"], page["startTime"])
