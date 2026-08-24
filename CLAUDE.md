@@ -114,6 +114,12 @@ reaped when that shell is torn down.
 - `tools/fix_missing_art.py` — variant printings + Trainer Kit reprints.
 - `tools/fetch_art.py` — single-card fetcher (`--from-log`), kept for one-offs.
 - `tools/find_cache.ps1` — scans all drives for a donor `bundleCache`.
+- `tools/import_donor_metadata.py` — lifts the four metadata files out of a
+  donated cache (manifest, AttributeDB, LocalizationDB, GetSetData) into
+  `donor/`. Never takes `cake.cfg` or `output_log.txt`.
+- `tools/pattern_misses.py` — scores how far into each `effects.py` pattern a
+  card's real text gets before it stops matching. Separates "needs an effect
+  written" from "already implemented, fails on a comma". Found Rare Candy.
 - `tools/bundle_textures.py` — decodes Texture2D out of the **UnityWeb**
   bundles the client shipped with. It cannot read the donated **UnityFS** ones;
   `bundle_index.py` can.
@@ -158,7 +164,7 @@ Gameplay, added later and deliberately layered:
   selection messages, the 61 named animation sequences, which effect classes
   are live and which are dead, end-of-game parameters. Claims are marked
   VERIFIED / INFERRED / UNKNOWN; trust that marking.
-- `tests/` — `python -m unittest discover -s tests`, 246 tests. The engine is
+- `tests/` — `python -m unittest discover -s tests`, 266 tests. The engine is
   testable without the game, which is the entire point of the split.
 
 ## Protocol essentials
@@ -299,6 +305,85 @@ whole load. `load_cards()` de-dupes defensively.
 Useful attribute keys: `200580` set code, `200630` name, `200550` rarity,
 `200490` HP, `200540` stage, `10140` localized-name key, `201420` league order
 (scenarios).
+
+## What the donated caches actually contain — audited 2026-08-23
+
+Two donor caches, ~4 GB each, plus a third copy of the client. Every bundle in
+both is now imported (2,602 served). The part that was under-read is the
+metadata sitting next to the bundles, which `tools/import_donor_metadata.py`
+now copies into `donor/`:
+
+| file | what it is |
+| --- | --- |
+| `donor/manifest.json` | **the real CDN AssetBundleManifest, v2352** — 3,058 bundles, 32,929 asset names, plus `versionings` (IV, version, platform, locale, crc) |
+| `donor/AttributeDB.db` | the client's own card index — see below |
+| `donor/LocalizationDB-UTF16.db` | 40,306 strings against the 27,550 the installer ships |
+| `donor/setdata.json` | the server's real set list: 87 sets, external id, card count, block, legal formats |
+
+### The manifest is the authority on asset names, and we were guessing
+
+Every art request is gated on `DoesAssetExistInManifest(name)`. We had been
+recovering the bare leaf name (`"018"`) out of each bundle and gluing a
+namespace back on by splitting the bundle name — and guessing that namespace is
+what once served a foil mask where a card face belonged. **Every one of the
+manifest's 32,929 names is already fully qualified** (`SM5/018`,
+`SM5_wp_std_Foil2/009`, `LandingPage/swsh10_dialga_landingpage`), so
+`bundle_index.py` now prefers it and extracts only for bundles it does not
+list (three, all XY12 foils from a content release the final manifest dropped).
+
+That removed 50,690 derived aliases. None of them was ever requestable: the
+real server declared a `_Foil<N>` namespace for every foil bundle and **never**
+the bare `<SET>_wp_<kind>` form our rule invented (214 of 215 wp namespaces
+carry the suffix; `Promo_SM_wp_std` is the single exception). `foil_coverage.py`
+reads the same before and after — 5,315 of 5,322, the same seven BW cards flat.
+
+461 bundles the manifest lists are not on disk. That is the true art gap, and
+it is now a number rather than a guess.
+
+### AttributeDB is NOT just a search index
+
+An earlier note here called it "a search index (GUID, name, abilities)". That
+undersold it badly. Five tables:
+
+| table | rows | what it gives |
+| --- | --- | --- |
+| `AttributeCache` | 19,760 | key → **archID**, the real archetype GUID |
+| `AbilityIDCache` | 13,528 | key → **abilityID**, the real ability GUIDs |
+| `SearchTextLookup` | 19,760 | card name **plus every attack's full English text**, already resolved |
+| `AbilityCostLookup` | 13,528 | energy cost broken out into 13 per-type columns |
+| `AbilityDescriptionCache` | 42,836 | per ability: title key, gameText key, damage, `amountOperator`, abilityType, sortOrder |
+
+**9,852 of those archetypes are absent from `carddata/`.** 1,730 carry no
+abilities (avatar and product items); **5,578 can be attributed to one specific
+set** from the set code embedded in their localization keys
+(`...cake.rules.abilities.attacks.SM12.Foo.Title`).
+
+So for the missing sets we already hold, locally and authentically: the real
+archetype GUID, the real ability GUIDs, every attack's name, per-type energy
+cost, damage, and full English text.
+
+### Bundle names encode card data
+
+`SM5_fire_CRSM5 -> ["018".."027"]` says SM5 cards 18-27 are Fire. The second
+underscore-delimited segment is a type (`grass fire water lightning psychic
+fighting darkness metal fairy dragon colorless`) or `trainer` or `Energy`, and
+the asset names are the collector numbers. Two suffixes carry more:
+`_toolpip` marks a Pokémon Tool, `_energyicon` a Special Energy. The foil
+bundles say how a card is foiled: `wp_std` holo, `wp_ph` reverse holo,
+`wp_secondary` secret rare.
+
+That is set, collector number, Pokémon type (attribute 200570 — the
+load-bearing one), supertype, tool-ness and foil treatment, for free, for every
+set. What is NOT derivable anywhere locally: HP, weakness, resistance, retreat
+cost, stage, evolves-from, rarity. Seven fields, and they are the whole gap.
+
+### The ceiling is Astral Radiance, not Crown Zenith
+
+Settled, not assumed. Neither donor's `GetSetData` (82 and 87 sets) and no
+manifest revision we hold — newest v2352 — contains SWSH11 Lost Origin, SWSH12
+Silver Tempest or Crown Zenith. Not a bundle, not a set record, not even a
+bundle *name*. The last content the caches saw is **SWSH10 Astral Radiance**.
+Do not go looking again; only the original developers could change this.
 
 ## The installer is only a baseline
 
@@ -772,6 +857,30 @@ it wants no entry in attribute 200740 and is drawn from its own prefab
 During SETUP the Active carries no attacks, so a "done benching" row there is
 safe, and that is where it goes.
 
+### Prizes: the name is the only thing that marks a rule box
+
+609 of the 7,367 Pokémon in the pool are worth two prizes, and the engine took
+one for everything, so every game with an EX or a GX in it was scored wrong.
+
+Nothing in carddata says a card has a rule box. Rarity does not separate them —
+`RareUltra` covers both a full-art Pokémon-EX and an ordinary full art. The
+**printed name** does, because the rule box is part of the name: a Pokémon-EX
+is stored as `MewtwoEX`, a Pokémon-GX as `TapuKokoGX`. Checked rather than
+assumed: all 295 cards whose rarity is `RareHoloEX` or `RareHoloGX` carry the
+suffix, none is missed, and the extras the suffix finds are promos and full
+arts of those same cards.
+
+`effects.prize_value()` makes the judgement and `Rules.prize_values` carries it
+(guid -> count); the engine only looks it up, so a stock engine still takes one
+for everything. Read off the TOP of the stack and BEFORE `_discard_slot` empties
+the slot.
+
+Deliberately excluded: **BREAK** is an evolution and worth one. **LEGEND** is
+worth two but is two halves the engine cannot put into play. **TAG TEAM GX** is
+worth three and is named `...GX` like any other, so it is not separable by
+name — every one of them is SM9 or later and has no card data yet, so revisit
+it with that pool.
+
 ### An unhandled Change kind is dropped in SILENCE
 
 `animation_for` does `getattr(self, "_change_" + kind, None)` and `continue`s
@@ -804,10 +913,19 @@ then `Apply(false, true)` takes that to DXT1/DXT5 with no readable copy, an
 8-16x reduction, and DXT is the format the real bundles ship so it is the
 authentic quality rather than a downgrade.
 
-Still outstanding: the patch writes `map[request] = tex` **directly**, which
-bypasses `AddTexture()`'s eviction entirely, so LooseArt entries are not
-subject to the LRU cap of 60 at all. Compression buys a lot of headroom but
-the collection is still unbounded.
+Writing `map[request] = tex` directly also skips `AddTexture()`'s eviction, so
+nothing ever came back out and the dictionary simply grew — 583 entries in one
+session. `Evict()` now caps the entries WE inserted at 150, mirroring
+AddTexture's eviction and its reference release.
+
+It deliberately does not consult `requesters` first, and that looks unsafe
+until you notice that removing a key does **not** destroy the Texture: a
+renderer showing it holds its own reference, so the object stays alive and the
+card on screen is unaffected. The counts stay balanced too, because we release
+exactly the one reference we added. Worst case is re-decoding a PNG. Finding
+`requesters` by reflection, by contrast, means telling two identically shaped
+`Dictionary<string, Texture>` fields apart by guesswork, and guessing wrong
+there evicts nothing or evicts everything.
 
 ### The confirm button only exists on the LAST node of a chain
 
@@ -1127,14 +1245,27 @@ Energy, retreats, uses Abilities, plays Trainers, attacks with real hit
 effects and damage numbers, promotes after a knockout, takes prizes, and wins
 or loses.
 
-Assets: **2,484 bundles / 79,003 indexed asset names** after importing from
-two donated caches. Foils resolve for every era, 99.9% of cards.
+Assets: **2,602 bundles / 29,795 asset names**, the names now taken from the
+real CDN manifest rather than derived. The count fell from 79,003 because
+50,690 of those were aliases our own rule invented and the original server
+never declared - see "the manifest is the authority" above. Foils resolve for
+every era, 99.9% of cards.
 
 Verify any change with `python match_client.py` - a headless client that plays
 a whole match over the real socket and asserts on what it receives. `--games N
 --seed S --quiet` soaks; `--deck NAME` picks a deck. It fails the run if it
 never actually played, because an earlier version read field names the offer
 does not contain, answered null to everything, and reported every game clean.
+
+**What to work on, and why it is not animations.** The game is presentable and
+not yet playable, and the difference is not visible in a screenshot. Order:
+
+1. Anything that makes a finished game WRONG. Prizes were the big one and are
+   fixed; the loose-art cache is bounded now.
+2. Card coverage. 102 of 345 Trainer names is what actually stops a deck
+   working, and triggered abilities do not exist at all - see below.
+3. The card pool (SM5-SWSH10), which is a sourcing decision now, not research.
+4. Presentation. Animations and the landing page belong here, last.
 
 Known gaps, in rough order of value:
 
@@ -1145,16 +1276,30 @@ Known gaps, in rough order of value:
 - **Auras are not modelled** - `static_effects` sees only the Pokemon's own
   Abilities and Tools plus the Stadium, so a benched Pokemon buffing the
   Active does nothing.
-- **Card coverage.** 486 of 1,120 Trainer printings (80 distinct names), 4,626
-  of 12,204 attack printings, 35 activated and 28 continuous Abilities. A card
-  whose text does not match a known pattern stays inert rather than guessing.
+- **Card coverage.** 547 of 1,120 Trainer printings (**102 distinct names**),
+  4,659 of 12,204 attack printings, 36 Tools, 35 activated and 28 continuous
+  Abilities. A card whose text does not match a known pattern stays inert
+  rather than guessing.
+
+  Work the cheap shelf first: `tools/pattern_misses.py` ranks unimplemented
+  text by how far into an existing pattern it gets. Rare Candy — a top-five
+  staple — had been implemented all along and failed on a **missing space**
+  (`the Basic Pokémon(?: to evolve it)?` against "onto the Basic Pokémon to
+  evolve it"). `pattern.match` either matches or does not, so there is nothing
+  in between for anyone to notice; six more cards came off that same list.
 - **Choice shapes are a flat list.** Reordering (Pokedex), face-up prizes
   (Town Map) and Devolution Spray need shapes the renderer does not have.
 - **Seven BW cards** still render flat out of 5,322 foils. Everything else
   resolves to a real mask.
-- **SM5-SM12 and SWSH art** is imported but unusable: no card definitions
-  exist for those sets, and the donated `AttributeDB` is a search index (GUID,
-  name, abilities) rather than full attributes.
+- **SM5-SWSH10 has art and text but no card records.** 3,855 cards, of which
+  **3,756 already have card faces indexed**. The donated `AttributeDB` supplies
+  the real archetype and ability GUIDs, attack names, per-type costs, damage and
+  full English text; the bundle names supply set, collector number, type,
+  supertype and foil treatment. Only seven numeric fields are genuinely absent
+  — HP, weakness, resistance, retreat cost, stage, evolves-from, rarity — and
+  they either come from an external database (`tools/build_setdata.py` is
+  written and ready) or from reading the card faces we already have. This is a
+  decision about sourcing, not a research problem any more.
 - The **AI is beginner strength** and will discard a good hand to a draw
   Supporter.
 - **The client's own end-turn button is load-bearing and unverified from
