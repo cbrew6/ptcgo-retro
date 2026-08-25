@@ -1221,6 +1221,29 @@ class PlaySequenceTests(unittest.TestCase):
         # A body it must have, or the client shows no notice at all.
         self.assertTrue(notice[0][2])
 
+    def test_a_player_sees_their_own_mulligans_too(self):
+        """Both sides, each with its own wording.
+
+        The reveal used to drop the player's own pile outright, so a game where
+        you mulliganed three times told you only what your opponent did. The
+        client ships a matching pair of keys - .body.player and .body.opponent
+        - and using the right one per side is the whole fix.
+        """
+        m = self.board()
+        m.opening = [
+            engine.Change(engine.CHANGE_MULLIGAN, player=0,
+                          detail={"hand": list(m.state.players[0].hand)}),
+            engine.Change(engine.CHANGE_MULLIGAN, player=1,
+                          detail={"hand": list(m.state.players[1].hand)}),
+        ]
+        prompts = [body["effectMessage"]["value"]["prompt"]
+                   for kind, name, body in
+                   ((i[0], i[1], i[2]) for i in m.mulligan_items()[0][2])
+                   if name == "EffectPlayed"]
+        self.assertEqual(len(prompts), 2, "expected one dialog per player")
+        self.assertNotEqual(prompts[0], prompts[1],
+                            "both sides were given the same wording")
+
     def test_the_names_we_send_exist_in_the_motion_table(self):
         """Anti-rot: a name with no row is a frame that cannot match.
 

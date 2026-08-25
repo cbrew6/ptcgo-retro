@@ -152,6 +152,11 @@ PROMPT_MULLIGAN_MULTI = PROMPT_MULLIGAN_DRAW + ".drawmultiple"
 BUTTON_YES_REST = "playmat.mulligan.drawcards.drawallbutton"
 BUTTON_NO_REST = "playmat.mulligan.drawcards.drawnonebutton"
 PROMPT_MULLIGAN_REVEAL = "playmat.mulligan.dialog.body.opponent"
+# The counterpart, and it was sitting next to the other one the whole time.
+# "You had to take {0} mulligan(s) before you drew a Pokemon you could play in
+# your opening hand." Without it a player was shown their opponent's mulligans
+# and never their own, which reads as the game not noticing that you mulliganed.
+PROMPT_MULLIGAN_REVEAL_SELF = "playmat.mulligan.dialog.body.player"
 PROMPT_MULLIGAN_TITLE = "playmat.mulligan.dialog.carousel.header"
 
 CHOICE_PROMPT_DEFAULT = "playmat.prompt.choosecards"
@@ -2122,17 +2127,16 @@ class Match:
             if pile:
                 piles.setdefault(change.player, []).append(pile)
 
-        # ONLY the opponent's. MulliganRevealCardsEffect is the "look at their
-        # hand" dialog - the shipped prompt for it reads "Your opponent has no
-        # Basic Pokemon and must draw a new hand. Look at their hand and select
-        # Done" - and a player's own mulligan is a different flow with its own
-        # wording ("YOUR opening hand has no Basic Pokemon"). Emitting one per
-        # player conflated the two and, because the Mulligan sequence waits for
-        # each dialog to be dismissed, meant two OKs: your own mulligans, then
-        # theirs, which read as the same thing said twice with different
-        # numbers.
-        piles.pop(0, None)
-
+        # BOTH players. This used to drop the player's own with
+        # `piles.pop(0, None)`, on the grounds that one dialog per player meant
+        # two OKs to dismiss and read as the same thing said twice. It did -
+        # because both were being sent with the OPPONENT's wording. The client
+        # ships a matching pair of keys and the fix is to use the right one for
+        # each side, not to hide half the event: a mulligan you took yourself
+        # is the half that decides how your opening hand happened.
+        #
+        # Sorted, so your own comes first. You mulliganed before you were told
+        # they did.
         items = []
         for player, hands in sorted(piles.items()):
             items.append(("msg", "EffectPlayed", {
@@ -2142,7 +2146,8 @@ class Match:
                     "value": {
                         "player": self.account(player),
                         "entityIDPiles": hands,
-                        "prompt": _loc(PROMPT_MULLIGAN_REVEAL),
+                        "prompt": _loc(PROMPT_MULLIGAN_REVEAL_SELF if player == 0
+                                       else PROMPT_MULLIGAN_REVEAL),
                         "revealTitle": _loc(PROMPT_MULLIGAN_TITLE),
                         "revealSource": self.player_entity.get(player),
                     },
