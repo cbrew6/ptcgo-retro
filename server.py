@@ -896,14 +896,19 @@ DECKS_PATH = os.path.join(HERE, "decks.json")
 # How long the initial coin flip needs before the deal may start. Measured
 # against the animation rather than guessed at: the flip is ~2s of spin plus
 # the result settling.
+# The flip's COMMAND returns as soon as it has set the coin animator's bools,
+# so nothing in the message stream waits for the coin itself. This is the only
+# thing that does, and it is load-bearing in both directions now: too short and
+# the deal plays over a spinning coin, too long and the session's single thread
+# stops answering pings and the client shows a connection warning.
+#
+# It is deliberately the ONLY sleep in the opening. Two more were added here -
+# one for the opponent's decision, one for the notice to be read - which took
+# the total block to 5.7s and produced exactly that warning. Putting
+# ActivePlayerSet in front of the deal turned out to be what the opening
+# actually needed; the extra waiting was solving a problem that ordering had
+# already solved.
 COIN_FLIP_SECONDS = 2.5
-# When the PLAYER wins the flip the client waits for them to click, and that
-# click is all the pacing the opening needs. When the OPPONENT wins there is no
-# click: the AI answers in microseconds, so the notice and the deal arrive on
-# top of a coin that is still spinning. These two are the beat a human would
-# have taken - deciding, and then being read.
-OPPONENT_DECIDES_SECONDS = 1.2
-GO_FIRST_NOTICE_SECONDS = 2.0
 ZERO_GUID = "00000000-0000-0000-0000-000000000000"
 
 # validationResults must NOT be empty, and this is the second time an empty
@@ -1937,9 +1942,6 @@ class GameSession:
             self.offer_go_first()
         else:
             # The opponent won and takes the first turn, as any player would.
-            # The AI decides instantly, which is the one thing a real opponent
-            # never did, so give it long enough to look like a decision.
-            time.sleep(OPPONENT_DECIDES_SECONDS)
             self.start_match(player_first=False)
 
     def start_match(self, player_first):
@@ -2004,9 +2006,10 @@ class GameSession:
                 deal.append(item)
 
         if notice:
-            # "Your opponent will go first", then long enough to read it.
+            # "Your opponent will go first". No wait after it: the notice is a
+            # flag on the coin dialog, and the ActivePlayerSet below is what
+            # takes that dialog down - so the two are one beat, not two.
             self.emit_items(notice)
-            time.sleep(GO_FIRST_NOTICE_SECONDS)
         # Empty ActivePlayerSet: hides the coin dialog, clears
         # OverrideShowPrompt - which nothing else in the client ever does - and
         # lowers both coins, all before running its (absent) children.
