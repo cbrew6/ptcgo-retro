@@ -1215,10 +1215,17 @@ class PlaySequenceTests(unittest.TestCase):
             if name == "Shuffled":
                 self.assertIn("DealInitialHands", path)
                 self.assertNotIn("OpponentChoosingToGoFirst", path)
-        notice = [i for i in items
-                  if i[0] == "seq" and i[1] == "OpponentChoosingToGoFirst"]
+        # The notice is no longer part of the opening at all: it has to reach
+        # the client BEFORE ActivePlayerSet hides the coin dialog, so the
+        # server sends it in front of the coin wait instead.
+        self.assertEqual(
+            [i for i in items
+             if i[0] == "seq" and i[1] == "OpponentChoosingToGoFirst"], [])
+        notice = m.go_first_notice_items()
         self.assertEqual(len(notice), 1)
-        # A body it must have, or the client shows no notice at all.
+        self.assertEqual(notice[0][1], "OpponentChoosingToGoFirst")
+        # A body it must have, or the client shows no notice at all - the
+        # sequence tests `sequence.Count > 0` before setting its flag.
         self.assertTrue(notice[0][2])
 
     def test_a_player_sees_their_own_mulligans_too(self):
@@ -1243,6 +1250,26 @@ class PlaySequenceTests(unittest.TestCase):
         self.assertEqual(len(prompts), 2, "expected one dialog per player")
         self.assertNotEqual(prompts[0], prompts[1],
                             "both sides were given the same wording")
+
+    def test_a_discarded_hand_moves_as_one_group(self):
+        """Seven loose EntityMoveds are seven flights, one after another.
+
+        GroupedMove is the fan-out; without it a Supporter that discards your
+        hand played each card separately.
+        """
+        m = self.board()
+        m.setup_hidden = False
+        hand = list(m.state.players[0].hand)[:5]
+        changes = [engine.Change(engine.CHANGE_MOVE, player=0, card=cid,
+                                 from_zone=engine.ZONE_HAND,
+                                 to_zone=engine.ZONE_DISCARD)
+                   for cid in hand]
+        paths = [path for path, name in
+                 self.walk_all(m.animation_for(changes))
+                 if name == "EntityMoved"]
+        self.assertEqual(len(paths), len(hand))
+        for path in paths:
+            self.assertIn("GroupedMove", path)
 
     def test_the_names_we_send_exist_in_the_motion_table(self):
         """Anti-rot: a name with no row is a frame that cannot match.

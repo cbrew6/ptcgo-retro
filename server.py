@@ -1927,6 +1927,14 @@ class GameSession:
                  "heads" if heads else "tails",
                  "player" if winner == 0 else "opponent")
         self.emit_items(self.match.coin_flip_items(winner, heads))
+        if not self.player_won_flip:
+            # "Your opponent will go first", BEFORE the wait below rather than
+            # after it. The notice is a flag on the coin dialog and
+            # ActivePlayerSet is what hides that dialog; sent back to back the
+            # flag is set and cleared in the same frame and the player never
+            # sees what the opponent chose. Put out here it rides the flip's
+            # own wait and costs no extra blocking.
+            self.emit_items(self.match.go_first_notice_items())
         # The flip's COMMAND returns as soon as it has set the coin animator's
         # bools; the coin keeps spinning on its own after that. Nothing in the
         # message stream waits for it, so whatever we send next plays over the
@@ -2005,10 +2013,8 @@ class GameSession:
             else:
                 deal.append(item)
 
+        # `notice` is empty now - resolve_flip sends it before the coin wait.
         if notice:
-            # "Your opponent will go first". No wait after it: the notice is a
-            # flag on the coin dialog, and the ActivePlayerSet below is what
-            # takes that dialog down - so the two are one beat, not two.
             self.emit_items(notice)
         # Empty ActivePlayerSet: hides the coin dialog, clears
         # OverrideShowPrompt - which nothing else in the client ever does - and

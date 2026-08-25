@@ -728,6 +728,26 @@ class Match:
                 out.append(("seq", "DealInitialPrizeCards",
                             [("seq", "GroupedMove", moves)]))
 
+        # A Supporter that discards your hand produces one move per card, and
+        # seven loose EntityMoveds are seven separate flights one after
+        # another - which is what "it discarded one card at a time instead of
+        # all 7 at once" was. GroupedMove is the fan-out: it staggers its
+        # children rather than running them in series.
+        discards = []
+
+        def flush_discards():
+            if not discards:
+                return
+            items = []
+            for change in discards:
+                destination = self.pile.get((change.player, ZONE_DISCARD))
+                if destination is None or change.card is None:
+                    continue
+                items.append(("msg",) + self._move_msg(change.card, destination))
+            del discards[:]
+            if items:
+                out.append(("seq", "GroupedMove", items))
+
         draws = []
 
         draws_seen = [()]
@@ -841,13 +861,23 @@ class Match:
                     and change.to_zone == ZONE_HAND
                     and change.from_zone == ZONE_DECK):
                 flush()
+                flush_discards()
                 draws.append(change)
+                continue
+            if (change.kind == engine.CHANGE_MOVE
+                    and change.to_zone == ZONE_DISCARD
+                    and change.from_zone == ZONE_HAND):
+                flush()
+                flush_draws()
+                discards.append(change)
                 continue
             flush()
             flush_draws()
+            flush_discards()
             out.append(change)
         flush()
         flush_draws()
+        flush_discards()
         flush_kos()
         # Retreat's cost is the first thing in its batch, so an open run is
         # still open here. Dropping this would drop the Energy entirely.
@@ -2196,6 +2226,28 @@ class Match:
             "entityID": self.pile[(index, ZONE_DECK)],
         }) for index in range(len(self.state.players))]
 
+    def go_first_notice_items(self):
+        """"Your opponent will go first", on its own.
+
+        Separated from opening_animation because of WHEN it has to be sent.
+        The notice is a flag on the coin dialog - OpponentChoosingToGoFirst
+        sets OpponentPicksWhoGoesFirst - and ActivePlayerSet is what takes that
+        dialog down. Emitting the two back to back sets the flag and hides it
+        again before a frame is drawn, so the player never learns what the
+        opponent chose.
+
+        Sending it here lets the server put it out BEFORE the coin wait it
+        already takes, so the notice is on screen for the length of the flip
+        and costs no extra blocking.
+
+        The body is an empty GroupedMove: the sequence only tests
+        `sequence.Count > 0` before setting the flag, and a GroupedMove with no
+        children wraps an empty list and finishes. Anything with an animation
+        of its own plays behind the banner.
+        """
+        return [("seq", "OpponentChoosingToGoFirst",
+                 [("seq", "GroupedMove", [])])]
+
     def opening_animation(self, opponent_chose=False):
         """A clean deal derived from the final board, not from the change log.
 
@@ -2247,31 +2299,13 @@ class Match:
             # the hand they belong to. The pacing that was buying is now done
             # properly by the server waiting (see resolve_flip), so the shuffle
             # can go back where it belongs.
-            if opponent_chose:
-                # "Your opponent will go first". OpponentChoosingToGoFirst
-                # sets OpponentPicksWhoGoesFirst on the coin dialog - but ONLY
-                # if the sequence has at least one CHILD, and only when none
-                # of them is a b.O (ObserverCustomChoiceOfferMessage, which is
-                # spectator-only and which we never send). An empty one is
-                # silently nothing, so the notice needs a body, and the deal
-                # is the beat it belongs in front of.
-                #
-                # When the PLAYER won they were asked outright, so the client
-                # has already shown its own YouPickWhoGoesFirst state and this
-                # would be telling them something they just did.
-                # The body is an empty GroupedMove: the sequence only tests
-                # `sequence.Count > 0` before setting the flag, and a
-                # GroupedMove with no children wraps an empty list and
-                # finishes immediately. It is a body that does nothing, which
-                # is what this needs - anything with an animation of its own
-                # plays behind the banner, which is the bug being fixed.
-                items.append(("seq", "OpponentChoosingToGoFirst",
-                              [("seq", "GroupedMove", [])]))
-                items.append(("seq", "DealInitialHands",
-                              self.shuffle_items() + hands))
-            else:
-                items.append(("seq", "DealInitialHands",
-                              self.shuffle_items() + hands))
+            # The go-first notice is NOT built here. It has to reach the
+            # client before ActivePlayerSet takes the coin dialog down, and
+            # that now happens ahead of the deal - so the server sends it in
+            # resolve_flip, in front of the wait it already takes for the
+            # coin. See go_first_notice_items.
+            items.append(("seq", "DealInitialHands",
+                          self.shuffle_items() + hands))
         # After the deal, deliberately. DealInitialHands is what lowers both
         # coins, so a reveal before it leaves the coin sitting on screen behind
         # the dialog - and the mulligans read as a summary of what happened
