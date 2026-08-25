@@ -91,6 +91,7 @@ from engine import (
     STATIC_DAMAGE_TAKEN,
     STATIC_MAX_HP,
     STATIC_NO_WEAKNESS,
+    STATIC_POISON_DAMAGE,
     STATIC_RETREAT_COST,
     ZONE_DECK,
     ZONE_DISCARD,
@@ -1968,6 +1969,131 @@ def _multi_switch(m, card):
     return effect
 
 
+@trainer(r"Your opponent's Active " + POKEMON + r" is now Poisoned\. Flip a "
+         r"coin\. If heads, your opponent's Active " + POKEMON + r" is also "
+         r"Asleep\.")
+def _hypnotoxic_laser(m, card):
+    """Hypnotoxic Laser. Poison lands whatever the coin says.
+
+    The order matters and the card states it: the Poison is not conditional, so
+    a tails still leaves them Poisoned. Asleep and Poisoned coexist - only
+    Asleep, Paralyzed and Confused replace each other - so this does not need
+    to clear anything first.
+    """
+    def ready(state, player):
+        return state.players[1 - player].active is not None
+
+    @playable(ready)
+    def effect(state, ctx, changes):
+        player = ctx["player"]
+        target = state.players[1 - player].active
+        if target is None:
+            return None
+        engine.add_condition(state, target, engine.POISONED, changes)
+        if flips(state, changes, 1, card.name, player):
+            engine.add_condition(state, target, engine.ASLEEP, changes)
+    return effect
+
+
+@static(r"Put " + N + r" more damage counters on Poisoned " + POKEMON
+        + r" \(both yours and your opponent's\) between turns\.")
+def _virbank_city_gym(m, card):
+    """Virbank City Gym. A Stadium, so it is asked about both Actives.
+
+    Counters, not damage: the card says two more COUNTERS, which is 20. It
+    rides STATIC_POISON_DAMAGE rather than STATIC_DAMAGE_TAKEN because Poison
+    is not an attack - nothing reduces it and Weakness never applies.
+    """
+    counters = int(m.group(1))
+
+    def hook(query, state, ctx, value):
+        if query != STATIC_POISON_DAMAGE:
+            return value
+        return value + counters * 10
+    return _tool(hook)
+
+
+@trainer(r"Search your deck for a Team Plasma " + POKEMON + r", reveal it, "
+         r"and put it into your hand\. Shuffle your deck afterward\.")
+def _team_plasma_ball(m, card):
+    """Team Plasma Ball. TeamPlasma is attribute 200360, on 205 cards."""
+    def found(state, player):
+        return distinct(state, [c for c in state.players[player].deck
+                                if state.card(c).is_pokemon
+                                and "TeamPlasma" in state.card(c).subtypes])
+
+    @playable(lambda state, player: bool(found(state, player)))
+    def effect(state, ctx, changes):
+        player = ctx["player"]
+        options = found(state, player)
+        take, choice = step(ctx, 0, lambda: Choice(
+            player=player, prompt="searchDeck", options=options,
+            option_kind=CHOICE_CARD, minimum=0, maximum=1, zone=ZONE_DECK,
+            detail={"card": card.name}) if options else None)
+        if choice is not None:
+            return choice
+        to_hand(state, take, changes)
+        engine.shuffle_deck(state, player, changes)
+    return effect
+
+
+@trainer(r"Search your deck for a Plasma Energy card and attach it to 1 of "
+         r"your Team Plasma " + POKEMON + r"\. Shuffle your deck afterward\.")
+def _colress_machine(m, card):
+    """Colress Machine. Two searches in one: the Energy, then who gets it.
+
+    Plasma Energy is found by NAME rather than by any attribute, because it is
+    a specific card and not a category - "a Plasma Energy card" names exactly
+    the six printings called PlasmaEnergy. The holder is found by subtype, the
+    same way Team Plasma Ball finds its Pokemon.
+
+    Attaching does not consume the turn's Energy attachment: this is an Item
+    doing the attaching, not the player.
+    """
+    def energies(state, player):
+        return distinct(state, [c for c in state.players[player].deck
+                                if state.card(c).name == "PlasmaEnergy"])
+
+    def holders(state, player):
+        return [s for s in own_slots(state, player)
+                if "TeamPlasma" in state.pokemon(s).subtypes]
+
+    def ready(state, player):
+        return bool(energies(state, player)) and bool(holders(state, player))
+
+    @playable(ready)
+    def effect(state, ctx, changes):
+        player = ctx["player"]
+        options = energies(state, player)
+        take, choice = step(ctx, 0, lambda: Choice(
+            player=player, prompt="searchDeck", options=options,
+            option_kind=CHOICE_CARD, minimum=0, maximum=1, zone=ZONE_DECK,
+            detail={"card": card.name}) if options else None)
+        if choice is not None:
+            return choice
+        if not take:
+            engine.shuffle_deck(state, player, changes)
+            return None
+        targets = holders(state, player)
+        where, choice = step(ctx, 1, lambda: Choice(
+            player=player, prompt="energyTarget", options=slot_ids(targets),
+            option_kind=CHOICE_SLOT, detail={"card": card.name})
+            if targets else None)
+        if choice is not None:
+            return choice
+        slot = slot_of(state, where[0]) if where else None
+        if slot is None:
+            engine.shuffle_deck(state, player, changes)
+            return None
+        cid = take[0]
+        state.players[player].deck.remove(cid)
+        slot.energy.append(cid)
+        changes.append(engine.Change(engine.CHANGE_ATTACH, player=player,
+                                     card=cid, slot=slot.slot_id))
+        engine.shuffle_deck(state, player, changes)
+    return effect
+
+
 # --------------------------------------------------------------------------
 # Tools and Stadiums that only add a number
 # --------------------------------------------------------------------------
@@ -2257,6 +2383,116 @@ def _reveal_their_hand(m, ability):
         them = 1 - ctx["player"]
         engine.reveal(state, changes, them, state.players[them].hand,
                       reason="attack")
+    return effect
+
+
+def _has_plasma_energy(state, slot):
+    """Is a Plasma Energy attached here?
+
+    By NAME, because "Plasma Energy" is one specific card rather than a
+    category - the six printings called PlasmaEnergy - and nothing in the
+    attributes marks an Energy as Plasma.
+    """
+    if slot is None:
+        return False
+    return any(state.card(cid).name == "PlasmaEnergy" for cid in slot.energy)
+
+
+@attack_damage(r"If this " + POKEMON + r" has any Plasma Energy attached to "
+               r"it, this attack does " + N + r" more damage for each Energy "
+               r"attached to the Defending " + POKEMON + r"\.")
+def _plasma_bonus_per_defender_energy(m, ability):
+    """Deoxys-EX, Helix Force.
+
+    The condition is on the ATTACKER's own Energy and the count is on the
+    DEFENDER's, which is easy to read the wrong way round.
+    """
+    each = int(m.group(1))
+
+    def damage(state, ctx, changes):
+        base = ctx["attack"].damage
+        if not _has_plasma_energy(state, ctx.get("attacker")):
+            return base
+        defender = ctx.get("defender")
+        return base + each * (len(defender.energy) if defender else 0)
+    return damage
+
+
+@attack_effect(r"Attach an Energy card from your discard pile to 1 of your "
+               r"Benched Team Plasma " + POKEMON + r"\.")
+def _attach_from_discard_to_benched_plasma(m, ability):
+    """Thundurus-EX, Raiden Knuckle.
+
+    Benched only, and Team Plasma only - two restrictions that between them
+    make this do nothing on most boards, so it declines quietly rather than
+    asking a question with no answers.
+    """
+    def targets(state, player):
+        return [s for s in state.players[player].bench
+                if "TeamPlasma" in state.pokemon(s).subtypes]
+
+    def effect(state, ctx, changes):
+        player = ctx["player"]
+        ps = state.players[player]
+        energy = distinct(state, [c for c in ps.discard
+                                  if state.card(c).is_energy])
+        slots = targets(state, player)
+        if not energy or not slots:
+            return None
+        take, choice = step(ctx, 0, lambda: Choice(
+            player=player, prompt="searchDiscard", options=energy,
+            option_kind=CHOICE_CARD, minimum=0, maximum=1, zone=ZONE_DISCARD,
+            detail={"card": ability.title}) if energy else None)
+        if choice is not None:
+            return choice
+        if not take:
+            return None
+        where, choice = step(ctx, 1, lambda: Choice(
+            player=player, prompt="energyTarget", options=slot_ids(slots),
+            option_kind=CHOICE_SLOT, detail={"card": ability.title})
+            if slots else None)
+        if choice is not None:
+            return choice
+        slot = slot_of(state, where[0]) if where else None
+        if slot is None:
+            return None
+        cid = take[0]
+        if cid not in ps.discard:
+            return None
+        ps.discard.remove(cid)
+        slot.energy.append(cid)
+        changes.append(engine.Change(engine.CHANGE_ATTACH, player=player,
+                                     card=cid, slot=slot.slot_id))
+    return effect
+
+
+@attack_effect(r"If this " + POKEMON + r" has any Plasma Energy attached to "
+               r"it, discard an Energy attached to the Defending " + POKEMON
+               + r"\.")
+def _plasma_discard_defender_energy(m, ability):
+    """Thundurus-EX, Thunderous Noise.
+
+    The player chooses which Energy goes, because the card does not say
+    otherwise and the choice can matter - a Special Energy is worth more than
+    a basic one.
+    """
+    def effect(state, ctx, changes):
+        player = ctx["player"]
+        if not _has_plasma_energy(state, ctx.get("attacker")):
+            return None
+        defender = ctx.get("defender")
+        if defender is None or not defender.energy:
+            return None
+        options = tuple(defender.energy)
+        picks, choice = step(ctx, 0, lambda: Choice(
+            player=player, prompt="discardEnergy", options=options,
+            option_kind=CHOICE_CARD, detail={"card": ability.title})
+            if options else None)
+        if choice is not None:
+            return choice
+        for cid in picks:
+            if cid in defender.energy:
+                engine.discard_attached(state, defender, (cid,), changes)
     return effect
 
 

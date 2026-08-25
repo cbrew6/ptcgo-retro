@@ -123,6 +123,7 @@ ATTR_IS_BASIC_ENERGY = 200520
 ATTR_FAMILY_ID = 200260
 ATTR_CARD_NAME = 200630
 ATTR_EVOLVES_FROM = 200640         # the *name* (ATTR_CARD_NAME) of the pre-evolution
+ATTR_SUBTYPES = 200360           # ["TeamPlasma"], ["Ancient Trait"], ...
 ATTR_RARITY = 200550             # "Common" ... "RareHoloEX", "RareHoloGX"
 ATTR_SET = 200580
 ATTR_COLLECTOR_NUMBER = 200780
@@ -367,6 +368,11 @@ STATIC_DAMAGE_TAKEN = "damageTaken"   # subtracted from damage, after Weakness
 STATIC_RETREAT_COST = "retreatCost"   # symbols, floored at 0 by the caller
 STATIC_MAX_HP = "maxHP"
 STATIC_NO_WEAKNESS = "noWeakness"     # non-zero means Weakness does not apply
+# Extra damage counters put on a Poisoned Pokemon between turns. Virbank City
+# Gym is the card; it is a Stadium, so it is asked about both players' Actives.
+# Separate from STATIC_DAMAGE_TAKEN because Poison is not an attack: it is not
+# reduced by damage-reduction effects and Weakness never applies to it.
+STATIC_POISON_DAMAGE = "poisonDamage"
 
 
 DEFAULT_RULES = Rules()
@@ -517,6 +523,12 @@ class Card:
     # pool that corroborates which cards have a rule box, and the prize
     # tests use it to check the name rule has not gone wrong.
     rarity: Optional[str]
+    # Printed subtypes - "TeamPlasma" on 205 cards, and the only place that
+    # allegiance is recorded. A whole family of cards reads it ("Search your
+    # deck for a Team Plasma Pokemon"), and without it they cannot be written
+    # at all, because nothing else distinguishes a Team Plasma Pokemon from
+    # any other.
+    subtypes: tuple
     trainer_types: tuple
     # The localization key for the card's display name. Not used by the rules,
     # but the client's hand comparator dereferences it unguarded, so the
@@ -597,6 +609,7 @@ class Card:
             set_code=_str(at, ATTR_SET),
             collector_number=at.get(ATTR_COLLECTOR_NUMBER, {}).get("i"),
             rarity=_str(at, ATTR_RARITY),
+            subtypes=tuple(_strings(at, ATTR_SUBTYPES)),
             # stored as a JSON string: "\"$$$com...Name$$$\""
             name_key=(_str(at, 10140) or "").strip('"').strip("$") or None,
             trainer_types=_strings(at, ATTR_TRAINER_TYPES),
@@ -1897,7 +1910,10 @@ def _checkup(state: GameState, changes: list):
             continue
 
         if POISONED in slot.conditions:
-            _apply_damage(state, slot, state.rules.poison_damage, changes,
+            poison = _static(state, STATIC_POISON_DAMAGE, {"slot": slot},
+                             state.rules.poison_damage,
+                             sources=_slot_static_sources(state, slot))
+            _apply_damage(state, slot, max(0, poison), changes,
                           {"source": POISONED})
         if BURNED in slot.conditions:
             _apply_damage(state, slot, state.rules.burn_damage, changes,

@@ -562,7 +562,9 @@ class RealCardTests(unittest.TestCase):
                      "Colress", "Wicke", "ComputerSearch", "Xerosic",
                      "MultiSwitch", "EnergyReturner", "Iris",
                      "GiantCape", "ShadowCircle", "FairyDrop", "Olympia",
-                     "ProfessorKukui", "Ilima", "Plumeria"]:
+                     "ProfessorKukui", "Ilima", "Plumeria",
+                     "HypnotoxicLaser", "VirbankCityGym", "TeamPlasmaBall",
+                     "ColressMachine"]:
             with self.subTest(card=name):
                 self.assertTrue(self.implemented(name),
                                 "%s has no implemented printing" % name)
@@ -873,6 +875,33 @@ class ContinuousRealCardTests(unittest.TestCase):
         fairy = next(c for c in self.db.by_name("FairyEnergy"))
         slot.energy.append(engine._new_card(state, fairy.guid, 0))
         self.assertEqual(engine.retreat_cost(state, slot), 0)
+
+    def test_virbank_city_gym_adds_to_poison_between_turns(self):
+        """Counters, not damage - the card says two more COUNTERS, so 20.
+
+        It rides STATIC_POISON_DAMAGE and not STATIC_DAMAGE_TAKEN, because
+        Poison is not an attack: nothing reduces it and Weakness never applies.
+        """
+        gym = self.one("VirbankCityGym")
+        hook = self.rules.static_effects[gym.guid]
+        self.assertEqual(hook(engine.STATIC_POISON_DAMAGE, None, {}, 10), 30)
+        # It must not touch anything else.
+        self.assertEqual(hook(engine.STATIC_DAMAGE_TAKEN, None, {}, 10), 10)
+        self.assertEqual(hook(engine.STATIC_MAX_HP, None, {}, 60), 60)
+
+    def test_team_plasma_is_read_from_the_subtypes(self):
+        """205 cards carry it in attribute 200360, and nothing else marks it.
+
+        Without this the whole Plasma family - Team Plasma Ball, Colress
+        Machine, Raiden Knuckle - cannot be written at all.
+        """
+        deoxys = next(c for c in self.db.by_name("DeoxysEX")
+                      if c.set_code == "BW9")
+        self.assertIn("TeamPlasma", deoxys.subtypes)
+        plasma = [c for c in self.db if "TeamPlasma" in c.subtypes]
+        self.assertGreater(len(plasma), 150)
+        ordinary = next(c for c in self.db.by_name("Patrat"))
+        self.assertNotIn("TeamPlasma", ordinary.subtypes)
 
     def test_giant_cape_does_not_steal_the_stage_1_dumbbells(self):
         """Two Tools, one sentence apart. Pattern order must not merge them."""
