@@ -1399,7 +1399,6 @@ class ChangeCoverageTests(unittest.TestCase):
         "gameOver": "sent as GameCompletedMessage, which must stay unwrapped",
         "modifier": "continuous effects have no card movement to show",
         "mulligan": "shown by mulligan_items as a MulliganRevealCardsEffect",
-        "shuffle": "the opening emits its own Shuffled messages",
         "coinFlip": "in-effect flips ride along with the effect that caused them",
         "evolve": "the card's own CHANGE_MOVE from hand to the slot animates it",
     }

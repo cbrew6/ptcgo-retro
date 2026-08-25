@@ -748,6 +748,31 @@ class Match:
             if items:
                 out.append(("seq", "GroupedMove", items))
 
+        # A hand going BACK into the deck - N, Colress, Professor Juniper's
+        # cousins - is the same shape as a hand being discarded and needs the
+        # same treatment. Thirteen loose EntityMoveds are thirteen card
+        # flights one after another, which is "we both put our cards back in
+        # one at a time, very very slow".
+        #
+        # The real beat is three things: the whole hand goes back at once, the
+        # deck riffles, then the new hand is dealt - the opening's own rhythm.
+        # GroupedMove gives the first, the Shuffled change gives the second,
+        # and the draws below already group into the third.
+        returns = []
+
+        def flush_returns():
+            if not returns:
+                return
+            items = []
+            for change in returns:
+                destination = self.pile.get((change.player, ZONE_DECK))
+                if destination is None or change.card is None:
+                    continue
+                items.append(("msg",) + self._move_msg(change.card, destination))
+            del returns[:]
+            if items:
+                out.append(("seq", "GroupedMove", items))
+
         draws = []
 
         draws_seen = [()]
@@ -862,7 +887,16 @@ class Match:
                     and change.from_zone == ZONE_DECK):
                 flush()
                 flush_discards()
+                flush_returns()
                 draws.append(change)
+                continue
+            if (change.kind == engine.CHANGE_MOVE
+                    and change.to_zone == ZONE_DECK
+                    and change.from_zone == ZONE_HAND):
+                flush()
+                flush_draws()
+                flush_discards()
+                returns.append(change)
                 continue
             if (change.kind == engine.CHANGE_MOVE
                     and change.to_zone == ZONE_DISCARD
@@ -874,10 +908,12 @@ class Match:
             flush()
             flush_draws()
             flush_discards()
+            flush_returns()
             out.append(change)
         flush()
         flush_draws()
         flush_discards()
+        flush_returns()
         flush_kos()
         # Retreat's cost is the first thing in its batch, so an open run is
         # still open here. Dropping this would drop the Energy entirely.
@@ -1277,6 +1313,24 @@ class Match:
             },
         }))
         return [("seq", "AlwaysReveal", items)]
+
+    def _change_shuffle(self, change):
+        """The deck riffling.
+
+        The engine emits this whenever a deck is shuffled, and it used to
+        render as nothing at all - there is no _change_ handler, and an
+        unhandled kind is dropped in silence. That is right for the shuffles
+        inside the opening, which ride with the deal, and wrong for a shuffle
+        in the middle of a turn: N puts both hands back and deals two new ones,
+        and with no riffle between them the cards simply teleport.
+        """
+        destination = self.pile.get((change.player, ZONE_DECK))
+        if destination is None:
+            return []
+        return [("msg", "Shuffled", {
+            "gameID": self.game_id,
+            "entityID": destination,
+        })]
 
     def _change_prize(self, change):
         # The card's journey is its own move Change; this one only marks that
