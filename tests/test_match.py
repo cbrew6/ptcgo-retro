@@ -23,6 +23,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import effects  # noqa: E402
 import engine  # noqa: E402
 import match   # noqa: E402
 
@@ -533,6 +534,118 @@ class OfferTests(unittest.TestCase):
             for info in row["targetInfoLst"]:
                 self.assertIsInstance(info["validTargets"], list)
                 self.assertTrue(info["validTargets"])
+
+
+class DropTargetTests(unittest.TestCase):
+    """A card you can play must be droppable somewhere a player would aim.
+
+    A row's validTargets are not just "what this move needs to know" - they
+    are the only entities the drop is allowed to land on. An action that
+    names no target on the board still has to say where the card may go, and
+    for a long time the Trainer row said one thing: the player's own discard
+    pile. Playing a Trainer therefore meant dragging it exactly onto the
+    discard; every other drop matched nothing, snapped the card back, and
+    looked like the game freezing on play.
+
+    It survived because match_client.py picks its target OUT of validTargets
+    and so always aimed at the discard - dozens of successful Trainer plays a
+    game while the real client could not play one at all. The log is
+    unambiguous in hindsight: no genuine client session ever sent a single
+    PlayTrainer.
+
+    The invariant pinned here is the card's OWN entity, because that is
+    dragEnded's fallback selection and therefore the one target that is
+    always under the cursor. A card that lists itself can always be played.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.db = engine.CardDB.from_directory(CARD_DIR)
+        cls.rules = effects.rules_for(cls.db)
+
+    def _match_with_trainer(self):
+        """A set-up match holding a Trainer the engine can actually resolve.
+
+        An unimplemented Trainer is never offered at all - "blank beats
+        wrong" - so the fixture has to pick one out of rules.trainer_effects
+        or it proves nothing.
+        """
+        basic = next(c for c in self.db
+                     if c.is_pokemon and c.stage == "Basic" and c.attacks)
+        energy = next(c for c in self.db
+                      if c.is_basic_energy and c.energy_options)
+        trainer = next(c for c in self.db
+                       if c.guid in self.rules.trainer_effects)
+        deck = ([basic.guid] * 20 + [energy.guid] * 20
+                + [trainer.guid] * 20)
+        for seed in range(200):
+            m = match.Match("drop-1", ["acct-a", "acct-b"], self.db,
+                            [deck, list(deck)], seed=seed, rules=self.rules)
+            m.serialized_state(predeal=True)
+            m.auto_setup()
+            body, _decode = m.build_offer(0, 1)
+            rows = [r for r in body["targetMap"]
+                    if r["selectableAction"]["description"] == "TrainerCard"]
+            if rows:
+                return m, rows
+        raise AssertionError("no seed produced a playable Trainer in hand")
+
+    def test_a_trainer_can_be_dropped_on_itself(self):
+        """dragEnded falls back to the card, so the card must be a target."""
+        _m, rows = self._match_with_trainer()
+        for row in rows:
+            targets = {t for info in row["targetInfoLst"]
+                       for t in info["validTargets"]}
+            self.assertIn(
+                row["entityID"], targets,
+                "a Trainer that does not list its own entity can only be "
+                "played by dropping it on some other exact spot")
+
+    def test_a_trainer_offers_more_than_the_discard_pile(self):
+        """The discard alone is a spot no player aims at."""
+        m, rows = self._match_with_trainer()
+        discard = m.pile[(0, match.ZONE_DISCARD)]
+        for row in rows:
+            targets = {t for info in row["targetInfoLst"]
+                       for t in info["validTargets"]}
+            self.assertTrue(
+                targets - {discard},
+                "the discard pile is the only place this Trainer may be "
+                "dropped, which is the freeze this test exists for")
+
+    def test_a_trainer_may_be_dropped_on_the_trainer_zone(self):
+        """activeTrainer is where a played Trainer belongs on the mat."""
+        m, rows = self._match_with_trainer()
+        zone = m.playmat_zone.get("activeTrainer")
+        self.assertIsNotNone(zone, "the playmat has no activeTrainer area")
+        for row in rows:
+            targets = {t for info in row["targetInfoLst"]
+                       for t in info["validTargets"]}
+            self.assertIn(zone, targets)
+
+    def test_the_hand_is_never_a_drop_target(self):
+        """Dropping a card back among the others has to still cancel."""
+        m, rows = self._match_with_trainer()
+        hand = m.pile[(0, match.ZONE_HAND)]
+        for row in rows:
+            targets = {t for info in row["targetInfoLst"]
+                       for t in info["validTargets"]}
+            self.assertNotIn(hand, targets,
+                             "the hand as a target makes putting a card back "
+                             "play it")
+
+    def test_every_trainer_target_decodes_to_the_same_action(self):
+        """Generosity is only safe while there is nothing to get wrong."""
+        m, _rows = self._match_with_trainer()
+        body, decode = m.build_offer(0, 1)
+        for row in body["targetMap"]:
+            if row["selectableAction"]["description"] != "TrainerCard":
+                continue
+            key = (row["entityID"], row["selectableAction"]["actionID"])
+            actions = set(id(a) for a in decode[key].values())
+            self.assertEqual(len(actions), 1,
+                             "one Trainer row maps to several actions, so a "
+                             "drop could pick the wrong one")
 
 
 class SetupSelectionTests(unittest.TestCase):
@@ -1400,7 +1513,6 @@ class ChangeCoverageTests(unittest.TestCase):
         "modifier": "continuous effects have no card movement to show",
         "mulligan": "shown by mulligan_items as a MulliganRevealCardsEffect",
         "coinFlip": "in-effect flips ride along with the effect that caused them",
-        "evolve": "the card's own CHANGE_MOVE from hand to the slot animates it",
     }
 
     def test_every_change_kind_is_accounted_for(self):

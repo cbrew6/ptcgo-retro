@@ -690,6 +690,26 @@ class Match:
         attached = {c.card for c in changes
                     if c.kind == engine.CHANGE_ATTACH and c.card is not None}
 
+        # Evolving emits the same two-changes-one-card shape: a CHANGE_MOVE
+        # from the hand into the slot's ZONE, and a CHANGE_EVOLVE that knows
+        # which card is underneath. The move alone sends the evolution to the
+        # AREA, which makes it a SIBLING of the Basic - both cards laid out
+        # side by side in the Active slot, which is "evolution Pokemon sit on
+        # top of the basic they evolved from".
+        #
+        # _change_evolve owns the beat instead, because only it knows the
+        # card below. Nesting is not cosmetic: the client derives a move's
+        # motion from GetLocationNameFor(destination), which appends
+        # "Attachment" exactly when the destination's own parent is a Pokemon
+        # CARD. With nothing ever nested, no entity on our board ever
+        # satisfied that, so every attach resolved to a location name with no
+        # attach row behind it and picked a wrong prefab - P1_abilitySelect
+        # _active for the Active, which lifts the card and slides the Energy
+        # in behind it. That is the animation reported as wrong from the
+        # start, and renaming the sequence never touched it.
+        evolving = {c.card for c in changes
+                    if c.kind == engine.CHANGE_EVOLVE and c.card is not None}
+
         def flush_kos():
             """A knockout and the cards it takes out of play, as one sequence.
 
@@ -851,6 +871,9 @@ class Match:
         for change in changes:
             if (change.kind == engine.CHANGE_MOVE
                     and change.card in attached):
+                continue
+            if (change.kind == engine.CHANGE_MOVE
+                    and change.card in evolving):
                 continue
             if (change.kind == engine.CHANGE_MOVE
                     and change.player in retreating
@@ -1041,6 +1064,33 @@ class Match:
         return [("seq", "AttachEnergy",
                  [("msg",) + self._introduce_msg(change.card),
                   ("msg",) + self._move_msg(change.card, target)])]
+
+    def _change_evolve(self, change):
+        """The evolution lands on top of the card it evolves from.
+
+        detail["from"] is that card - the engine records it because the slot
+        stack has already been pushed by the time this is read, so the card
+        below cannot be recovered from the slot afterwards.
+
+        Naming it as the destination is what nests the stack: EntityMoved
+        re-parents into its destination, the same mechanism that makes Energy
+        attachment structural. The Basic then sits UNDER the evolution the way
+        the real game shows it, rather than beside it in the area.
+
+        Wrapped in PlayCard, which is the sequence a card coming out of the
+        hand onto the board uses; there are no evolve-keyed rows in the motion
+        table, so the flight itself is chosen by the From/To frames as before.
+        """
+        if change.card is None:
+            return []
+        previous = (change.detail or {}).get("from")
+        if previous is None:
+            return []
+        destination = self.eid(previous)
+        if destination is None:
+            return []
+        return [("seq", "PlayCard",
+                 [("msg",) + self._move_msg(change.card, destination)])]
 
     def _change_attack(self, change):
         """Remembered, not sent.
@@ -2012,11 +2062,46 @@ class Match:
             self._offer_group(rows, decode, target, ACTION_PROMOTE,
                               "Promote", "Ability", {target: action})
         for card, action in trainer.items():
-            # A Trainer names no target when it is played; anything it needs to
-            # know it asks for afterwards, as a Choice.
+            # A Trainer names no target when it is played - anything it needs
+            # to know it asks for afterwards, as a Choice - but "names no
+            # target" is not "needs no drop zone". A row's targets ARE the
+            # places the card may be dropped, and this used to offer exactly
+            # one: the player's own discard pile. So the only way to play a
+            # Trainer was to drag it precisely onto the discard. Dropping it
+            # anywhere a player actually aims - the middle of the mat, the
+            # Active, the Trainer zone - matched no target, resolved nothing,
+            # snapped the card back, and read as "the game freezes on play".
+            #
+            # It hit every Trainer in every deck, which is exactly why it
+            # looked like a card-effect bug: N, Colress and Team Plasma Ball
+            # were each reported separately and each had its effect reread
+            # before the offer itself was suspected. The effects were fine.
+            # The tell in the log is that the client never sent a PlayTrainer
+            # at all - the freeze was BEFORE the reply, not after it.
+            #
+            # match_client.py never saw it because it picks a target out of
+            # validTargets, so it always aimed at the discard and always
+            # succeeded: 25 Trainers a game, green, throughout.
+            #
+            # PlayBasic solves the same problem the same way, just above.
+            # Being generous cannot pick the wrong move here - a Trainer
+            # offers exactly one Action, so every target maps to the same
+            # thing. The HAND is deliberately not a target, so dropping the
+            # card back among the others still cancels.
+            spots = {
+                self.pile.get((player, ZONE_DISCARD)): action,
+                self.playmat_zone.get("activeTrainer"): action,
+                self.playmat_zone.get(ZONE_STADIUM): action,
+                self.playmat_id: action,
+                self.eid(card): action,
+                self.pile.get((player, ZONE_ACTIVE)): action,
+                self.pile.get((player, ZONE_BENCH)): action,
+            }
+            for entity in self.own_pokemon_entities(player):
+                if entity:
+                    spots[entity] = action
             self._offer_group(rows, decode, self.eid(card), ACTION_TRAINER,
-                              "TrainerCard", "Ability",
-                              {self.pile.get((player, ZONE_DISCARD)): action})
+                              "TrainerCard", "Ability", spots)
         for card, by_target in tool.items():
             self._offer_group(rows, decode, self.eid(card), ACTION_TOOL,
                               "PlayTool", "Ability", by_target,
