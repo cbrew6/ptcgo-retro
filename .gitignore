@@ -35,3 +35,9 @@ donor/
 # Browsable-only card records, generated from bundle names + the donor caches.
 # Regenerate with: python tools/build_collection_pool.py --apply
 carddata_browse/
+
+# Private outreach drafts and correspondence with named third parties.
+# These quote a real person's informal replies and were never theirs to
+# publish. Kept locally, never committed.
+docs/email-to-devs.md
+docs/reply-to-*.md
