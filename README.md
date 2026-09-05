@@ -262,6 +262,20 @@ direction, and how, is written up in **[docs/INTEROP.md](docs/INTEROP.md)**.
 
 ---
 
+## Licence
+
+**GNU General Public License v3.0** — see [LICENSE](LICENSE).
+
+Copyright (C) 2026 cbrew6.
+
+You may use, study, modify and redistribute this. If you distribute it, or
+anything built on it, you must ship the source and licence that work under the
+GPL-3.0 as well. It is deliberately the same licence as
+[Spirit-PTCGO](https://github.com/Bratah123/Spirit-PTCGO), so code can move
+between the two projects with no compatibility work.
+
+---
+
 ## Scope
 
 This is a preservation project for a game that no longer has servers. It
